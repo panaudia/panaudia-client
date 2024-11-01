@@ -1,0 +1,33 @@
+{
+    "name": "panaudia-sdk",
+    "version": "1.0.0",
+    "description": "Panaudia client SDK",
+    "files": [
+        "dist"
+    ],
+    "main": "dist/panaudia-sdk.js",
+    "types": "dist/panaudia-sdk.d.ts",
+    "scripts": {
+        "dev": "vite",
+        "build": "vite build",
+        "preview": "vite preview",
+        "test": "vitest"
+    },
+    "repository": {
+        "type": "git",
+        "url": "git+https://github.com/panaudia/panaudia-js-sdk.git"
+    },
+    "author": "paul@glowinthedark.co.uk",
+    "license": "MIT",
+    "bugs": {
+        "url": "https://github.com/panaudia/panaudia-js-sdk/issues"
+    },
+    "homepage": "https://github.com/panaudia/panaudia-js-sdk#readme",
+    "devDependencies": {
+        "prettier": "3.2.5",
+        "vite": "^5.2.11",
+        "vite-plugin-dts": "^4.2.4",
+        "vitest": "^1.6.0"
+    },
+    "sideEffects": false
+}

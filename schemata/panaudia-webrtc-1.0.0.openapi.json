@@ -1,0 +1,304 @@
+{
+    "openapi": "3.0.0",
+    "info": {
+        "title": "Panaudia WS/WebRTC API V1",
+        "version": "1.0",
+        "description": "Panaudia's WS/WebRTC API for our hosted cloud mixers.",
+        "termsOfService": "https://panaudia.com/terms",
+        "contact": {
+            "name": "Panaudia Support",
+            "url": "https://panaudia.com/license",
+            "email": "paul@glowinthedark.co.uk"
+        }
+    },
+    "servers": [
+        {
+            "url": "wss://{subdomain}.panaudia.com",
+            "description": "Panaudia Space Servers",
+            "variables": {
+                "subdomain": {
+                    "enum": [
+                        "eems",
+                        "iowa"
+                    ],
+                    "default": "eems"
+                }
+            }
+        }
+    ],
+    "paths": {
+        "/join": {
+            "get": {
+                "tags": [
+                    "Connect"
+                ],
+                "security": [
+                    {
+                        "ticket": []
+                    }
+                ],
+                "summary": "Join a Panaudia Space",
+                "description": "Join a Panaudia Space",
+                "operationId": "join",
+                "parameters": [
+                    {
+                        "name": "ticket",
+                        "in": "query",
+                        "description": "A JWT token whose payload matches #/components/schemas/ticket",
+                        "required": true,
+                        "schema": {
+                            "type": "string"
+                        }
+                    }
+                ]
+            }
+        }
+    },
+    "components": {
+        "securitySchemes": {
+            "ticket": {
+                "type": "http",
+                "scheme": "Bearer",
+                "description": "The ticket JWT token is here in the query due to the limitations of authentication in the way WebRTC works. It's ugly but secure over TLS.",
+                "in": "query",
+                "name": "ticket",
+                "bearerFormat": "#/components/schemas/ticket"
+            }
+        },
+        "responses": {
+            "error400": {
+                "description": "Bad Request",
+                "content": {
+                    "application/json": {
+                        "schema": {
+                            "type": "object",
+                            "properties": {
+                                "status": {
+                                    "enum": [
+                                        400
+                                    ]
+                                },
+                                "error": {
+                                    "enum": [
+                                        "Bad Request"
+                                    ]
+                                },
+                                "reason": {
+                                    "type": "string"
+                                }
+                            }
+                        }
+                    }
+                }
+            },
+            "error401": {
+                "description": "Unauthorized",
+                "content": {
+                    "application/json": {
+                        "schema": {
+                            "type": "object",
+                            "properties": {
+                                "status": {
+                                    "enum": [
+                                        401
+                                    ]
+                                },
+                                "error": {
+                                    "enum": [
+                                        "Unauthorized"
+                                    ]
+                                },
+                                "reason": {
+                                    "type": "string"
+                                }
+                            }
+                        }
+                    }
+                }
+            },
+            "error402": {
+                "description": "Payment Required",
+                "content": {
+                    "application/json": {
+                        "schema": {
+                            "type": "object",
+                            "properties": {
+                                "status": {
+                                    "enum": [
+                                        402
+                                    ]
+                                },
+                                "error": {
+                                    "enum": [
+                                        "Payment Required"
+                                    ]
+                                },
+                                "reason": {
+                                    "type": "string"
+                                }
+                            }
+                        }
+                    }
+                }
+            },
+            "error403": {
+                "description": "Forbidden",
+                "content": {
+                    "application/json": {
+                        "schema": {
+                            "type": "object",
+                            "properties": {
+                                "status": {
+                                    "enum": [
+                                        403
+                                    ]
+                                },
+                                "error": {
+                                    "enum": [
+                                        "Forbidden"
+                                    ]
+                                },
+                                "reason": {
+                                    "type": "string"
+                                }
+                            }
+                        }
+                    }
+                }
+            },
+            "error404": {
+                "description": "Not Found",
+                "content": {
+                    "application/json": {
+                        "schema": {
+                            "type": "object",
+                            "properties": {
+                                "status": {
+                                    "enum": [
+                                        404
+                                    ]
+                                },
+                                "error": {
+                                    "enum": [
+                                        "Not Found"
+                                    ]
+                                },
+                                "reason": {
+                                    "type": "string"
+                                }
+                            }
+                        }
+                    }
+                }
+            },
+            "error409": {
+                "description": "Conflict",
+                "content": {
+                    "application/json": {
+                        "schema": {
+                            "type": "object",
+                            "properties": {
+                                "status": {
+                                    "enum": [
+                                        409
+                                    ]
+                                },
+                                "error": {
+                                    "enum": [
+                                        "Conflict"
+                                    ]
+                                },
+                                "reason": {
+                                    "type": "string"
+                                }
+                            }
+                        }
+                    }
+                }
+            },
+            "error429": {
+                "description": "Too Many Requests",
+                "content": {
+                    "application/json": {
+                        "schema": {
+                            "type": "object",
+                            "properties": {
+                                "status": {
+                                    "enum": [
+                                        429
+                                    ]
+                                },
+                                "error": {
+                                    "enum": [
+                                        "Too Many Requests"
+                                    ]
+                                },
+                                "reason": {
+                                    "type": "string"
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        },
+        "schemas": {
+            "ticket": {
+                "$schema": "http://json-schema.org/draft-07/schema#",
+                "$id": "https://panaudia.com/schemata/token.json",
+                "title": "Panaudia Token Schema",
+                "type": "object",
+                "additionalProperties": false,
+                "required": [
+                    "iss",
+                    "iat",
+                    "jti",
+                    "preferred_username",
+                    "aud"
+                ],
+                "properties": {
+                    "iss": {
+                        "type": "string"
+                    },
+                    "jti": {
+                        "type": "string"
+                    },
+                    "aud": {
+                        "type": "string"
+                    },
+                    "preferred_username": {
+                        "type": "string"
+                    },
+                    "exp": {
+                        "type": "integer"
+                    },
+                    "nbf": {
+                        "type": "integer"
+                    },
+                    "iat": {
+                        "type": "integer"
+                    },
+                    "panaudia": {
+                        "type": "object",
+                        "additionalProperties": false,
+                        "properties": {
+                            "attenuation": {
+                                "type": "number",
+                                "maximum": 3.0,
+                                "minimum": 0.0
+                            },
+                            "gain": {
+                                "type": "number",
+                                "maximum": 3.0,
+                                "minimum": 0.0
+                            },
+                            "attrs": {
+                                "type": "object"
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+}

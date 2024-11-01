@@ -1,0 +1,56 @@
+{
+    "$schema": "http://json-schema.org/draft-07/schema#",
+    "$id": "https://panaudia.com/schemata/token.json",
+    "title": "Panaudia Token Schema",
+    "type": "object",
+    "additionalProperties": false,
+    "required": [
+        "iss",
+        "iat",
+        "jti",
+        "preferred_username",
+        "aud"
+    ],
+    "properties": {
+        "iss": {
+            "type": "string"
+        },
+        "jti": {
+            "type": "string"
+        },
+        "aud": {
+            "type": "string"
+        },
+        "preferred_username": {
+            "type": "string"
+        },
+        "exp": {
+            "type": "integer"
+        },
+        "nbf": {
+            "type": "integer"
+        },
+        "iat": {
+            "type": "integer"
+        },
+        "panaudia": {
+            "type": "object",
+            "additionalProperties": false,
+            "properties": {
+                "attenuation": {
+                    "type": "number",
+                    "maximum": 3.0,
+                    "minimum": 0.0
+                },
+                "gain": {
+                    "type": "number",
+                    "maximum": 3.0,
+                    "minimum": 0.0
+                },
+                "attrs": {
+                    "type": "object"
+                }
+            }
+        }
+    }
+}

@@ -1,0 +1,1084 @@
+{
+    "openapi": "3.0.0",
+    "info": {
+        "title": "Panaudia Spaces API V1",
+        "version": "1.0",
+        "description": "Panaudia's Spaces API for our hosted cloud mixers.",
+        "termsOfService": "https://panaudia.com/terms",
+        "contact": {
+            "name": "Panaudia Support",
+            "url": "https://panaudia.com/license",
+            "email": "paul@glowinthedark.co.uk"
+        }
+    },
+    "servers": [
+        {
+            "url": "https://panaudia.com/shapes/v1"
+        }
+    ],
+    "paths": {
+        "/ping": {
+            "get": {
+                "tags": [
+                    "Auth"
+                ],
+                "summary": "An unauthenticated ping endpoint",
+                "description": "An unauthenticated endpoint that just says pong back to you. Useful for testing and liveness",
+                "operationId": "ping",
+                "responses": {
+                    "200": {
+                        "description": "Returns pong",
+                        "content": {
+                            "application/json": {
+                                "schema": {
+                                    "type": "string",
+                                    "pattern": "pong"
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        },
+        "/permissions": {
+            "get": {
+                "tags": [
+                    "Auth"
+                ],
+                "security": [
+                    {
+                        "basicAuth": []
+                    }
+                ],
+                "summary": "API Key permissions",
+                "description": "This will give you the read/write permissions for the API Key that you used to authenticate",
+                "operationId": "permissions",
+                "responses": {
+                    "200": {
+                        "description": "Returns the permissions for the API Key",
+                        "content": {
+                            "application/json": {
+                                "schema": {
+                                    "type": "object",
+                                    "properties": {
+                                        "api_key": {
+                                            "$ref": "#/components/schemas/api_key"
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                    },
+                    "401": {
+                        "$ref": "#/components/responses/error401"
+                    }
+                }
+            }
+        },
+        "/projects": {
+            "get": {
+                "tags": [
+                    "Projects"
+                ],
+                "security": [
+                    {
+                        "basicAuth": []
+                    }
+                ],
+                "summary": "Get a list of Projects",
+                "description": "This will return a list of Projects that can be accessed with the current API Key.\n\nYou can optionally filter which Projects you want by the Projects' status.\n",
+                "operationId": "getApiKeyProjects",
+                "parameters": [
+                    {
+                        "name": "status",
+                        "in": "query",
+                        "description": "Optionally filter on the status of the projects",
+                        "required": false,
+                        "schema": {
+                            "enum": [
+                                "active",
+                                "archived"
+                            ]
+                        }
+                    }
+                ],
+                "responses": {
+                    "200": {
+                        "description": "A list of the Projects that your API Key can access",
+                        "content": {
+                            "application/json": {
+                                "schema": {
+                                    "type": "object",
+                                    "properties": {
+                                        "projects": {
+                                            "type": "array",
+                                            "items": {
+                                                "$ref": "#/components/schemas/project"
+                                            }
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                    },
+                    "400": {
+                        "$ref": "#/components/responses/error400"
+                    },
+                    "401": {
+                        "$ref": "#/components/responses/error401"
+                    },
+                    "403": {
+                        "$ref": "#/components/responses/error403"
+                    },
+                    "404": {
+                        "$ref": "#/components/responses/error404"
+                    }
+                }
+            }
+        },
+        "/projects/{project-id}": {
+            "get": {
+                "tags": [
+                    "Projects"
+                ],
+                "security": [
+                    {
+                        "basicAuth": []
+                    }
+                ],
+                "summary": "Get a single Project",
+                "description": "This will return a single Project",
+                "operationId": "getProject",
+                "parameters": [
+                    {
+                        "name": "project-id",
+                        "in": "path",
+                        "description": "The ID of the Project you want",
+                        "required": true,
+                        "schema": {
+                            "type": "string"
+                        }
+                    }
+                ],
+                "responses": {
+                    "200": {
+                        "description": "A Project",
+                        "content": {
+                            "application/json": {
+                                "schema": {
+                                    "type": "object",
+                                    "properties": {
+                                        "projects": {
+                                            "type": "array",
+                                            "maxItems": 1,
+                                            "minItems": 1,
+                                            "items": {
+                                                "$ref": "#/components/schemas/project"
+                                            }
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                    },
+                    "401": {
+                        "$ref": "#/components/responses/error401"
+                    },
+                    "403": {
+                        "$ref": "#/components/responses/error403"
+                    },
+                    "404": {
+                        "$ref": "#/components/responses/error404"
+                    }
+                }
+            }
+        },
+        "/projects/{project-id}/spaces": {
+            "get": {
+                "tags": [
+                    "Spaces"
+                ],
+                "security": [
+                    {
+                        "basicAuth": []
+                    }
+                ],
+                "summary": "Get a list of Spaces for a Project",
+                "description": "Manage the Spaces for a Project",
+                "operationId": "projectSpaces",
+                "parameters": [
+                    {
+                        "name": "project-id",
+                        "in": "path",
+                        "description": "The ID of the Project",
+                        "required": true,
+                        "schema": {
+                            "type": "string"
+                        }
+                    },
+                    {
+                        "name": "status",
+                        "in": "query",
+                        "description": "The status of the Spaces",
+                        "required": false,
+                        "schema": {
+                            "type": "string"
+                        }
+                    }
+                ],
+                "responses": {
+                    "200": {
+                        "description": "The spaces for a Project.",
+                        "content": {
+                            "application/json": {
+                                "schema": {
+                                    "type": "object",
+                                    "properties": {
+                                        "spaces": {
+                                            "type": "array",
+                                            "items": {
+                                                "$ref": "#/components/schemas/space"
+                                            }
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                    },
+                    "401": {
+                        "$ref": "#/components/responses/error401"
+                    },
+                    "403": {
+                        "$ref": "#/components/responses/error403"
+                    },
+                    "404": {
+                        "$ref": "#/components/responses/error404"
+                    }
+                }
+            },
+            "post": {
+                "tags": [
+                    "Spaces"
+                ],
+                "security": [
+                    {
+                        "basicAuth": []
+                    }
+                ],
+                "summary": "Add a new Space to a Project",
+                "description": "##### Adding a new Space to a Project.\n\nTo add a Space you must at least provide:\n\n- `name` - A human readable name for the Space.\n- `start_time` - An RFC 3339 timestamp for when you want the Space to start.\n- `duration_minutes` - A integer giving the desired duration of the Space between 15 and 1440.\n- `region` - One of our active region names. Currently `Netherlands` or `Iowa`, pick the one nearest your users.\n- `capacity` - `10`, `25`, `50`, `100`, `250` or `500`.\n- `size` - The size on the virtual space in meters, between 10 and 1000.\n\n##### Booking the Space and payment\n\nWhen this Space has been added you will get back details of the configured Space including `total_price` giving the price for the Space\nincluding any discount and any tax due. Panaudia will wait ten minutes and then book the Space, reserving any necessary resources and \nprocessing your payment. If you add a Space less than ten minutes before its start time Panaudia will book the Space immediately.\n\nYou can check the current status of a Space by calling the `/spaces/{space-id}` endpoint.\n\n##### Start time and duration\n\nYou must provide a `start_time` for the space, if you give the current time, or a time in the past, the Space will start up as soon as possible, \notherwise the Space will start up automatically at the given time.\n\nYou must also provide a `duration` for the Space in minutes.\n\n##### Providing your own Public Key\n\nBy default Panaudia will automatically generate a new Public/Private key for each Space, \nand then use the Private Key to create and sign Tickets and the Public Key to check them when users join a Space.\nIf you would prefer to create and sign tickets yourself you need to provide `public_key`.\nThere are details on this process in our docs.\n\n",
+                "operationId": "addNewSpace",
+                "parameters": [
+                    {
+                        "name": "project-id",
+                        "in": "path",
+                        "description": "The ID of the Project",
+                        "required": true,
+                        "schema": {
+                            "type": "string"
+                        }
+                    }
+                ],
+                "requestBody": {
+                    "content": {
+                        "application/json": {
+                            "schema": {
+                                "type": "object",
+                                "required": [
+                                    "name",
+                                    "start_time",
+                                    "end_time",
+                                    "end_time",
+                                    "region",
+                                    "capacity",
+                                    "size"
+                                ],
+                                "additionalProperties": false,
+                                "properties": {
+                                    "name": {
+                                        "$ref": "#/components/schemas/space/properties/name"
+                                    },
+                                    "start_time": {
+                                        "$ref": "#/components/schemas/space/properties/start_time"
+                                    },
+                                    "region": {
+                                        "$ref": "#/components/schemas/space/properties/region"
+                                    },
+                                    "capacity": {
+                                        "$ref": "#/components/schemas/space/properties/capacity"
+                                    },
+                                    "size": {
+                                        "$ref": "#/components/schemas/space/properties/size"
+                                    },
+                                    "description": {
+                                        "$ref": "#/components/schemas/space/properties/description"
+                                    },
+                                    "duration_minutes": {
+                                        "$ref": "#/components/schemas/space/properties/duration_minutes"
+                                    },
+                                    "public_key": {
+                                        "$ref": "#/components/schemas/space/properties/public_key"
+                                    }
+                                }
+                            }
+                        }
+                    }
+                },
+                "responses": {
+                    "201": {
+                        "description": "The details of the newly created Space.",
+                        "content": {
+                            "application/json": {
+                                "schema": {
+                                    "type": "object",
+                                    "properties": {
+                                        "spaces": {
+                                            "type": "array",
+                                            "maxItems": 1,
+                                            "minItems": 1,
+                                            "items": {
+                                                "$ref": "#/components/schemas/space"
+                                            }
+                                        }
+                                    },
+                                    "required": [
+                                        "spaces"
+                                    ]
+                                }
+                            }
+                        }
+                    },
+                    "400": {
+                        "$ref": "#/components/responses/error400"
+                    },
+                    "401": {
+                        "$ref": "#/components/responses/error401"
+                    },
+                    "402": {
+                        "$ref": "#/components/responses/error402"
+                    },
+                    "403": {
+                        "$ref": "#/components/responses/error403"
+                    },
+                    "404": {
+                        "$ref": "#/components/responses/error404"
+                    }
+                }
+            }
+        },
+        "/spaces/{space-id}": {
+            "get": {
+                "tags": [
+                    "Spaces"
+                ],
+                "security": [
+                    {
+                        "basicAuth": []
+                    }
+                ],
+                "summary": "Get a single Space",
+                "description": "This will return a single Space",
+                "operationId": "getSpace",
+                "parameters": [
+                    {
+                        "name": "space-id",
+                        "in": "path",
+                        "description": "The ID of the Space you want",
+                        "required": true,
+                        "schema": {
+                            "type": "string"
+                        }
+                    }
+                ],
+                "responses": {
+                    "200": {
+                        "description": "A Space",
+                        "content": {
+                            "application/json": {
+                                "schema": {
+                                    "type": "object",
+                                    "properties": {
+                                        "projects": {
+                                            "type": "array",
+                                            "maxItems": 1,
+                                            "minItems": 1,
+                                            "items": {
+                                                "$ref": "#/components/schemas/space"
+                                            }
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                    },
+                    "401": {
+                        "$ref": "#/components/responses/error401"
+                    },
+                    "403": {
+                        "$ref": "#/components/responses/error403"
+                    },
+                    "404": {
+                        "$ref": "#/components/responses/error404"
+                    }
+                }
+            },
+            "delete": {
+                "tags": [
+                    "Spaces"
+                ],
+                "security": [
+                    {
+                        "basicAuth": []
+                    }
+                ],
+                "summary": "Delete a Space",
+                "description": "After adding a Space to a project you can choose to delete it until Panaudia starts booking the Space for you,\nthis usually happens ten minutes after adding it. This allows you to check the configured Space's details including the `total_price` \nand to cancel if you are unhappy with any of the configuration.\n        ",
+                "operationId": "deleteSpace",
+                "parameters": [
+                    {
+                        "name": "space-id",
+                        "in": "path",
+                        "description": "The ID of the Space you want to delete",
+                        "required": true,
+                        "schema": {
+                            "type": "string"
+                        }
+                    }
+                ],
+                "responses": {
+                    "204": {
+                        "description": "The Space has been deleted"
+                    },
+                    "401": {
+                        "$ref": "#/components/responses/error401"
+                    },
+                    "403": {
+                        "$ref": "#/components/responses/error403"
+                    },
+                    "404": {
+                        "$ref": "#/components/responses/error404"
+                    },
+                    "409": {
+                        "$ref": "#/components/responses/error409"
+                    }
+                }
+            }
+        },
+        "/spaces/{space-id}/tickets": {
+            "post": {
+                "tags": [
+                    "Spaces"
+                ],
+                "security": [
+                    {
+                        "basicAuth": []
+                    }
+                ],
+                "summary": "Create a ticket for a Space",
+                "description": "This will create a Ticket in the form of a signed JWT for the given Space.",
+                "operationId": "createATicket",
+                "parameters": [
+                    {
+                        "name": "space-id",
+                        "in": "path",
+                        "description": "The ID of the Space you want a ticket for",
+                        "required": true,
+                        "schema": {
+                            "type": "string"
+                        }
+                    }
+                ],
+                "requestBody": {
+                    "content": {
+                        "application/json": {
+                            "schema": {
+                                "$ref": "#/components/schemas/ticket_request"
+                            }
+                        }
+                    }
+                },
+                "responses": {
+                    "201": {
+                        "description": "A Ticket for the Space",
+                        "content": {
+                            "application/json": {
+                                "schema": {
+                                    "type": "object",
+                                    "properties": {
+                                        "ticket": {
+                                            "$ref": "#/components/schemas/ticket"
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                    },
+                    "401": {
+                        "$ref": "#/components/responses/error401"
+                    },
+                    "403": {
+                        "$ref": "#/components/responses/error403"
+                    },
+                    "404": {
+                        "$ref": "#/components/responses/error404"
+                    }
+                }
+            }
+        }
+    },
+    "components": {
+        "securitySchemes": {
+            "basicAuth": {
+                "type": "http",
+                "scheme": "basic",
+                "in": "header",
+                "name": "Authorization"
+            }
+        },
+        "responses": {
+            "error400": {
+                "description": "Bad Request",
+                "content": {
+                    "application/json": {
+                        "schema": {
+                            "type": "object",
+                            "properties": {
+                                "status": {
+                                    "enum": [
+                                        400
+                                    ]
+                                },
+                                "error": {
+                                    "enum": [
+                                        "Bad Request"
+                                    ]
+                                },
+                                "reason": {
+                                    "type": "string"
+                                }
+                            }
+                        }
+                    }
+                }
+            },
+            "error401": {
+                "description": "Unauthorized",
+                "content": {
+                    "application/json": {
+                        "schema": {
+                            "type": "object",
+                            "properties": {
+                                "status": {
+                                    "enum": [
+                                        401
+                                    ]
+                                },
+                                "error": {
+                                    "enum": [
+                                        "Unauthorized"
+                                    ]
+                                },
+                                "reason": {
+                                    "type": "string"
+                                }
+                            }
+                        }
+                    }
+                }
+            },
+            "error402": {
+                "description": "Payment Required",
+                "content": {
+                    "application/json": {
+                        "schema": {
+                            "type": "object",
+                            "properties": {
+                                "status": {
+                                    "enum": [
+                                        402
+                                    ]
+                                },
+                                "error": {
+                                    "enum": [
+                                        "Payment Required"
+                                    ]
+                                },
+                                "reason": {
+                                    "type": "string"
+                                }
+                            }
+                        }
+                    }
+                }
+            },
+            "error403": {
+                "description": "Forbidden",
+                "content": {
+                    "application/json": {
+                        "schema": {
+                            "type": "object",
+                            "properties": {
+                                "status": {
+                                    "enum": [
+                                        403
+                                    ]
+                                },
+                                "error": {
+                                    "enum": [
+                                        "Forbidden"
+                                    ]
+                                },
+                                "reason": {
+                                    "type": "string"
+                                }
+                            }
+                        }
+                    }
+                }
+            },
+            "error404": {
+                "description": "Not Found",
+                "content": {
+                    "application/json": {
+                        "schema": {
+                            "type": "object",
+                            "properties": {
+                                "status": {
+                                    "enum": [
+                                        404
+                                    ]
+                                },
+                                "error": {
+                                    "enum": [
+                                        "Not Found"
+                                    ]
+                                },
+                                "reason": {
+                                    "type": "string"
+                                }
+                            }
+                        }
+                    }
+                }
+            },
+            "error409": {
+                "description": "Conflict",
+                "content": {
+                    "application/json": {
+                        "schema": {
+                            "type": "object",
+                            "properties": {
+                                "status": {
+                                    "enum": [
+                                        409
+                                    ]
+                                },
+                                "error": {
+                                    "enum": [
+                                        "Conflict"
+                                    ]
+                                },
+                                "reason": {
+                                    "type": "string"
+                                }
+                            }
+                        }
+                    }
+                }
+            },
+            "error429": {
+                "description": "Too Many Requests",
+                "content": {
+                    "application/json": {
+                        "schema": {
+                            "type": "object",
+                            "properties": {
+                                "status": {
+                                    "enum": [
+                                        429
+                                    ]
+                                },
+                                "error": {
+                                    "enum": [
+                                        "Too Many Requests"
+                                    ]
+                                },
+                                "reason": {
+                                    "type": "string"
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        },
+        "schemas": {
+            "panaudia_date_time": {
+                "type": "string",
+                "pattern": "^((?:(2[0-9]{3}-(0[1-9]|1[012])-(0[1-9]|[12][0-9]|3[01]))[Tt](([01][0-9]|2[0-3]):([0-5][0-9]):([0-5][0-9]|60)(?:\\.\\d{1,10})?))([Zz]|[\\+-]([01][0-9]|2[0-3]):[0-5][0-9])?)$"
+            },
+            "panaudia_string": {
+                "type": "string",
+                "minLength": 2,
+                "maxLength": 256
+            },
+            "panaudia_id": {
+                "type": "string",
+                "minLength": 2,
+                "maxLength": 256,
+                "pattern": "^(apikey|space|project|organisation)_[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$"
+            },
+            "panaudia_text": {
+                "type": "string",
+                "minLength": 2,
+                "maxLength": 1024
+            },
+            "panaudia_uuid": {
+                "type": "string",
+                "minLength": 36,
+                "maxLength": 36,
+                "pattern": "^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$"
+            },
+            "normalised_float": {
+                "type": "number",
+                "minimum": 0,
+                "maximum": 1
+            },
+            "api_key": {
+                "type": "object",
+                "properties": {
+                    "id": {
+                        "allOf": [
+                            {
+                                "$ref": "#/components/schemas/panaudia_id"
+                            },
+                            {
+                                "description": "The Panaudia ID for this API Key",
+                                "example": "apikey_7dc3d357-63f4-433b-b8cd-5b7cd6bee3aa"
+                            }
+                        ]
+                    },
+                    "name": {
+                        "allOf": [
+                            {
+                                "$ref": "#/components/schemas/panaudia_string"
+                            },
+                            {
+                                "description": "A human readable name for this API Key",
+                                "example": "Example API Key"
+                            }
+                        ]
+                    },
+                    "read": {
+                        "type": "boolean"
+                    },
+                    "write": {
+                        "type": "boolean"
+                    }
+                }
+            },
+            "ticket": {
+                "type": "string",
+                "example": "eyJhbGciOiJFZERTQSIsImNydiI6IkVkMjU1MTkiLCJ0eXAiOiJKV1QifQ.eyJpYXQiOjE3MjcyNzIxMTgsImlzcyI6InBhbmF1ZGlhLmNvbSIsImF1ZCI6InNwYWNlXzZmYzk3YjU0LTcwZjMtNDZmYy1hMjQyLWQyYzI1ZTYxNDcxMyIsImp0aSI6ImUxNmNhZGIxLWIzMGItNDgzZi05YTU2LWMyZDc2ZjgxNjE3MSIsInByZWZlcnJlZF91c2VybmFtZSI6InBhdWxoYXJ0ZXIifQ.0Iv_cJn5d42a7Yba-vapvjLlRHCuyHsVX2Eo8YlDYMYac1t-MYhIfeocqEhfzCPTZu8dSCl4A2yoEqax0VKTBw"
+            },
+            "ticket_request": {
+                "type": "object",
+                "required": [
+                    "name"
+                ],
+                "properties": {
+                    "uuid": {
+                        "allOf": [
+                            {
+                                "$ref": "#/components/schemas/panaudia_uuid"
+                            },
+                            {
+                                "description": "A unique UUID for this ticket. This is optional and if ommitted Pnaudia will automatically generate one.",
+                                "example": "7dc3d357-63f4-433b-b8cd-5b7cd6bee3aa"
+                            }
+                        ]
+                    },
+                    "name": {
+                        "allOf": [
+                            {
+                                "$ref": "#/components/schemas/panaudia_string"
+                            },
+                            {
+                                "description": "A human readable name for the bearer of this ticket",
+                                "example": "Paul"
+                            }
+                        ]
+                    },
+                    "not_before": {
+                        "allOf": [
+                            {
+                                "$ref": "#/components/schemas/panaudia_date_time"
+                            },
+                            {
+                                "example": "2024-12-03T10:00:00Z",
+                                "description": "A RFC 3339 timestamp. If given Panaudia will only accept a ticket after this time."
+                            }
+                        ]
+                    },
+                    "expires": {
+                        "allOf": [
+                            {
+                                "$ref": "#/components/schemas/panaudia_date_time"
+                            },
+                            {
+                                "example": "2024-12-03T12:00:00Z",
+                                "description": "A RFC 3339 timestamp. If given Panaudia will not accept a ticket after this time."
+                            }
+                        ]
+                    },
+                    "attenuation": {
+                        "description": "If given this will modify the way sound from the bearer of this ticket will attenuate with distance.\nThe default is 2.0 which represents the normal inverse square way volume attenuates with distance. \nThe maximum of 3.0 will cause volume to fall off faster (inverse cubed like magnetism) with distance, 1.0 will cause volume \nto decrease linearly with distance and 0.0 will keep the sound at full volume everywhere.\n                ",
+                        "type": "number",
+                        "maximum": 3.0,
+                        "minimum": 0.0,
+                        "example": 2.0
+                    },
+                    "gain": {
+                        "description": "",
+                        "type": "number",
+                        "maximum": 3.0,
+                        "minimum": 0.0,
+                        "example": 1.0
+                    },
+                    "attrs": {
+                        "description": "",
+                        "type": "object"
+                    }
+                }
+            },
+            "regions": {
+                "enum": [
+                    "Netherlands",
+                    "Iowa"
+                ]
+            },
+            "project": {
+                "type": "object",
+                "required": [
+                    "id",
+                    "name",
+                    "organisation_id",
+                    "status",
+                    "billing_status"
+                ],
+                "properties": {
+                    "id": {
+                        "allOf": [
+                            {
+                                "$ref": "#/components/schemas/panaudia_id"
+                            },
+                            {
+                                "description": "The Panaudia ID for this Project",
+                                "example": "project_7dc3d357-63f4-433b-b8cd-5b7cd6bee3aa"
+                            }
+                        ]
+                    },
+                    "name": {
+                        "allOf": [
+                            {
+                                "$ref": "#/components/schemas/panaudia_string"
+                            },
+                            {
+                                "description": "A human readable name for this Project",
+                                "example": "Example Project"
+                            }
+                        ]
+                    },
+                    "description": {
+                        "allOf": [
+                            {
+                                "$ref": "#/components/schemas/panaudia_text"
+                            },
+                            {
+                                "description": "An optional human readable description of this Project",
+                                "example": "An example Project."
+                            }
+                        ]
+                    },
+                    "organisation_id": {
+                        "allOf": [
+                            {
+                                "$ref": "#/components/schemas/panaudia_id"
+                            },
+                            {
+                                "description": "The Panaudia ID for this Projects's Organisation",
+                                "example": "organisation_b4c10ad4-8bb7-4df1-9d11-a90e2c7bd28a"
+                            }
+                        ]
+                    },
+                    "status": {
+                        "enum": [
+                            "active",
+                            "archived"
+                        ]
+                    },
+                    "billing_status": {
+                        "allOf": [
+                            {
+                                "$ref": "#/components/schemas/panaudia_string"
+                            },
+                            {
+                                "description": "The status of this Project's Billing Account",
+                                "example": "active"
+                            }
+                        ]
+                    }
+                }
+            },
+            "space": {
+                "type": "object",
+                "properties": {
+                    "id": {
+                        "allOf": [
+                            {
+                                "$ref": "#/components/schemas/panaudia_id"
+                            },
+                            {
+                                "description": "The Panaudia ID for this Space",
+                                "example": "space_7dc3d357-63f4-433b-b8cd-5b7cd6bee3aa"
+                            }
+                        ]
+                    },
+                    "name": {
+                        "allOf": [
+                            {
+                                "$ref": "#/components/schemas/panaudia_string"
+                            },
+                            {
+                                "description": "A human readable name for this Space",
+                                "example": "Example Space One"
+                            }
+                        ]
+                    },
+                    "description": {
+                        "allOf": [
+                            {
+                                "$ref": "#/components/schemas/panaudia_text"
+                            },
+                            {
+                                "description": "An optional human readable description of this Space",
+                                "example": "This is a very fine example Space."
+                            }
+                        ]
+                    },
+                    "project_id": {
+                        "allOf": [
+                            {
+                                "$ref": "#/components/schemas/panaudia_id"
+                            },
+                            {
+                                "description": "The Panaudia ID for this Space's project",
+                                "example": "project_b4c10ad4-8bb7-4df1-9d11-a90e2c7bd28a"
+                            }
+                        ]
+                    },
+                    "region": {
+                        "allOf": [
+                            {
+                                "$ref": "#/components/schemas/regions"
+                            },
+                            {
+                                "description": "The name of the region where this Space will be hosted. Cannot be changed close to or after the start time."
+                            }
+                        ]
+                    },
+                    "created": {
+                        "allOf": [
+                            {
+                                "$ref": "#/components/schemas/panaudia_date_time"
+                            },
+                            {
+                                "example": "2024-12-03T10:00:00Z",
+                                "description": "A RFC 3339 timestamp giving when the Space was created"
+                            }
+                        ]
+                    },
+                    "capacity": {
+                        "description": "The maximum number of simultaneous users of this space",
+                        "enum": [
+                            10,
+                            25,
+                            50,
+                            100,
+                            250,
+                            500
+                        ],
+                        "example": 128
+                    },
+                    "size": {
+                        "description": "Spaces are always cubes, this is the equivalent physical size of the space in meters. When you give x, y, z coordinates for users they are always normalised to the range 0.0 - 1.0, but this size dimension determines how we model the sound within the space.",
+                        "type": "integer",
+                        "maximum": 1000,
+                        "minimum": 10,
+                        "example": 100
+                    },
+                    "start_time": {
+                        "allOf": [
+                            {
+                                "$ref": "#/components/schemas/panaudia_date_time"
+                            },
+                            {
+                                "example": "2024-12-05T09:30:00Z",
+                                "description": "A RFC 3339 timestamp for when this Space will start. If this is in the past the Space will start as soon as possible."
+                            }
+                        ]
+                    },
+                    "end_time": {
+                        "allOf": [
+                            {
+                                "$ref": "#/components/schemas/panaudia_date_time"
+                            },
+                            {
+                                "example": "2024-12-05T10:30:00Z",
+                                "description": "A RFC 3339 timestamp for when this Space will end."
+                            }
+                        ]
+                    },
+                    "status": {
+                        "enum": [
+                            "configured",
+                            "booking",
+                            "booked",
+                            "active",
+                            "finished",
+                            "error"
+                        ]
+                    },
+                    "duration_minutes": {
+                        "type": "integer",
+                        "maximum": 1440,
+                        "minimum": 15,
+                        "example": 60
+                    },
+                    "total_price": {
+                        "allOf": [
+                            {
+                                "$ref": "#/components/schemas/panaudia_string"
+                            },
+                            {
+                                "description": "The total price for this Space including any discount and tax due.",
+                                "example": "12.29 GBP"
+                            }
+                        ]
+                    },
+                    "public_key": {
+                        "allOf": [
+                            {
+                                "$ref": "#/components/schemas/panaudia_text"
+                            },
+                            {
+                                "example": "-----BEGIN PUBLIC KEY-----\nMCowBQYDK2VwAyEA8gWcYikVd36AGFBDIgPRohe/qf3bzAyO2iTgz4148qQ=\n-----END PUBLIC KEY-----",
+                                "description": "If you want to create and sign your own tickets you must provide the public key that Panaudia will use to check the tickets you create. This must be an EdDSA Ed25519 public key in PEM format."
+                            }
+                        ]
+                    }
+                }
+            }
+        }
+    }
+}
