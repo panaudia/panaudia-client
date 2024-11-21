@@ -1,11 +1,9 @@
 import os
 from ticket_util import make_keys
 
-
 KEYS_PATH = "keys"
 PUBLIC_KEY_PATH = "%s/panaudia_key.pub" % KEYS_PATH
 PRIVATE_KEY_PATH = "%s/panaudia_key" % KEYS_PATH
-
 
 def public_key():
     _ensure_key_pair()

@@ -92,21 +92,23 @@ export function disconnect(): void {
 
 export function connect(
     ticket: string,
+    data: boolean,
     domParentId: string,
     position: Vec3,
     rotation: Vec3,
     attrs: { [key: string]: string } = {},
-    url: string = 'https://panaudia.com/entrance',
+    url: string = 'https://panaudia.com/gateway',
 ): void {
-    _connect(ticket, domParentId, position, rotation, attrs, url)
+    _connect(ticket, data, domParentId, position, rotation, attrs, url)
 }
 
 export function connectAmbisonic(
     ticket: string,
+    data: boolean,
     domParentId: string,
     coordinates: AmbisonicCoordinates,
     attrs: { [key: string]: string } = {},
-    url: string = 'https://panaudia.com/entrance',
+    url: string = 'https://panaudia.com/gateway',
 ): void {
-    _connectAmbisonic(ticket, domParentId, coordinates, attrs, url)
+    _connectAmbisonic(ticket, data, domParentId, coordinates, attrs, url)
 }

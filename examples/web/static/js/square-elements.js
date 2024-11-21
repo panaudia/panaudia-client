@@ -12,7 +12,7 @@ window.connectToSquareGateway = (playerId, url, ticket, inner_colour, outer_colo
         "inner_colour": inner_colour
     };
 
-    connect(ticket, "side", {x:0, y:0, z:0}, {x:0, y:0, z:0}, attrs, url);
+    connect(ticket, true, "side", {x:0, y:0, z:0}, {x:0, y:0, z:0}, attrs, url);
 }
 
 function skinTexture(team){
@@ -20,7 +20,7 @@ function skinTexture(team){
     if (existing !== undefined){
         return existing;
     } else {
-        const texture = new THREE.TextureLoader().load( "/static/examples/images/mask.png" );
+        const texture = new THREE.TextureLoader().load( "/static/images/mask.png" );
         texture.wrapS = THREE.RepeatWrapping;
         texture.wrapT = THREE.RepeatWrapping;
         texture.colorSpace = THREE.SRGBColorSpace;// or THREE.LinearSRGBColorSpace.

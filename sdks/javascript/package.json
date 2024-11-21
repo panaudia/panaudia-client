@@ -1,6 +1,6 @@
 {
     "name": "panaudia-sdk",
-    "version": "1.0.0",
+    "version": "1.0.2",
     "description": "Panaudia client SDK",
     "files": [
         "dist"
@@ -15,14 +15,14 @@
     },
     "repository": {
         "type": "git",
-        "url": "git+https://github.com/panaudia/panaudia-js-sdk.git"
+        "url": "git+https://github.com/panaudia/panaudia-client.git"
     },
     "author": "paul@glowinthedark.co.uk",
     "license": "MIT",
     "bugs": {
-        "url": "https://github.com/panaudia/panaudia-js-sdk/issues"
+        "url": "https://github.com/panaudia/panaudia-client/issues"
     },
-    "homepage": "https://github.com/panaudia/panaudia-js-sdk#readme",
+    "homepage": "https://github.com/panaudia/panaudia-client#readme",
     "devDependencies": {
         "prettier": "3.2.5",
         "vite": "^5.2.11",

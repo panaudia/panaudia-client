@@ -49,6 +49,81 @@
                         "schema": {
                             "type": "string"
                         }
+                    },
+                    {
+                        "name": "data",
+                        "in": "query",
+                        "description": "Set to \"true\" to receive back state and attribute messages in data channels.",
+                        "required": false,
+                        "schema": {
+                            "pattern": "true"
+                        }
+                    },
+                    {
+                        "name": "x",
+                        "in": "query",
+                        "description": "Sets the initial x coordinate of this user in the virtual audio space",
+                        "required": false,
+                        "schema": {
+                            "type": "number",
+                            "maximum": 1.0,
+                            "minimum": 0.0
+                        }
+                    },
+                    {
+                        "name": "y",
+                        "in": "query",
+                        "description": "Sets the initial y coordinate of this user in the virtual audio space",
+                        "required": false,
+                        "schema": {
+                            "type": "number",
+                            "maximum": 1.0,
+                            "minimum": 0.0
+                        }
+                    },
+                    {
+                        "name": "z",
+                        "in": "query",
+                        "description": "Sets the initial z coordinate of this user in the virtual audio space",
+                        "required": false,
+                        "schema": {
+                            "type": "number",
+                            "maximum": 1.0,
+                            "minimum": 0.0
+                        }
+                    },
+                    {
+                        "name": "yaw",
+                        "in": "query",
+                        "description": "Sets the initial yaw rotation in degrees of this user in the virtual audio space",
+                        "required": false,
+                        "schema": {
+                            "type": "number",
+                            "maximum": -180.0,
+                            "minimum": 180.0
+                        }
+                    },
+                    {
+                        "name": "pitch",
+                        "in": "query",
+                        "description": "Sets the initial pitch rotation in degrees of this user in the virtual audio space",
+                        "required": false,
+                        "schema": {
+                            "type": "number",
+                            "maximum": -90.0,
+                            "minimum": 90.0
+                        }
+                    },
+                    {
+                        "name": "roll",
+                        "in": "query",
+                        "description": "Sets the initial roll rotation in degrees of this user in the virtual audio space",
+                        "required": false,
+                        "schema": {
+                            "type": "number",
+                            "maximum": -180.0,
+                            "minimum": 180.0
+                        }
                     }
                 ]
             }
@@ -59,7 +134,7 @@
             "ticket": {
                 "type": "http",
                 "scheme": "Bearer",
-                "description": "The ticket JWT token is here in the query due to the limitations of authentication in the way WebRTC works. It's ugly but secure over TLS.",
+                "description": "The ticket JWT token is here in the query due to the limitations of authentication for WebRTC. It's ugly but secure over TLS.",
                 "in": "query",
                 "name": "ticket",
                 "bearerFormat": "#/components/schemas/ticket"
@@ -245,8 +320,8 @@
         "schemas": {
             "ticket": {
                 "$schema": "http://json-schema.org/draft-07/schema#",
-                "$id": "https://panaudia.com/schemata/token.json",
-                "title": "Panaudia Token Schema",
+                "$id": "https://panaudia.com/schemata/ticket.json",
+                "title": "Panaudia Ticket Schema",
                 "type": "object",
                 "additionalProperties": false,
                 "required": [
@@ -291,6 +366,9 @@
                                 "type": "number",
                                 "maximum": 3.0,
                                 "minimum": 0.0
+                            },
+                            "priority": {
+                                "type": "boolean"
                             },
                             "attrs": {
                                 "type": "object"

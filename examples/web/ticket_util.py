@@ -5,14 +5,11 @@ import jwt
 from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PrivateKey
 from cryptography.hazmat.primitives.serialization import Encoding, NoEncryption, PrivateFormat, PublicFormat
 
-
 def make_keys():
+
     private_key = Ed25519PrivateKey.generate()
-    private_key_str = private_key.private_bytes(encoding=Encoding.PEM,
-                                                format=PrivateFormat.PKCS8,
-                                                encryption_algorithm=NoEncryption())
-    public_key_str = private_key.public_key().public_bytes(encoding=Encoding.PEM,
-                                                           format=PublicFormat.SubjectPublicKeyInfo)
+    private_key_str = private_key.private_bytes(encoding=Encoding.PEM, format=PrivateFormat.PKCS8, encryption_algorithm=NoEncryption())
+    public_key_str = private_key.public_key().public_bytes(encoding=Encoding.PEM, format=PublicFormat.SubjectPublicKeyInfo)
     return public_key_str.decode("utf-8"), private_key_str.decode("utf-8")
 
 
@@ -23,16 +20,19 @@ def make_ticket(private_key,
                 expires=None,
                 attenuation=None,
                 gain=None,
+                priority=False,
                 attrs=None,
                 issued_at=None,
                 uid=None,
                 issued_by=None):
+
     headers, payload = headers_and_payload(space_id,
                                            name,
                                            not_before=not_before,
                                            expires=expires,
                                            attenuation=attenuation,
                                            gain=gain,
+                                           priority=priority,
                                            attrs=attrs,
                                            issued_at=issued_at,
                                            uid=uid,
@@ -40,17 +40,18 @@ def make_ticket(private_key,
 
     return jwt.encode(payload, private_key, algorithm='EdDSA', headers=headers)
 
-
 def headers_and_payload(space_id,
                         name,
                         not_before=None,
                         expires=None,
                         attenuation=None,
                         gain=None,
+                        priority=False,
                         attrs=None,
                         issued_at=None,
                         uid=None,
                         issued_by=None):
+
     panaudia = {}
 
     if attenuation is not None:
@@ -61,6 +62,9 @@ def headers_and_payload(space_id,
 
     if attrs is not None:
         panaudia["attrs"] = attrs
+
+    if priority is True:
+        panaudia["priority"] = True
 
     iat = int(time.time()) if issued_at is None else int(datetime.datetime.timestamp(issued_at))
     jti = str(uuid.uuid4()) if uid is None else uid

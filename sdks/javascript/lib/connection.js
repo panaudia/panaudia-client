@@ -64,6 +64,7 @@ function disconnect() {
 
 function connect(
     ticket,
+    data,
     domParentId,
     position,
     rotation,
@@ -80,26 +81,29 @@ function connect(
         rotation.z,
     );
 
-    connectAmbisonic(ticket, domParentId, nodeState, attrs, url);
+    connectAmbisonic(ticket, data, domParentId, nodeState, attrs, url);
 }
-
-
 
 function connectAmbisonic(
     ticket,
+    data,
     domParentId,
     coordinates,
     attrs = {},
     url = 'https://panaudia.com/entrance',
 ) {
 
-    let locationAttrs = {
-        "loc[x]": coordinates.x,
-        "loc[y]": coordinates.y,
-        "loc[z]": coordinates.z,
-        "loc[yaw]": coordinates.yaw,
-        "loc[pitch]": coordinates.pitch,
-        "loc[roll]": coordinates.roll,
+    let extraAttrs = {
+        "x": coordinates.x,
+        "y": coordinates.y,
+        "z": coordinates.z,
+        "yaw": coordinates.yaw,
+        "pitch": coordinates.pitch,
+        "roll": coordinates.roll,
+    }
+
+    if (data === true) {
+        extraAttrs["data"] = "true";
     }
 
     fetch(url + '?ticket=' + ticket)
@@ -113,7 +117,7 @@ function connectAmbisonic(
                 const params = new URLSearchParams({
                     ticket: ticket,
                     ...attrs,
-                    ...locationAttrs
+                    ...extraAttrs
                 });
                 const connectionUrl = data.url + '?' + params.toString();
                 connectToSpace(connectionUrl, domParentId);
@@ -124,15 +128,13 @@ function connectAmbisonic(
         .catch((error) => console.error('lookup error:', error));
 }
 
-
-
 function connectToSpace(connectionUrl, domPlayerParentId) {
     connectionStatusCallback('connecting', 'Connecting');
 
     navigator.mediaDevices
         .getUserMedia({
             audio: {
-                autoGainControl: false,
+                autoGainControl: true,
                 channelCount: 2,
                 echoCancellation: false,
                 latency: 0,
@@ -192,14 +194,18 @@ function connectToSpace(connectionUrl, domPlayerParentId) {
 }
 
 function addDataChannels(pc) {
-    dcJson = pc.createDataChannel('attributes');
-    dcJson.onmessage = (msg) => {
-        let attributes = PanaudiaNodeAttributes.fromJson(msg.data);
-        if (!attributes) {
-            return log('failed to parse attributes');
-        }
-        attributesCallback(attributes);
-    };
+
+    // only bother setting up the data channels if their callbacks have been set
+    if (attributesCallback !== undefined){
+        dcJson = pc.createDataChannel('attributes');
+        dcJson.onmessage = (msg) => {
+            let attributes = PanaudiaNodeAttributes.fromJson(msg.data);
+            if (!attributes) {
+                return log('failed to parse attributes');
+            }
+            attributesCallback(attributes);
+        };
+    }
 
     let _dcData = pc.createDataChannel('state');
     _dcData.onopen = () => {
@@ -219,6 +225,7 @@ function addDataChannels(pc) {
             PanaudiaNodeState.fromBlobAsWeb(msg.data, stateCallback);
         }
     };
+
 }
 
 function init_ws(url) {

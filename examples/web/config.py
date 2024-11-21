@@ -1,9 +1,5 @@
-import keys
 
-SPACE_ID = "space_1234567890"
-APP_SCHEME = "http"
-APP_HOST = "localhost:8000"
+SPACE_ID = "space_27b0ce3c-a071-4abd-8979-6c9c71dc420b"
 AUTHORITY = "demo.panaudia.com"
 
-PRIVATE_KEY = keys.private_key()
-PUBLIC_KEY = keys.public_key()
+
