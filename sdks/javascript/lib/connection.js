@@ -135,13 +135,11 @@ function connectToSpace(connectionUrl, domPlayerParentId) {
         .getUserMedia({
             audio: {
                 autoGainControl: true,
-                channelCount: 2,
                 echoCancellation: false,
                 latency: 0,
                 noiseSuppression: false,
                 sampleRate: 48000,
                 sampleSize: 16,
-                volume: 1.0,
             },
         })
         .then((stream) => {

@@ -1,5 +1,5 @@
 
-SPACE_ID = "space_27b0ce3c-a071-4abd-8979-6c9c71dc420b"
+SPACE_ID = "space_00fa1a26-d990-4fb3-a833-4fdae90c6622"
 AUTHORITY = "demo.panaudia.com"
 
 

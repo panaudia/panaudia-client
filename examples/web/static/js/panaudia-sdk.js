@@ -108,8 +108,8 @@ class $ {
     return this.compose(N, t, Q);
   }
   compose(t, e, n) {
-    const s = this.elements, c = e._x, r = e._y, h = e._z, f = e._w, a = c + c, o = r + r, l = h + h, _ = c * a, u = c * o, d = c * l, C = r * o, F = r * l, E = h * l, B = f * a, O = f * o, J = f * l, v = n.x, R = n.y, A = n.z;
-    return s[0] = (1 - (C + E)) * v, s[1] = (u + J) * v, s[2] = (d - O) * v, s[3] = 0, s[4] = (u - J) * R, s[5] = (1 - (_ + E)) * R, s[6] = (F + B) * R, s[7] = 0, s[8] = (d + O) * A, s[9] = (F - B) * A, s[10] = (1 - (_ + C)) * A, s[11] = 0, s[12] = t.x, s[13] = t.y, s[14] = t.z, s[15] = 1, this;
+    const s = this.elements, c = e._x, r = e._y, h = e._z, f = e._w, a = c + c, o = r + r, l = h + h, _ = c * a, u = c * o, d = c * l, C = r * o, F = r * l, E = h * l, B = f * a, O = f * o, J = f * l, R = n.x, v = n.y, A = n.z;
+    return s[0] = (1 - (C + E)) * R, s[1] = (u + J) * R, s[2] = (d - O) * R, s[3] = 0, s[4] = (u - J) * v, s[5] = (1 - (_ + E)) * v, s[6] = (F + B) * v, s[7] = 0, s[8] = (d + O) * A, s[9] = (F - B) * A, s[10] = (1 - (_ + C)) * A, s[11] = 0, s[12] = t.x, s[13] = t.y, s[14] = t.z, s[15] = 1, this;
   }
 }
 const N = /* @__PURE__ */ new D(0, 0, 0), Q = /* @__PURE__ */ new D(1, 1, 1), L = /* @__PURE__ */ new $(), W = /* @__PURE__ */ new U();
@@ -396,13 +396,11 @@ function et(i, t) {
   M("connecting", "Connecting"), navigator.mediaDevices.getUserMedia({
     audio: {
       autoGainControl: !0,
-      channelCount: 2,
       echoCancellation: !1,
       latency: 0,
       noiseSuppression: !1,
       sampleRate: 48e3,
-      sampleSize: 16,
-      volume: 1
+      sampleSize: 16
     }
   }).then((e) => {
     y = new RTCPeerConnection({

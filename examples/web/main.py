@@ -25,4 +25,5 @@ def index():
 
 
 if __name__ == '__main__':
-    app.run(host='0.0.0.0', port=9000, debug=True)
+    # app.run(host='0.0.0.0', port=4443, debug=True, ssl_context=('server.crt', 'server.key'))
+    app.run(host='0.0.0.0', port=8000, debug=True)
