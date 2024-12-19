@@ -1,10 +1,10 @@
-class Z {
-  constructor(t, e, n, s) {
-    this.uuid = t, this.name = e, this.ticket = n, this.connection = s;
+class $ {
+  constructor(t, e, i, s) {
+    this.uuid = t, this.name = e, this.ticket = i, this.connection = s;
   }
   static fromJson(t) {
     let e = JSON.parse(t);
-    return e ? new Z(
+    return e ? new $(
       e.uuid,
       e.name,
       e.ticket,
@@ -12,9 +12,9 @@ class Z {
     ) : null;
   }
 }
-class U {
-  constructor(t = 0, e = 0, n = 0, s = 1) {
-    this.isQuaternion = !0, this._x = t, this._y = e, this._z = n, this._w = s;
+class N {
+  constructor(t = 0, e = 0, i = 0, s = 1) {
+    this.isQuaternion = !0, this._x = t, this._y = e, this._z = i, this._w = s;
   }
   get x() {
     return this._x;
@@ -40,8 +40,8 @@ class U {
   set w(t) {
     this._w = t;
   }
-  set(t, e, n, s) {
-    return this._x = t, this._y = e, this._z = n, this._w = s, this;
+  set(t, e, i, s) {
+    return this._x = t, this._y = e, this._z = i, this._w = s, this;
   }
   clone() {
     return new this.constructor(this._x, this._y, this._z, this._w);
@@ -50,25 +50,25 @@ class U {
     return this._x = t.x, this._y = t.y, this._z = t.z, this._w = t.w, this;
   }
   setFromEuler(t, e = !0) {
-    const n = t._x, s = t._y, c = t._z, r = t._order, h = Math.cos, f = Math.sin, a = h(n / 2), o = h(s / 2), l = h(c / 2), _ = f(n / 2), u = f(s / 2), d = f(c / 2);
+    const i = t._x, s = t._y, c = t._z, r = t._order, h = Math.cos, f = Math.sin, a = h(i / 2), o = h(s / 2), l = h(c / 2), d = f(i / 2), u = f(s / 2), _ = f(c / 2);
     switch (r) {
       case "XYZ":
-        this._x = _ * o * l + a * u * d, this._y = a * u * l - _ * o * d, this._z = a * o * d + _ * u * l, this._w = a * o * l - _ * u * d;
+        this._x = d * o * l + a * u * _, this._y = a * u * l - d * o * _, this._z = a * o * _ + d * u * l, this._w = a * o * l - d * u * _;
         break;
       case "YXZ":
-        this._x = _ * o * l + a * u * d, this._y = a * u * l - _ * o * d, this._z = a * o * d - _ * u * l, this._w = a * o * l + _ * u * d;
+        this._x = d * o * l + a * u * _, this._y = a * u * l - d * o * _, this._z = a * o * _ - d * u * l, this._w = a * o * l + d * u * _;
         break;
       case "ZXY":
-        this._x = _ * o * l - a * u * d, this._y = a * u * l + _ * o * d, this._z = a * o * d + _ * u * l, this._w = a * o * l - _ * u * d;
+        this._x = d * o * l - a * u * _, this._y = a * u * l + d * o * _, this._z = a * o * _ + d * u * l, this._w = a * o * l - d * u * _;
         break;
       case "ZYX":
-        this._x = _ * o * l - a * u * d, this._y = a * u * l + _ * o * d, this._z = a * o * d - _ * u * l, this._w = a * o * l + _ * u * d;
+        this._x = d * o * l - a * u * _, this._y = a * u * l + d * o * _, this._z = a * o * _ - d * u * l, this._w = a * o * l + d * u * _;
         break;
       case "YZX":
-        this._x = _ * o * l + a * u * d, this._y = a * u * l + _ * o * d, this._z = a * o * d - _ * u * l, this._w = a * o * l - _ * u * d;
+        this._x = d * o * l + a * u * _, this._y = a * u * l + d * o * _, this._z = a * o * _ - d * u * l, this._w = a * o * l - d * u * _;
         break;
       case "XZY":
-        this._x = _ * o * l - a * u * d, this._y = a * u * l - _ * o * d, this._z = a * o * d + _ * u * l, this._w = a * o * l + _ * u * d;
+        this._x = d * o * l - a * u * _, this._y = a * u * l - d * o * _, this._z = a * o * _ + d * u * l, this._w = a * o * l + d * u * _;
         break;
       default:
         console.warn(
@@ -79,16 +79,16 @@ class U {
   }
 }
 class D {
-  constructor(t = 0, e = 0, n = 0) {
-    D.prototype.isVector3 = !0, this.x = t, this.y = e, this.z = n;
+  constructor(t = 0, e = 0, i = 0) {
+    D.prototype.isVector3 = !0, this.x = t, this.y = e, this.z = i;
   }
 }
-class $ {
-  constructor(t, e, n, s, c, r, h, f, a, o, l, _, u, d, C, F) {
-    $.prototype.isMatrix4 = !0, this.elements = [1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1], t !== void 0 && this.set(
+class E {
+  constructor(t, e, i, s, c, r, h, f, a, o, l, d, u, _, C, F) {
+    E.prototype.isMatrix4 = !0, this.elements = [1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1], t !== void 0 && this.set(
       t,
       e,
-      n,
+      i,
       s,
       c,
       r,
@@ -97,28 +97,28 @@ class $ {
       a,
       o,
       l,
-      _,
-      u,
       d,
+      u,
+      _,
       C,
       F
     );
   }
   makeRotationFromQuaternion(t) {
-    return this.compose(N, t, Q);
+    return this.compose(U, t, Q);
   }
-  compose(t, e, n) {
-    const s = this.elements, c = e._x, r = e._y, h = e._z, f = e._w, a = c + c, o = r + r, l = h + h, _ = c * a, u = c * o, d = c * l, C = r * o, F = r * l, E = h * l, B = f * a, O = f * o, J = f * l, R = n.x, v = n.y, A = n.z;
-    return s[0] = (1 - (C + E)) * R, s[1] = (u + J) * R, s[2] = (d - O) * R, s[3] = 0, s[4] = (u - J) * v, s[5] = (1 - (_ + E)) * v, s[6] = (F + B) * v, s[7] = 0, s[8] = (d + O) * A, s[9] = (F - B) * A, s[10] = (1 - (_ + C)) * A, s[11] = 0, s[12] = t.x, s[13] = t.y, s[14] = t.z, s[15] = 1, this;
+  compose(t, e, i) {
+    const s = this.elements, c = e._x, r = e._y, h = e._z, f = e._w, a = c + c, o = r + r, l = h + h, d = c * a, u = c * o, _ = c * l, C = r * o, F = r * l, B = h * l, O = f * a, L = f * o, J = f * l, R = i.x, v = i.y, X = i.z;
+    return s[0] = (1 - (C + B)) * R, s[1] = (u + J) * R, s[2] = (_ - L) * R, s[3] = 0, s[4] = (u - J) * v, s[5] = (1 - (d + B)) * v, s[6] = (F + O) * v, s[7] = 0, s[8] = (_ + L) * X, s[9] = (F - O) * X, s[10] = (1 - (d + C)) * X, s[11] = 0, s[12] = t.x, s[13] = t.y, s[14] = t.z, s[15] = 1, this;
   }
 }
-const N = /* @__PURE__ */ new D(0, 0, 0), Q = /* @__PURE__ */ new D(1, 1, 1), L = /* @__PURE__ */ new $(), W = /* @__PURE__ */ new U();
-function w(i, t, e) {
-  return Math.max(t, Math.min(e, i));
+const U = /* @__PURE__ */ new D(0, 0, 0), Q = /* @__PURE__ */ new D(1, 1, 1), T = /* @__PURE__ */ new E(), W = /* @__PURE__ */ new N();
+function w(n, t, e) {
+  return Math.max(t, Math.min(e, n));
 }
-class g {
-  constructor(t = 0, e = 0, n = 0, s = g.DEFAULT_ORDER) {
-    this.isEuler = !0, this._x = t, this._y = e, this._z = n, this._order = s;
+class x {
+  constructor(t = 0, e = 0, i = 0, s = x.DEFAULT_ORDER) {
+    this.isEuler = !0, this._x = t, this._y = e, this._z = i, this._order = s;
   }
   get x() {
     return this._x;
@@ -144,8 +144,8 @@ class g {
   set order(t) {
     this._order = t;
   }
-  set(t, e, n, s = this._order) {
-    return this._x = t, this._y = e, this._z = n, this._order = s, this;
+  set(t, e, i, s = this._order) {
+    return this._x = t, this._y = e, this._z = i, this._order = s, this;
   }
   clone() {
     return new this.constructor(this._x, this._y, this._z, this._order);
@@ -153,26 +153,26 @@ class g {
   copy(t) {
     return this._x = t._x, this._y = t._y, this._z = t._z, this._order = t._order, this;
   }
-  setFromRotationMatrix(t, e = this._order, n = !0) {
-    const s = t.elements, c = s[0], r = s[4], h = s[8], f = s[1], a = s[5], o = s[9], l = s[2], _ = s[6], u = s[10];
+  setFromRotationMatrix(t, e = this._order, i = !0) {
+    const s = t.elements, c = s[0], r = s[4], h = s[8], f = s[1], a = s[5], o = s[9], l = s[2], d = s[6], u = s[10];
     switch (e) {
       case "XYZ":
-        this._y = Math.asin(w(h, -1, 1)), Math.abs(h) < 0.9999999 ? (this._x = Math.atan2(-o, u), this._z = Math.atan2(-r, c)) : (this._x = Math.atan2(_, a), this._z = 0);
+        this._y = Math.asin(w(h, -1, 1)), Math.abs(h) < 0.9999999 ? (this._x = Math.atan2(-o, u), this._z = Math.atan2(-r, c)) : (this._x = Math.atan2(d, a), this._z = 0);
         break;
       case "YXZ":
         this._x = Math.asin(-w(o, -1, 1)), Math.abs(o) < 0.9999999 ? (this._y = Math.atan2(h, u), this._z = Math.atan2(f, a)) : (this._y = Math.atan2(-l, c), this._z = 0);
         break;
       case "ZXY":
-        this._x = Math.asin(w(_, -1, 1)), Math.abs(_) < 0.9999999 ? (this._y = Math.atan2(-l, u), this._z = Math.atan2(-r, a)) : (this._y = 0, this._z = Math.atan2(f, c));
+        this._x = Math.asin(w(d, -1, 1)), Math.abs(d) < 0.9999999 ? (this._y = Math.atan2(-l, u), this._z = Math.atan2(-r, a)) : (this._y = 0, this._z = Math.atan2(f, c));
         break;
       case "ZYX":
-        this._y = Math.asin(-w(l, -1, 1)), Math.abs(l) < 0.9999999 ? (this._x = Math.atan2(_, u), this._z = Math.atan2(f, c)) : (this._x = 0, this._z = Math.atan2(-r, a));
+        this._y = Math.asin(-w(l, -1, 1)), Math.abs(l) < 0.9999999 ? (this._x = Math.atan2(d, u), this._z = Math.atan2(f, c)) : (this._x = 0, this._z = Math.atan2(-r, a));
         break;
       case "YZX":
         this._z = Math.asin(w(f, -1, 1)), Math.abs(f) < 0.9999999 ? (this._x = Math.atan2(-o, a), this._y = Math.atan2(-l, c)) : (this._x = 0, this._y = Math.atan2(h, u));
         break;
       case "XZY":
-        this._z = Math.asin(-w(r, -1, 1)), Math.abs(r) < 0.9999999 ? (this._x = Math.atan2(_, a), this._y = Math.atan2(h, c)) : (this._x = Math.atan2(-o, u), this._y = 0);
+        this._z = Math.asin(-w(r, -1, 1)), Math.abs(r) < 0.9999999 ? (this._x = Math.atan2(d, a), this._y = Math.atan2(h, c)) : (this._x = Math.atan2(-o, u), this._y = 0);
         break;
       default:
         console.warn(
@@ -181,8 +181,8 @@ class g {
     }
     return this._order = e, this;
   }
-  setFromQuaternion(t, e, n) {
-    return L.makeRotationFromQuaternion(t), this.setFromRotationMatrix(L, e, n);
+  setFromQuaternion(t, e, i) {
+    return T.makeRotationFromQuaternion(t), this.setFromRotationMatrix(T, e, i);
   }
   setFromVector3(t, e = this._order) {
     return this.set(t.x, t.y, t.z, e);
@@ -203,39 +203,39 @@ class g {
     yield this._x, yield this._y, yield this._z, yield this._order;
   }
 }
-g.DEFAULT_ORDER = "XYZ";
+x.DEFAULT_ORDER = "XYZ";
 class m {
-  constructor(t = 0, e = 0, n = 0, s = 0, c = 0, r = 0, h = 0, f = 0, a = "") {
-    this.x = t, this.y = e, this.z = n, this.yaw = s, this.pitch = c, this.roll = r, this.volume = h, this.gone = f !== 0, this.uuid = a;
+  constructor(t = 0, e = 0, i = 0, s = 0, c = 0, r = 0, h = 0, f = 0, a = "") {
+    this.x = t, this.y = e, this.z = i, this.yaw = s, this.pitch = c, this.roll = r, this.volume = h, this.gone = f !== 0, this.uuid = a;
   }
-  static fromWebGLCoordinates2(t, e, n, s, c, r) {
-    let h = new g(s, c, r);
+  static fromWebGLCoordinates2(t, e, i, s, c, r) {
+    let h = new x(s, c, r);
     h.reorder("YXZ");
-    let f = t / 2 + 0.5, a = -(n / 2) + 0.5, o = e / 2 + 0.5;
+    let f = t / 2 + 0.5, a = -(i / 2) + 0.5, o = e / 2 + 0.5;
     return new m(
       f,
       a,
       o,
-      p(h.y),
-      p(h.x),
-      -p(h.z)
+      b(h.y),
+      b(h.x),
+      -b(h.z)
     );
   }
-  static fromWebGLCoordinates(t, e, n, s, c, r) {
-    let h = new g(s, c, r);
+  static fromWebGLCoordinates(t, e, i, s, c, r) {
+    let h = new x(s, c, r);
     h.reorder("YXZ");
-    let f = -(n / 2) + 0.5, a = -(t / 2) + 0.5, o = e / 2 + 0.5;
+    let f = -(i / 2) + 0.5, a = -(t / 2) + 0.5, o = e / 2 + 0.5;
     return new m(
       f,
       a,
       o,
-      p(h.y),
-      p(h.x),
-      p(h.z)
+      b(h.y),
+      b(h.x),
+      b(h.z)
     );
   }
   static fromDataBuffer(t) {
-    const e = new DataView(t), n = ("0000000000000000" + e.getBigUint64(0, !1).toString(16)).slice(-16), s = ("0000000000000000" + e.getBigUint64(8, !1).toString(16)).slice(-16), c = `${n.slice(0, 8)}-${n.slice(8, 12)}-${n.slice(12, 16)}-${s.slice(0, 4)}-${s.slice(4, 16)}`;
+    const e = new DataView(t), i = ("0000000000000000" + e.getBigUint64(0, !1).toString(16)).slice(-16), s = ("0000000000000000" + e.getBigUint64(8, !1).toString(16)).slice(-16), c = `${i.slice(0, 8)}-${i.slice(8, 12)}-${i.slice(12, 16)}-${s.slice(0, 4)}-${s.slice(4, 16)}`;
     return new m(
       e.getFloat32(16, !0),
       e.getFloat32(20, !0),
@@ -249,10 +249,10 @@ class m {
     );
   }
   static fromBlobAsWeb(t, e) {
-    var n, s = new FileReader();
+    var i, s = new FileReader();
     s.onload = function(c) {
-      n = c.target.result;
-      const r = new DataView(n), h = ("0000000000000000" + r.getBigUint64(0, !1).toString(16)).slice(-16), f = ("0000000000000000" + r.getBigUint64(8, !1).toString(16)).slice(-16), a = `${h.slice(0, 8)}-${h.slice(8, 12)}-${h.slice(12, 16)}-${f.slice(0, 4)}-${f.slice(4, 16)}`, o = new m(
+      i = c.target.result;
+      const r = new DataView(i), h = ("0000000000000000" + r.getBigUint64(0, !1).toString(16)).slice(-16), f = ("0000000000000000" + r.getBigUint64(8, !1).toString(16)).slice(-16), a = `${h.slice(0, 8)}-${h.slice(8, 12)}-${h.slice(12, 16)}-${f.slice(0, 4)}-${f.slice(4, 16)}`, o = new m(
         r.getFloat32(16, !0),
         r.getFloat32(20, !0),
         r.getFloat32(24, !0),
@@ -271,10 +271,10 @@ class m {
     return e.setFloat32(16, this.x, !0), e.setFloat32(20, this.y, !0), e.setFloat32(24, this.z, !0), e.setFloat32(28, this.yaw, !0), e.setFloat32(32, this.pitch, !0), e.setFloat32(36, this.roll, !0), t;
   }
   asWebGLCoordinates2() {
-    let t = new g(
-      b(this.pitch),
-      b(this.yaw),
-      -b(this.roll),
+    let t = new x(
+      p(this.pitch),
+      p(this.yaw),
+      -p(this.roll),
       "YXZ"
     );
     return t.reorder("XYZ"), {
@@ -290,10 +290,10 @@ class m {
     };
   }
   asWebGLCoordinates() {
-    let t = new g(
-      b(this.pitch),
-      b(this.yaw),
-      b(this.roll),
+    let t = new x(
+      p(this.pitch),
+      p(this.yaw),
+      p(this.roll),
       "YXZ"
     );
     return t.reorder("XYZ"), {
@@ -309,31 +309,31 @@ class m {
     };
   }
 }
-function p(i) {
-  return i / Math.PI * 180;
+function b(n) {
+  return n / Math.PI * 180;
 }
-function b(i) {
-  return i / 180 * Math.PI;
+function p(n) {
+  return n / 180 * Math.PI;
 }
-let x, y, T, z, X, S, Y, M;
-function I(i) {
-  X = i;
+let g, y, z, Y, S, Z, M, A;
+function I(n) {
+  Y = n;
 }
-function V(i) {
-  S = i;
+function V(n) {
+  S = n;
 }
-function j(i) {
-  Y = i;
+function j(n) {
+  Z = n;
 }
-function H(i) {
-  M = i;
+function H(n) {
+  M = n;
 }
-function P(i, t) {
+function P(n, t) {
   if (z !== void 0 && z.readyState === "open") {
     let e = m.fromWebGLCoordinates(
-      i.x,
-      i.y,
-      i.z,
+      n.x,
+      n.y,
+      n.z,
       t.x,
       t.y,
       t.z
@@ -341,49 +341,51 @@ function P(i, t) {
     z.send(e.toDataBuffer());
   }
 }
-function K(i) {
+function K(n) {
   if (z !== void 0 && z.readyState === "open") {
     let t = new m(
-      i.x,
-      i.y,
-      i.z,
-      i.yaw,
-      i.pitch,
-      i.roll
+      n.x,
+      n.y,
+      n.z,
+      n.yaw,
+      n.pitch,
+      n.roll
     );
     z.send(t.toDataBuffer());
   }
 }
 function q() {
-  x.close();
+  console.log("disconnecting"), A !== void 0 && A.forEach((n) => {
+    n.stop();
+  }), y.close(), g.close();
 }
-function tt(i, t, e, n, s, c = {}, r = "https://panaudia.com/entrance") {
+function tt(n, t, e, i, s, c = {}, r = "https://panaudia.com/entrance") {
   let h = m.fromWebGLCoordinates(
-    n.x,
-    n.y,
-    n.z,
+    i.x,
+    i.y,
+    i.z,
     s.x,
     s.y,
     s.z
   );
-  G(i, t, e, h, c, r);
+  G(n, t, e, h, c, r);
 }
-function G(i, t, e, n, s = {}, c = "https://panaudia.com/entrance") {
+function G(n, t, e, i, s = {}, c = "https://panaudia.com/entrance") {
   let r = {
-    x: n.x,
-    y: n.y,
-    z: n.z,
-    yaw: n.yaw,
-    pitch: n.pitch,
-    roll: n.roll
+    x: i.x,
+    y: i.y,
+    z: i.z,
+    yaw: i.yaw,
+    pitch: i.pitch,
+    roll: i.roll
   };
-  t === !0 && (r.data = "true"), fetch(c + "?ticket=" + i).then((h) => {
+  t === !0 && (r.data = "true"), fetch(c + "?ticket=" + n).then((h) => {
     if (h.ok)
       return h.json();
   }).then((h) => {
     if (h.status === "ok") {
       const f = new URLSearchParams({
-        ticket: i,
+        ticket: n,
         ...s,
         ...r
       }), a = h.url + "?" + f.toString();
@@ -392,71 +394,76 @@ function G(i, t, e, n, s = {}, c = "https://panaudia.com/entrance") {
       console.error("lookup failed");
   }).catch((h) => console.error("lookup error:", h));
 }
-function et(i, t) {
-  M("connecting", "Connecting"), navigator.mediaDevices.getUserMedia({
-    audio: {
-      autoGainControl: !0,
-      echoCancellation: !1,
-      latency: 0,
-      noiseSuppression: !1,
-      sampleRate: 48e3,
-      sampleSize: 16
+async function et(n, t) {
+  y = new RTCPeerConnection({
+    iceServers: [
+      { urls: "stun:stun.l.google.com:19302" },
+      { urls: "stun:stun.l.google.com:5349" },
+      { urls: "stun:stun1.l.google.com:3478" }
+    ]
+  }), y.onicecandidate = (i) => {
+    if (i.candidate && i.candidate.candidate !== "") {
+      let s = JSON.stringify(i.candidate);
+      g.send(JSON.stringify({ event: "candidate", data: s }));
     }
-  }).then((e) => {
-    y = new RTCPeerConnection({
-      iceServers: [
-        { urls: "stun:stun.l.google.com:19302" },
-        { urls: "stun:stun.l.google.com:5349" },
-        { urls: "stun:stun1.l.google.com:3478" },
-        { urls: "stun:stun1.l.google.com:5349" }
-      ]
-    }), e.getTracks().forEach((n) => y.addTrack(n, e)), st(y), y.createOffer().then((n) => {
-      n.sdp = n.sdp.replace("a=fmtp:111 ", "a=fmtp:111 stereo=1; "), n.sdp = n.sdp.replace("stereo=1;", "stereo=1; sprop-stereo=1;"), y.setLocalDescription(n).then((s) => {
-        nt(i);
-      });
-    }), y.ontrack = function(n) {
-      M("connected", "Connected");
-      let s = document.createElement(n.track.kind);
-      s.srcObject = n.streams[0], s.autoplay = !0, s.controls = !0, s.id = "panaudia-player", document.getElementById(t).prepend(s), n.track.onmute = function(c) {
-        s.play();
-      }, n.streams[0].onremovetrack = ({ track: c }) => {
-        s.parentNode && s.parentNode.removeChild(s);
-      };
+  }, y.ontrack = function(i) {
+    M("connected", "Connected");
+    let s = document.createElement(i.track.kind);
+    s.srcObject = i.streams[0], s.autoplay = !0, s.controls = !0, s.id = "panaudia-player", document.getElementById(t).prepend(s), i.track.onmute = function(c) {
+      s.play();
+    }, i.streams[0].onremovetrack = ({ track: c }) => {
+      s.parentNode && s.parentNode.removeChild(s);
     };
-  }).catch(window.alert);
+  };
+  const e = await navigator.mediaDevices.getUserMedia(
+    {
+      audio: {
+        autoGainControl: !0,
+        echoCancellation: !1,
+        latency: 0,
+        noiseSuppression: !1,
+        sampleRate: 48e3,
+        sampleSize: 16
+      }
+    }
+  );
+  A = e.getAudioTracks(), A.forEach((i) => {
+    y.addTrack(i, e);
+  }), st(y), it(n);
 }
-function st(i) {
-  X !== void 0 && (T = i.createDataChannel("attributes"), T.onmessage = (e) => {
-    let n = Z.fromJson(e.data);
-    if (!n)
-      return k("failed to parse attributes");
-    X(n);
-  });
-  let t = i.createDataChannel("state");
-  t.onopen = () => {
-    z = t, M("data_connected", "Data channel connected");
-  }, t.onmessage = (e) => {
-    if (e.data instanceof ArrayBuffer) {
-      let n = m.fromDataBuffer(e.data);
-      S !== void 0 && S(n.asWebGLCoordinates()), Y !== void 0 && Y(n);
-    } else
-      m.fromBlobAsWeb(e.data, S);
+function st(n) {
+  n.ondatachannel = (t) => {
+    let e = t.channel;
+    Y !== void 0 && e.label === "attributes" && (e.onmessage = (i) => {
+      let s = $.fromJson(i.data);
+      if (!s)
+        return k("failed to parse attributes");
+      Y(s);
+    }), e.label === "state" && (z = e, e.onopen = () => {
+      M("data_connected", "Data channel connected");
+    }, e.onmessage = (i) => {
+      if (i.data instanceof ArrayBuffer) {
+        let s = m.fromDataBuffer(i.data);
+        S !== void 0 && S(s.asWebGLCoordinates()), Z !== void 0 && Z(s);
+      } else
+        m.fromBlobAsWeb(i.data, S);
+    });
   };
 }
-function nt(i) {
-  x = new WebSocket(i), x.onclose = function(t) {
+function it(n) {
+  M("connecting", "Connecting"), g = new WebSocket(n), g.onclose = function(t) {
     M("disconnected", "Disconnected");
-  }, x.onmessage = function(t) {
+  }, g.onmessage = function(t) {
     let e = JSON.parse(t.data);
     if (!e)
       return k("failed to parse msg");
     switch (e.event) {
-      case "answer":
-        let n = JSON.parse(e.data);
-        if (!n)
-          return k("failed to parse answer");
+      case "offer":
+        let i = JSON.parse(e.data);
+        if (!i)
+          return k("failed to parse offer");
         try {
-          console.log(n), y.setRemoteDescription(n);
+          nt(i);
         } catch (r) {
           alert(r);
         }
@@ -474,57 +481,56 @@ function nt(i) {
         console.log("errorMsg", c), M("error", c.message);
         return;
     }
-  }, x.onerror = function(t) {
+  }, g.onerror = function(t) {
     k("ERROR: " + t);
-  }, x.onopen = function(t) {
-    let e = JSON.stringify(y.localDescription);
-    x.send(JSON.stringify({ event: "offer", data: e })), y.onicecandidate = (n) => {
-      if (n.candidate && n.candidate.candidate !== "") {
-        let s = JSON.stringify(n.candidate);
-        x.send(JSON.stringify({ event: "candidate", data: s }));
-      }
-    };
   };
 }
-const k = (i) => {
-  console.log(i);
+async function nt(n) {
+  await y.setRemoteDescription(n);
+  let t = await y.createAnswer();
+  t.sdp = t.sdp.replace("a=fmtp:111 ", "a=fmtp:111 stereo=1; sprop-stereo=1; "), await y.setLocalDescription(t);
+  let e = JSON.stringify(t);
+  g.send(JSON.stringify({ event: "answer", data: e }));
+}
+const k = (n) => {
+  console.log(n);
 };
-function it(i) {
-  I(i);
+function at(n) {
+  I(n);
 }
-function at(i) {
-  V(i);
+function rt(n) {
+  V(n);
 }
-function rt(i) {
-  j(i);
+function ot(n) {
+  j(n);
 }
-function ot(i) {
-  H(i);
+function ct(n) {
+  H(n);
 }
-function ct(i, t) {
-  P(i, t);
+function ht(n, t) {
+  P(n, t);
 }
-function ht(i) {
-  K(i);
+function lt(n) {
+  K(n);
 }
-function lt() {
+function ut() {
   q();
 }
-function ut(i, t, e, n, s, c = {}, r = "https://panaudia.com/gateway") {
-  tt(i, t, e, n, s, c, r);
+function dt(n, t, e, i, s, c = {}, r = "https://panaudia.com/gateway") {
+  tt(n, t, e, i, s, c, r);
 }
-function _t(i, t, e, n, s = {}, c = "https://panaudia.com/gateway") {
-  G(i, t, e, n, s, c);
+function _t(n, t, e, i, s = {}, c = "https://panaudia.com/gateway") {
+  G(n, t, e, i, s, c);
 }
 export {
-  ut as connect,
+  dt as connect,
   _t as connectAmbisonic,
-  lt as disconnect,
-  ct as move,
-  ht as moveAmbisonic,
-  rt as setAmbisonicStateCallback,
-  it as setAttributesCallback,
-  ot as setConnectionStatusCallback,
-  at as setStateCallback
+  ut as disconnect,
+  ht as move,
+  lt as moveAmbisonic,
+  ot as setAmbisonicStateCallback,
+  at as setAttributesCallback,
+  ct as setConnectionStatusCallback,
+  rt as setStateCallback
 };
 //# sourceMappingURL=panaudia-sdk.js.map

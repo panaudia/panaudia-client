@@ -1,14 +1,14 @@
-import { PanaudiaNodeAttributes } from './attributes.js';
-import { PanaudiaNodeState } from './state.js';
+import {PanaudiaNodeAttributes} from './attributes.js';
+import {PanaudiaNodeState} from './state.js';
 
 let ws;
 let pc;
-let dcJson;
 let dcData;
 let attributesCallback;
 let stateCallback;
 let ambisonicStateCallback;
 let connectionStatusCallback;
+let micTracks;
 
 function setAttributesCallback(cb) {
     attributesCallback = cb;
@@ -46,19 +46,26 @@ function moveAmbisonic(coordinates) {
     if (dcData !== undefined) {
         if (dcData.readyState === 'open') {
             let sourceState = new PanaudiaNodeState(
-            coordinates.x,
-            coordinates.y,
-            coordinates.z,
-            coordinates.yaw,
-            coordinates.pitch,
-            coordinates.roll
-        );
+                coordinates.x,
+                coordinates.y,
+                coordinates.z,
+                coordinates.yaw,
+                coordinates.pitch,
+                coordinates.roll
+            );
             dcData.send(sourceState.toDataBuffer());
         }
     }
 }
 
 function disconnect() {
+    console.log("disconnecting");
+    if (micTracks !== undefined){
+        micTracks.forEach((track) => {
+        track.stop();
+    });
+    }
+    pc.close();
     ws.close();
 }
 
@@ -119,8 +126,8 @@ function connectAmbisonic(
                     ...attrs,
                     ...extraAttrs
                 });
-                const connectionUrl = data.url + '?' + params.toString();
-                connectToSpace(connectionUrl, domParentId);
+                const url = data.url + '?' + params.toString();
+                connectToSpace(url, domParentId);
             } else {
                 console.error('lookup failed');
             }
@@ -128,11 +135,47 @@ function connectAmbisonic(
         .catch((error) => console.error('lookup error:', error));
 }
 
-function connectToSpace(connectionUrl, domPlayerParentId) {
-    connectionStatusCallback('connecting', 'Connecting');
+async function connectToSpace(url, domPlayerParentId) {
 
-    navigator.mediaDevices
-        .getUserMedia({
+    pc = new RTCPeerConnection({
+            iceServers: [
+                {urls: 'stun:stun.l.google.com:19302'},
+                {urls: 'stun:stun.l.google.com:5349'},
+                {urls: 'stun:stun1.l.google.com:3478'},
+            ],
+        });
+
+    pc.onicecandidate = (e) => {
+        if (e.candidate && e.candidate.candidate !== '') {
+            let data = JSON.stringify(e.candidate);
+            ws.send(JSON.stringify({event: 'candidate', data: data}));
+        }
+    };
+
+    pc.ontrack = function (event) {
+        connectionStatusCallback('connected', 'Connected');
+
+        let el = document.createElement(event.track.kind);
+        el.srcObject = event.streams[0];
+        el.autoplay = true;
+        el.controls = true;
+        el.id = 'panaudia-player';
+
+        document.getElementById(domPlayerParentId).prepend(el);
+
+        event.track.onmute = function (event) {
+            el.play();
+        };
+
+        event.streams[0].onremovetrack = ({track}) => {
+            if (el.parentNode) {
+                el.parentNode.removeChild(el);
+            }
+        };
+    };
+
+    const stream = await navigator.mediaDevices.getUserMedia(
+        {
             audio: {
                 autoGainControl: true,
                 echoCancellation: false,
@@ -141,92 +184,58 @@ function connectToSpace(connectionUrl, domPlayerParentId) {
                 sampleRate: 48000,
                 sampleSize: 16,
             },
-        })
-        .then((stream) => {
-            pc = new RTCPeerConnection({
-                iceServers: [
-                    { urls: 'stun:stun.l.google.com:19302' },
-                    { urls: 'stun:stun.l.google.com:5349' },
-                    { urls: 'stun:stun1.l.google.com:3478' },
-                    { urls: 'stun:stun1.l.google.com:5349' },
-                ],
-            });
+        });
 
-            stream.getTracks().forEach((track) => pc.addTrack(track, stream));
+    micTracks = stream.getAudioTracks();
 
-            addDataChannels(pc);
+    micTracks.forEach((track) => {
+        pc.addTrack(track, stream);
+    });
 
-            // force the offer to include actual stereo
-            pc.createOffer().then((d) => {
-                d.sdp = d.sdp.replace('a=fmtp:111 ', 'a=fmtp:111 stereo=1; ');
-                d.sdp = d.sdp.replace('stereo=1;', 'stereo=1; sprop-stereo=1;');
-
-                pc.setLocalDescription(d).then((r) => {
-                    init_ws(connectionUrl);
-                });
-            });
-
-            pc.ontrack = function (event) {
-                connectionStatusCallback('connected', 'Connected');
-
-                let el = document.createElement(event.track.kind);
-                el.srcObject = event.streams[0];
-                el.autoplay = true;
-                el.controls = true;
-                el.id = 'panaudia-player';
-
-                document.getElementById(domPlayerParentId).prepend(el);
-
-                event.track.onmute = function (event) {
-                    el.play();
-                };
-
-                event.streams[0].onremovetrack = ({ track }) => {
-                    if (el.parentNode) {
-                        el.parentNode.removeChild(el);
-                    }
-                };
-            };
-        })
-        .catch(window.alert);
+    addDataChannels(pc);
+    init_ws(url);
 }
 
 function addDataChannels(pc) {
 
-    // only bother setting up the data channels if their callbacks have been set
-    if (attributesCallback !== undefined){
-        dcJson = pc.createDataChannel('attributes');
-        dcJson.onmessage = (msg) => {
-            let attributes = PanaudiaNodeAttributes.fromJson(msg.data);
-            if (!attributes) {
-                return log('failed to parse attributes');
-            }
-            attributesCallback(attributes);
-        };
-    }
+    pc.ondatachannel = (ev) => {
 
-    let _dcData = pc.createDataChannel('state');
-    _dcData.onopen = () => {
-        dcData = _dcData;
-        connectionStatusCallback('data_connected', 'Data channel connected');
-    };
-    _dcData.onmessage = (msg) => {
-        if (msg.data instanceof ArrayBuffer) {
-            let state = PanaudiaNodeState.fromDataBuffer(msg.data);
-            if (stateCallback !== undefined){
-                stateCallback(state.asWebGLCoordinates());
-            }
-            if (ambisonicStateCallback !== undefined){
-                ambisonicStateCallback(state);
-            }
-        } else {
-            PanaudiaNodeState.fromBlobAsWeb(msg.data, stateCallback);
+        let receiveChannel = ev.channel;
+
+        if (attributesCallback !== undefined && receiveChannel.label === "attributes") {
+            receiveChannel.onmessage = (msg) => {
+                let attributes = PanaudiaNodeAttributes.fromJson(msg.data);
+                if (!attributes) {
+                    return log('failed to parse attributes');
+                }
+                attributesCallback(attributes);
+            };
+        }
+
+        if (receiveChannel.label === "state") {
+            dcData = receiveChannel;
+            receiveChannel.onopen = () => {
+                connectionStatusCallback('data_connected', 'Data channel connected');
+            };
+            receiveChannel.onmessage = (msg) => {
+                if (msg.data instanceof ArrayBuffer) {
+                    let state = PanaudiaNodeState.fromDataBuffer(msg.data);
+                    if (stateCallback !== undefined) {
+                        stateCallback(state.asWebGLCoordinates());
+                    }
+                    if (ambisonicStateCallback !== undefined) {
+                        ambisonicStateCallback(state);
+                    }
+                } else {
+                    PanaudiaNodeState.fromBlobAsWeb(msg.data, stateCallback);
+                }
+            };
         }
     };
-
 }
 
 function init_ws(url) {
+    connectionStatusCallback('connecting', 'Connecting');
     ws = new WebSocket(url);
 
     ws.onclose = function (evt) {
@@ -240,14 +249,14 @@ function init_ws(url) {
         }
 
         switch (msg.event) {
-            case 'answer':
-                let answer = JSON.parse(msg.data);
-                if (!answer) {
-                    return log('failed to parse answer');
+            case 'offer':
+
+                let offer = JSON.parse(msg.data);
+                if (!offer) {
+                    return log('failed to parse offer');
                 }
                 try {
-                    console.log(answer);
-                    pc.setRemoteDescription(answer);
+                    setDescriptions(offer);
                 } catch (e) {
                     alert(e);
                 }
@@ -275,18 +284,17 @@ function init_ws(url) {
     ws.onerror = function (evt) {
         log('ERROR: ' + evt);
     };
+}
 
-    ws.onopen = function (evt) {
-        let data = JSON.stringify(pc.localDescription);
-        ws.send(JSON.stringify({ event: 'offer', data: data }));
-
-        pc.onicecandidate = (e) => {
-            if (e.candidate && e.candidate.candidate !== '') {
-                let data = JSON.stringify(e.candidate);
-                ws.send(JSON.stringify({ event: 'candidate', data: data }));
-            }
-        };
-    };
+async function setDescriptions(offer) {
+    // console.log("Recieved offer: ", offer.sdp);
+    await pc.setRemoteDescription(offer);
+    let answer = await pc.createAnswer();
+    answer.sdp = answer.sdp.replace('a=fmtp:111 ', 'a=fmtp:111 stereo=1; sprop-stereo=1; ');
+    await pc.setLocalDescription(answer);
+    let data = JSON.stringify(answer);
+    // console.log("Sending answer: ", answer.sdp);
+    ws.send(JSON.stringify({event: 'answer', data: data}));
 }
 
 const log = (msg) => {
