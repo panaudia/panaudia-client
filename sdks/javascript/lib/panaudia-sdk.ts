@@ -7,6 +7,7 @@ import {
     _moveAmbisonic,
     _disconnect,
     _connect,
+    _connectDirect,
     _connectAmbisonic,
 } from './connection.js'
 
@@ -100,6 +101,17 @@ export function connect(
     url: string = 'https://panaudia.com/gateway',
 ): void {
     _connect(ticket, data, domParentId, position, rotation, attrs, url)
+}
+
+export function connectDirect(
+    data: boolean,
+    domParentId: string,
+    position: Vec3,
+    rotation: Vec3,
+    attrs: { [key: string]: string } = {},
+    url: string = 'http://localhost:8080/join',
+): void {
+    _connectDirect(data, domParentId, position, rotation, attrs, url)
 }
 
 export function connectAmbisonic(

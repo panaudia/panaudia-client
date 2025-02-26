@@ -87,8 +87,55 @@ function connect(
         rotation.y,
         rotation.z,
     );
-
     connectAmbisonic(ticket, data, domParentId, nodeState, attrs, url);
+}
+
+
+function connectDirect(
+    data,
+    domParentId,
+    position,
+    rotation,
+    attrs = {},
+    url = 'http://localhost:8080/join',
+) {
+
+    let nodeState = PanaudiaNodeState.fromWebGLCoordinates(
+        position.x,
+        position.y,
+        position.z,
+        rotation.x,
+        rotation.y,
+        rotation.z,
+    );
+
+    connectAmbisonicDirect(ticket, data, domParentId, nodeState, attrs, url);
+}
+
+function connectAmbisonicDirect(
+    data,
+    domParentId,
+    coordinates,
+    attrs = {},
+    url = 'http://localhost:8080/join',
+) {
+
+    let extraAttrs = {
+        "x": coordinates.x,
+        "y": coordinates.y,
+        "z": coordinates.z,
+        "yaw": coordinates.yaw,
+        "pitch": coordinates.pitch,
+        "roll": coordinates.roll,
+    }
+
+    if (data === true) {
+        extraAttrs["data"] = "true";
+    }
+
+    const params = new URLSearchParams({...attrs, ...extraAttrs});
+    const directUrl = url + '?' + params.toString();
+    connectToSpace(directUrl, domParentId);
 }
 
 function connectAmbisonic(
@@ -310,5 +357,6 @@ export {
     moveAmbisonic as _moveAmbisonic,
     disconnect as _disconnect,
     connect as _connect,
+    connectDirect as _connectDirect,
     connectAmbisonic as _connectAmbisonic,
 };

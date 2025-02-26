@@ -1,10 +1,10 @@
-class $ {
-  constructor(t, e, i, s) {
-    this.uuid = t, this.name = e, this.ticket = i, this.connection = s;
+class X {
+  constructor(t, e, n, s) {
+    this.uuid = t, this.name = e, this.ticket = n, this.connection = s;
   }
   static fromJson(t) {
     let e = JSON.parse(t);
-    return e ? new $(
+    return e ? new X(
       e.uuid,
       e.name,
       e.ticket,
@@ -12,9 +12,9 @@ class $ {
     ) : null;
   }
 }
-class N {
-  constructor(t = 0, e = 0, i = 0, s = 1) {
-    this.isQuaternion = !0, this._x = t, this._y = e, this._z = i, this._w = s;
+class G {
+  constructor(t = 0, e = 0, n = 0, s = 1) {
+    this.isQuaternion = !0, this._x = t, this._y = e, this._z = n, this._w = s;
   }
   get x() {
     return this._x;
@@ -40,8 +40,8 @@ class N {
   set w(t) {
     this._w = t;
   }
-  set(t, e, i, s) {
-    return this._x = t, this._y = e, this._z = i, this._w = s, this;
+  set(t, e, n, s) {
+    return this._x = t, this._y = e, this._z = n, this._w = s, this;
   }
   clone() {
     return new this.constructor(this._x, this._y, this._z, this._w);
@@ -50,25 +50,25 @@ class N {
     return this._x = t.x, this._y = t.y, this._z = t.z, this._w = t.w, this;
   }
   setFromEuler(t, e = !0) {
-    const i = t._x, s = t._y, c = t._z, r = t._order, h = Math.cos, f = Math.sin, a = h(i / 2), o = h(s / 2), l = h(c / 2), d = f(i / 2), u = f(s / 2), _ = f(c / 2);
+    const n = t._x, s = t._y, i = t._z, r = t._order, h = Math.cos, f = Math.sin, o = h(n / 2), c = h(s / 2), l = h(i / 2), _ = f(n / 2), u = f(s / 2), d = f(i / 2);
     switch (r) {
       case "XYZ":
-        this._x = d * o * l + a * u * _, this._y = a * u * l - d * o * _, this._z = a * o * _ + d * u * l, this._w = a * o * l - d * u * _;
+        this._x = _ * c * l + o * u * d, this._y = o * u * l - _ * c * d, this._z = o * c * d + _ * u * l, this._w = o * c * l - _ * u * d;
         break;
       case "YXZ":
-        this._x = d * o * l + a * u * _, this._y = a * u * l - d * o * _, this._z = a * o * _ - d * u * l, this._w = a * o * l + d * u * _;
+        this._x = _ * c * l + o * u * d, this._y = o * u * l - _ * c * d, this._z = o * c * d - _ * u * l, this._w = o * c * l + _ * u * d;
         break;
       case "ZXY":
-        this._x = d * o * l - a * u * _, this._y = a * u * l + d * o * _, this._z = a * o * _ + d * u * l, this._w = a * o * l - d * u * _;
+        this._x = _ * c * l - o * u * d, this._y = o * u * l + _ * c * d, this._z = o * c * d + _ * u * l, this._w = o * c * l - _ * u * d;
         break;
       case "ZYX":
-        this._x = d * o * l - a * u * _, this._y = a * u * l + d * o * _, this._z = a * o * _ - d * u * l, this._w = a * o * l + d * u * _;
+        this._x = _ * c * l - o * u * d, this._y = o * u * l + _ * c * d, this._z = o * c * d - _ * u * l, this._w = o * c * l + _ * u * d;
         break;
       case "YZX":
-        this._x = d * o * l + a * u * _, this._y = a * u * l + d * o * _, this._z = a * o * _ - d * u * l, this._w = a * o * l - d * u * _;
+        this._x = _ * c * l + o * u * d, this._y = o * u * l + _ * c * d, this._z = o * c * d - _ * u * l, this._w = o * c * l - _ * u * d;
         break;
       case "XZY":
-        this._x = d * o * l - a * u * _, this._y = a * u * l - d * o * _, this._z = a * o * _ + d * u * l, this._w = a * o * l + d * u * _;
+        this._x = _ * c * l - o * u * d, this._y = o * u * l - _ * c * d, this._z = o * c * d + _ * u * l, this._w = o * c * l + _ * u * d;
         break;
       default:
         console.warn(
@@ -78,47 +78,47 @@ class N {
     return this;
   }
 }
-class D {
-  constructor(t = 0, e = 0, i = 0) {
-    D.prototype.isVector3 = !0, this.x = t, this.y = e, this.z = i;
+class C {
+  constructor(t = 0, e = 0, n = 0) {
+    C.prototype.isVector3 = !0, this.x = t, this.y = e, this.z = n;
   }
 }
-class E {
-  constructor(t, e, i, s, c, r, h, f, a, o, l, d, u, _, C, F) {
-    E.prototype.isMatrix4 = !0, this.elements = [1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1], t !== void 0 && this.set(
+class Y {
+  constructor(t, e, n, s, i, r, h, f, o, c, l, _, u, d, k, M) {
+    Y.prototype.isMatrix4 = !0, this.elements = [1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1], t !== void 0 && this.set(
       t,
       e,
-      i,
+      n,
       s,
-      c,
+      i,
       r,
       h,
       f,
-      a,
       o,
+      c,
       l,
-      d,
-      u,
       _,
-      C,
-      F
+      u,
+      d,
+      k,
+      M
     );
   }
   makeRotationFromQuaternion(t) {
-    return this.compose(U, t, Q);
+    return this.compose(Q, t, I);
   }
-  compose(t, e, i) {
-    const s = this.elements, c = e._x, r = e._y, h = e._z, f = e._w, a = c + c, o = r + r, l = h + h, d = c * a, u = c * o, _ = c * l, C = r * o, F = r * l, B = h * l, O = f * a, L = f * o, J = f * l, R = i.x, v = i.y, X = i.z;
-    return s[0] = (1 - (C + B)) * R, s[1] = (u + J) * R, s[2] = (_ - L) * R, s[3] = 0, s[4] = (u - J) * v, s[5] = (1 - (d + B)) * v, s[6] = (F + O) * v, s[7] = 0, s[8] = (_ + L) * X, s[9] = (F - O) * X, s[10] = (1 - (d + C)) * X, s[11] = 0, s[12] = t.x, s[13] = t.y, s[14] = t.z, s[15] = 1, this;
+  compose(t, e, n) {
+    const s = this.elements, i = e._x, r = e._y, h = e._z, f = e._w, o = i + i, c = r + r, l = h + h, _ = i * o, u = i * c, d = i * l, k = r * c, M = r * l, Z = h * l, O = f * o, L = f * c, J = f * l, D = n.x, A = n.y, R = n.z;
+    return s[0] = (1 - (k + Z)) * D, s[1] = (u + J) * D, s[2] = (d - L) * D, s[3] = 0, s[4] = (u - J) * A, s[5] = (1 - (_ + Z)) * A, s[6] = (M + O) * A, s[7] = 0, s[8] = (d + L) * R, s[9] = (M - O) * R, s[10] = (1 - (_ + k)) * R, s[11] = 0, s[12] = t.x, s[13] = t.y, s[14] = t.z, s[15] = 1, this;
   }
 }
-const U = /* @__PURE__ */ new D(0, 0, 0), Q = /* @__PURE__ */ new D(1, 1, 1), T = /* @__PURE__ */ new E(), W = /* @__PURE__ */ new N();
-function w(n, t, e) {
-  return Math.max(t, Math.min(e, n));
+const Q = /* @__PURE__ */ new C(0, 0, 0), I = /* @__PURE__ */ new C(1, 1, 1), T = /* @__PURE__ */ new Y(), U = /* @__PURE__ */ new G();
+function z(a, t, e) {
+  return Math.max(t, Math.min(e, a));
 }
-class x {
-  constructor(t = 0, e = 0, i = 0, s = x.DEFAULT_ORDER) {
-    this.isEuler = !0, this._x = t, this._y = e, this._z = i, this._order = s;
+class b {
+  constructor(t = 0, e = 0, n = 0, s = b.DEFAULT_ORDER) {
+    this.isEuler = !0, this._x = t, this._y = e, this._z = n, this._order = s;
   }
   get x() {
     return this._x;
@@ -144,8 +144,8 @@ class x {
   set order(t) {
     this._order = t;
   }
-  set(t, e, i, s = this._order) {
-    return this._x = t, this._y = e, this._z = i, this._order = s, this;
+  set(t, e, n, s = this._order) {
+    return this._x = t, this._y = e, this._z = n, this._order = s, this;
   }
   clone() {
     return new this.constructor(this._x, this._y, this._z, this._order);
@@ -153,26 +153,26 @@ class x {
   copy(t) {
     return this._x = t._x, this._y = t._y, this._z = t._z, this._order = t._order, this;
   }
-  setFromRotationMatrix(t, e = this._order, i = !0) {
-    const s = t.elements, c = s[0], r = s[4], h = s[8], f = s[1], a = s[5], o = s[9], l = s[2], d = s[6], u = s[10];
+  setFromRotationMatrix(t, e = this._order, n = !0) {
+    const s = t.elements, i = s[0], r = s[4], h = s[8], f = s[1], o = s[5], c = s[9], l = s[2], _ = s[6], u = s[10];
     switch (e) {
       case "XYZ":
-        this._y = Math.asin(w(h, -1, 1)), Math.abs(h) < 0.9999999 ? (this._x = Math.atan2(-o, u), this._z = Math.atan2(-r, c)) : (this._x = Math.atan2(d, a), this._z = 0);
+        this._y = Math.asin(z(h, -1, 1)), Math.abs(h) < 0.9999999 ? (this._x = Math.atan2(-c, u), this._z = Math.atan2(-r, i)) : (this._x = Math.atan2(_, o), this._z = 0);
         break;
       case "YXZ":
-        this._x = Math.asin(-w(o, -1, 1)), Math.abs(o) < 0.9999999 ? (this._y = Math.atan2(h, u), this._z = Math.atan2(f, a)) : (this._y = Math.atan2(-l, c), this._z = 0);
+        this._x = Math.asin(-z(c, -1, 1)), Math.abs(c) < 0.9999999 ? (this._y = Math.atan2(h, u), this._z = Math.atan2(f, o)) : (this._y = Math.atan2(-l, i), this._z = 0);
         break;
       case "ZXY":
-        this._x = Math.asin(w(d, -1, 1)), Math.abs(d) < 0.9999999 ? (this._y = Math.atan2(-l, u), this._z = Math.atan2(-r, a)) : (this._y = 0, this._z = Math.atan2(f, c));
+        this._x = Math.asin(z(_, -1, 1)), Math.abs(_) < 0.9999999 ? (this._y = Math.atan2(-l, u), this._z = Math.atan2(-r, o)) : (this._y = 0, this._z = Math.atan2(f, i));
         break;
       case "ZYX":
-        this._y = Math.asin(-w(l, -1, 1)), Math.abs(l) < 0.9999999 ? (this._x = Math.atan2(d, u), this._z = Math.atan2(f, c)) : (this._x = 0, this._z = Math.atan2(-r, a));
+        this._y = Math.asin(-z(l, -1, 1)), Math.abs(l) < 0.9999999 ? (this._x = Math.atan2(_, u), this._z = Math.atan2(f, i)) : (this._x = 0, this._z = Math.atan2(-r, o));
         break;
       case "YZX":
-        this._z = Math.asin(w(f, -1, 1)), Math.abs(f) < 0.9999999 ? (this._x = Math.atan2(-o, a), this._y = Math.atan2(-l, c)) : (this._x = 0, this._y = Math.atan2(h, u));
+        this._z = Math.asin(z(f, -1, 1)), Math.abs(f) < 0.9999999 ? (this._x = Math.atan2(-c, o), this._y = Math.atan2(-l, i)) : (this._x = 0, this._y = Math.atan2(h, u));
         break;
       case "XZY":
-        this._z = Math.asin(-w(r, -1, 1)), Math.abs(r) < 0.9999999 ? (this._x = Math.atan2(d, a), this._y = Math.atan2(h, c)) : (this._x = Math.atan2(-o, u), this._y = 0);
+        this._z = Math.asin(-z(r, -1, 1)), Math.abs(r) < 0.9999999 ? (this._x = Math.atan2(_, o), this._y = Math.atan2(h, i)) : (this._x = Math.atan2(-c, u), this._y = 0);
         break;
       default:
         console.warn(
@@ -181,14 +181,14 @@ class x {
     }
     return this._order = e, this;
   }
-  setFromQuaternion(t, e, i) {
-    return T.makeRotationFromQuaternion(t), this.setFromRotationMatrix(T, e, i);
+  setFromQuaternion(t, e, n) {
+    return T.makeRotationFromQuaternion(t), this.setFromRotationMatrix(T, e, n);
   }
   setFromVector3(t, e = this._order) {
     return this.set(t.x, t.y, t.z, e);
   }
   reorder(t) {
-    return W.setFromEuler(this), this.setFromQuaternion(W, t);
+    return U.setFromEuler(this), this.setFromQuaternion(U, t);
   }
   equals(t) {
     return t._x === this._x && t._y === this._y && t._z === this._z && t._order === this._order;
@@ -203,39 +203,26 @@ class x {
     yield this._x, yield this._y, yield this._z, yield this._order;
   }
 }
-x.DEFAULT_ORDER = "XYZ";
+b.DEFAULT_ORDER = "XYZ";
 class m {
-  constructor(t = 0, e = 0, i = 0, s = 0, c = 0, r = 0, h = 0, f = 0, a = "") {
-    this.x = t, this.y = e, this.z = i, this.yaw = s, this.pitch = c, this.roll = r, this.volume = h, this.gone = f !== 0, this.uuid = a;
+  constructor(t = 0, e = 0, n = 0, s = 0, i = 0, r = 0, h = 0, f = 0, o = "") {
+    this.x = t, this.y = e, this.z = n, this.yaw = s, this.pitch = i, this.roll = r, this.volume = h, this.gone = f !== 0, this.uuid = o;
   }
-  static fromWebGLCoordinates2(t, e, i, s, c, r) {
-    let h = new x(s, c, r);
+  static fromWebGLCoordinates(t, e, n, s, i, r) {
+    let h = new b(s, i, r);
     h.reorder("YXZ");
-    let f = t / 2 + 0.5, a = -(i / 2) + 0.5, o = e / 2 + 0.5;
+    let f = t / 2 + 0.5, o = -(n / 2) + 0.5, c = e / 2 + 0.5;
     return new m(
       f,
-      a,
       o,
-      b(h.y),
-      b(h.x),
-      -b(h.z)
-    );
-  }
-  static fromWebGLCoordinates(t, e, i, s, c, r) {
-    let h = new x(s, c, r);
-    h.reorder("YXZ");
-    let f = -(i / 2) + 0.5, a = -(t / 2) + 0.5, o = e / 2 + 0.5;
-    return new m(
-      f,
-      a,
-      o,
-      b(h.y),
-      b(h.x),
-      b(h.z)
+      c,
+      $(h.y),
+      $(h.x),
+      $(h.z)
     );
   }
   static fromDataBuffer(t) {
-    const e = new DataView(t), i = ("0000000000000000" + e.getBigUint64(0, !1).toString(16)).slice(-16), s = ("0000000000000000" + e.getBigUint64(8, !1).toString(16)).slice(-16), c = `${i.slice(0, 8)}-${i.slice(8, 12)}-${i.slice(12, 16)}-${s.slice(0, 4)}-${s.slice(4, 16)}`;
+    const e = new DataView(t), n = ("0000000000000000" + e.getBigUint64(0, !1).toString(16)).slice(-16), s = ("0000000000000000" + e.getBigUint64(8, !1).toString(16)).slice(-16), i = `${n.slice(0, 8)}-${n.slice(8, 12)}-${n.slice(12, 16)}-${s.slice(0, 4)}-${s.slice(4, 16)}`;
     return new m(
       e.getFloat32(16, !0),
       e.getFloat32(20, !0),
@@ -245,14 +232,14 @@ class m {
       e.getFloat32(36, !0),
       e.getFloat32(40, !0),
       e.getInt32(44, !0),
-      c
+      i
     );
   }
   static fromBlobAsWeb(t, e) {
-    var i, s = new FileReader();
-    s.onload = function(c) {
-      i = c.target.result;
-      const r = new DataView(i), h = ("0000000000000000" + r.getBigUint64(0, !1).toString(16)).slice(-16), f = ("0000000000000000" + r.getBigUint64(8, !1).toString(16)).slice(-16), a = `${h.slice(0, 8)}-${h.slice(8, 12)}-${h.slice(12, 16)}-${f.slice(0, 4)}-${f.slice(4, 16)}`, o = new m(
+    var n, s = new FileReader();
+    s.onload = function(i) {
+      n = i.target.result;
+      const r = new DataView(n), h = ("0000000000000000" + r.getBigUint64(0, !1).toString(16)).slice(-16), f = ("0000000000000000" + r.getBigUint64(8, !1).toString(16)).slice(-16), o = `${h.slice(0, 8)}-${h.slice(8, 12)}-${h.slice(12, 16)}-${f.slice(0, 4)}-${f.slice(4, 16)}`, c = new m(
         r.getFloat32(16, !0),
         r.getFloat32(20, !0),
         r.getFloat32(24, !0),
@@ -261,20 +248,20 @@ class m {
         r.getFloat32(36, !0),
         r.getFloat32(40, !0),
         r.getInt32(44, !0),
-        a
+        o
       );
-      e(o.asWebGLCoordinates());
+      e(c.asWebGLCoordinates());
     }, s.readAsArrayBuffer(t);
   }
   toDataBuffer() {
     const t = new ArrayBuffer(48), e = new DataView(t);
     return e.setFloat32(16, this.x, !0), e.setFloat32(20, this.y, !0), e.setFloat32(24, this.z, !0), e.setFloat32(28, this.yaw, !0), e.setFloat32(32, this.pitch, !0), e.setFloat32(36, this.roll, !0), t;
   }
-  asWebGLCoordinates2() {
-    let t = new x(
-      p(this.pitch),
-      p(this.yaw),
-      -p(this.roll),
+  asWebGLCoordinates() {
+    let t = new b(
+      v(this.pitch),
+      v(this.yaw),
+      v(this.roll),
       "YXZ"
     );
     return t.reorder("XYZ"), {
@@ -289,129 +276,134 @@ class m {
       gone: this.gone
     };
   }
-  asWebGLCoordinates() {
-    let t = new x(
-      p(this.pitch),
-      p(this.yaw),
-      p(this.roll),
-      "YXZ"
-    );
-    return t.reorder("XYZ"), {
-      uuid: this.uuid,
-      position: {
-        x: -((this.y - 0.5) * 2),
-        y: (this.z - 0.5) * 2,
-        z: -((this.x - 0.5) * 2)
-      },
-      rotation: { x: t.x, y: t.y, z: t.z },
-      volume: this.volume,
-      gone: this.gone
-    };
-  }
 }
-function b(n) {
-  return n / Math.PI * 180;
+function $(a) {
+  return a / Math.PI * 180;
 }
-function p(n) {
-  return n / 180 * Math.PI;
+function v(a) {
+  return a / 180 * Math.PI;
 }
-let g, y, z, Y, S, Z, M, A;
-function I(n) {
-  Y = n;
+let x, y, g, E, S, B, p, F;
+function j(a) {
+  E = a;
 }
-function V(n) {
-  S = n;
+function V(a) {
+  S = a;
 }
-function j(n) {
-  Z = n;
+function P(a) {
+  B = a;
 }
-function H(n) {
-  M = n;
+function H(a) {
+  p = a;
 }
-function P(n, t) {
-  if (z !== void 0 && z.readyState === "open") {
+function K(a, t) {
+  if (g !== void 0 && g.readyState === "open") {
     let e = m.fromWebGLCoordinates(
-      n.x,
-      n.y,
-      n.z,
+      a.x,
+      a.y,
+      a.z,
       t.x,
       t.y,
       t.z
     );
-    z.send(e.toDataBuffer());
+    g.send(e.toDataBuffer());
   }
 }
-function K(n) {
-  if (z !== void 0 && z.readyState === "open") {
+function q(a) {
+  if (g !== void 0 && g.readyState === "open") {
     let t = new m(
-      n.x,
-      n.y,
-      n.z,
-      n.yaw,
-      n.pitch,
-      n.roll
+      a.x,
+      a.y,
+      a.z,
+      a.yaw,
+      a.pitch,
+      a.roll
     );
-    z.send(t.toDataBuffer());
+    g.send(t.toDataBuffer());
   }
 }
-function q() {
-  console.log("disconnecting"), A !== void 0 && A.forEach((n) => {
-    n.stop();
-  }), y.close(), g.close();
+function tt() {
+  console.log("disconnecting"), F !== void 0 && F.forEach((a) => {
+    a.stop();
+  }), y.close(), x.close();
 }
-function tt(n, t, e, i, s, c = {}, r = "https://panaudia.com/entrance") {
+function et(a, t, e, n, s, i = {}, r = "https://panaudia.com/entrance") {
   let h = m.fromWebGLCoordinates(
-    i.x,
-    i.y,
-    i.z,
+    n.x,
+    n.y,
+    n.z,
     s.x,
     s.y,
     s.z
   );
-  G(n, t, e, h, c, r);
+  W(a, t, e, h, i, r);
 }
-function G(n, t, e, i, s = {}, c = "https://panaudia.com/entrance") {
-  let r = {
-    x: i.x,
-    y: i.y,
-    z: i.z,
-    yaw: i.yaw,
-    pitch: i.pitch,
-    roll: i.roll
+function st(a, t, e, n, s = {}, i = "http://localhost:8080/join") {
+  let r = m.fromWebGLCoordinates(
+    e.x,
+    e.y,
+    e.z,
+    n.x,
+    n.y,
+    n.z
+  );
+  nt(ticket, a, t, r, s);
+}
+function nt(a, t, e, n = {}, s = "http://localhost:8080/join") {
+  let i = {
+    x: e.x,
+    y: e.y,
+    z: e.z,
+    yaw: e.yaw,
+    pitch: e.pitch,
+    roll: e.roll
   };
-  t === !0 && (r.data = "true"), fetch(c + "?ticket=" + n).then((h) => {
+  a === !0 && (i.data = "true");
+  const r = new URLSearchParams({ ...n, ...i }), h = s + "?" + r.toString();
+  N(h, t);
+}
+function W(a, t, e, n, s = {}, i = "https://panaudia.com/entrance") {
+  let r = {
+    x: n.x,
+    y: n.y,
+    z: n.z,
+    yaw: n.yaw,
+    pitch: n.pitch,
+    roll: n.roll
+  };
+  t === !0 && (r.data = "true"), fetch(i + "?ticket=" + a).then((h) => {
     if (h.ok)
       return h.json();
   }).then((h) => {
     if (h.status === "ok") {
       const f = new URLSearchParams({
-        ticket: n,
+        ticket: a,
         ...s,
         ...r
-      }), a = h.url + "?" + f.toString();
-      et(a, e);
+      }), o = h.url + "?" + f.toString();
+      N(o, e);
     } else
       console.error("lookup failed");
   }).catch((h) => console.error("lookup error:", h));
 }
-async function et(n, t) {
+async function N(a, t) {
   y = new RTCPeerConnection({
     iceServers: [
       { urls: "stun:stun.l.google.com:19302" },
       { urls: "stun:stun.l.google.com:5349" },
       { urls: "stun:stun1.l.google.com:3478" }
     ]
-  }), y.onicecandidate = (i) => {
-    if (i.candidate && i.candidate.candidate !== "") {
-      let s = JSON.stringify(i.candidate);
-      g.send(JSON.stringify({ event: "candidate", data: s }));
+  }), y.onicecandidate = (n) => {
+    if (n.candidate && n.candidate.candidate !== "") {
+      let s = JSON.stringify(n.candidate);
+      x.send(JSON.stringify({ event: "candidate", data: s }));
     }
-  }, y.ontrack = function(i) {
-    M("connected", "Connected");
-    let s = document.createElement(i.track.kind);
-    s.srcObject = i.streams[0], s.autoplay = !0, s.controls = !0, s.id = "panaudia-player", document.getElementById(t).prepend(s), i.track.onmute = function(c) {
+  }, y.ontrack = function(n) {
+    p("connected", "Connected");
+    let s = document.createElement(n.track.kind);
+    s.srcObject = n.streams[0], s.autoplay = !0, s.controls = !0, s.id = "panaudia-player", document.getElementById(t).prepend(s), n.track.onmute = function(i) {
       s.play();
-    }, i.streams[0].onremovetrack = ({ track: c }) => {
+    }, n.streams[0].onremovetrack = ({ track: i }) => {
       s.parentNode && s.parentNode.removeChild(s);
     };
   };
@@ -427,43 +419,43 @@ async function et(n, t) {
       }
     }
   );
-  A = e.getAudioTracks(), A.forEach((i) => {
-    y.addTrack(i, e);
-  }), st(y), it(n);
+  F = e.getAudioTracks(), F.forEach((n) => {
+    y.addTrack(n, e);
+  }), at(y), it(a);
 }
-function st(n) {
-  n.ondatachannel = (t) => {
+function at(a) {
+  a.ondatachannel = (t) => {
     let e = t.channel;
-    Y !== void 0 && e.label === "attributes" && (e.onmessage = (i) => {
-      let s = $.fromJson(i.data);
+    E !== void 0 && e.label === "attributes" && (e.onmessage = (n) => {
+      let s = X.fromJson(n.data);
       if (!s)
-        return k("failed to parse attributes");
-      Y(s);
-    }), e.label === "state" && (z = e, e.onopen = () => {
-      M("data_connected", "Data channel connected");
-    }, e.onmessage = (i) => {
-      if (i.data instanceof ArrayBuffer) {
-        let s = m.fromDataBuffer(i.data);
-        S !== void 0 && S(s.asWebGLCoordinates()), Z !== void 0 && Z(s);
+        return w("failed to parse attributes");
+      E(s);
+    }), e.label === "state" && (g = e, e.onopen = () => {
+      p("data_connected", "Data channel connected");
+    }, e.onmessage = (n) => {
+      if (n.data instanceof ArrayBuffer) {
+        let s = m.fromDataBuffer(n.data);
+        S !== void 0 && S(s.asWebGLCoordinates()), B !== void 0 && B(s);
       } else
-        m.fromBlobAsWeb(i.data, S);
+        m.fromBlobAsWeb(n.data, S);
     });
   };
 }
-function it(n) {
-  M("connecting", "Connecting"), g = new WebSocket(n), g.onclose = function(t) {
-    M("disconnected", "Disconnected");
-  }, g.onmessage = function(t) {
+function it(a) {
+  p("connecting", "Connecting"), x = new WebSocket(a), x.onclose = function(t) {
+    p("disconnected", "Disconnected");
+  }, x.onmessage = function(t) {
     let e = JSON.parse(t.data);
     if (!e)
-      return k("failed to parse msg");
+      return w("failed to parse msg");
     switch (e.event) {
       case "offer":
-        let i = JSON.parse(e.data);
-        if (!i)
-          return k("failed to parse offer");
+        let n = JSON.parse(e.data);
+        if (!n)
+          return w("failed to parse offer");
         try {
-          nt(i);
+          rt(n);
         } catch (r) {
           alert(r);
         }
@@ -471,66 +463,70 @@ function it(n) {
       case "candidate":
         let s = JSON.parse(e.data);
         if (!s)
-          return k("failed to parse candidate");
+          return w("failed to parse candidate");
         y.addIceCandidate(s);
         return;
       case "error":
-        let c = JSON.parse(e.data);
-        if (!c)
-          return k("failed to parse error message");
-        console.log("errorMsg", c), M("error", c.message);
+        let i = JSON.parse(e.data);
+        if (!i)
+          return w("failed to parse error message");
+        console.log("errorMsg", i), p("error", i.message);
         return;
     }
-  }, g.onerror = function(t) {
-    k("ERROR: " + t);
+  }, x.onerror = function(t) {
+    w("ERROR: " + t);
   };
 }
-async function nt(n) {
-  await y.setRemoteDescription(n);
+async function rt(a) {
+  await y.setRemoteDescription(a);
   let t = await y.createAnswer();
   t.sdp = t.sdp.replace("a=fmtp:111 ", "a=fmtp:111 stereo=1; sprop-stereo=1; "), await y.setLocalDescription(t);
   let e = JSON.stringify(t);
-  g.send(JSON.stringify({ event: "answer", data: e }));
+  x.send(JSON.stringify({ event: "answer", data: e }));
 }
-const k = (n) => {
-  console.log(n);
+const w = (a) => {
+  console.log(a);
 };
-function at(n) {
-  I(n);
+function ot(a) {
+  j(a);
 }
-function rt(n) {
-  V(n);
+function ct(a) {
+  V(a);
 }
-function ot(n) {
-  j(n);
+function ht(a) {
+  P(a);
 }
-function ct(n) {
-  H(n);
+function lt(a) {
+  H(a);
 }
-function ht(n, t) {
-  P(n, t);
+function ut(a, t) {
+  K(a, t);
 }
-function lt(n) {
-  K(n);
+function _t(a) {
+  q(a);
 }
-function ut() {
-  q();
+function dt() {
+  tt();
 }
-function dt(n, t, e, i, s, c = {}, r = "https://panaudia.com/gateway") {
-  tt(n, t, e, i, s, c, r);
+function ft(a, t, e, n, s, i = {}, r = "https://panaudia.com/gateway") {
+  et(a, t, e, n, s, i, r);
 }
-function _t(n, t, e, i, s = {}, c = "https://panaudia.com/gateway") {
-  G(n, t, e, i, s, c);
+function yt(a, t, e, n, s = {}, i = "http://localhost:8080/join") {
+  st(a, t, e, n, s, i);
+}
+function mt(a, t, e, n, s = {}, i = "https://panaudia.com/gateway") {
+  W(a, t, e, n, s, i);
 }
 export {
-  dt as connect,
-  _t as connectAmbisonic,
-  ut as disconnect,
-  ht as move,
-  lt as moveAmbisonic,
-  ot as setAmbisonicStateCallback,
-  at as setAttributesCallback,
-  ct as setConnectionStatusCallback,
-  rt as setStateCallback
+  ft as connect,
+  mt as connectAmbisonic,
+  yt as connectDirect,
+  dt as disconnect,
+  ut as move,
+  _t as moveAmbisonic,
+  ht as setAmbisonicStateCallback,
+  ot as setAttributesCallback,
+  lt as setConnectionStatusCallback,
+  ct as setStateCallback
 };
 //# sourceMappingURL=panaudia-sdk.js.map
