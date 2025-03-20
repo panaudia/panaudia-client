@@ -4,6 +4,25 @@ import {setPlayerId} from "world";
 
 let skins = {};
 
+
+function uuidv4() {
+  return "10000000-1000-4000-8000-100000000000".replace(/[018]/g, c =>
+    (+c ^ crypto.getRandomValues(new Uint8Array(1))[0] & 15 >> +c / 4).toString(16)
+  );
+}
+
+window.connectToSquareDirect = (url, inner_colour, outer_colour) => {
+    const playerId = uuidv4();
+    setPlayerId(playerId, parseInt(inner_colour, 16), parseInt(outer_colour, 16));
+
+    const attrs = {
+        "outer_colour": outer_colour,
+        "inner_colour": inner_colour
+    };
+
+    connectDirect(true, "side", {x:0, y:0, z:0}, {x:0, y:0, z:0}, attrs, url);
+}
+
 window.connectToSquareGateway = (playerId, url, ticket, inner_colour, outer_colour) => {
     setPlayerId(playerId, parseInt(inner_colour, 16), parseInt(outer_colour, 16));
 
