@@ -4,9 +4,10 @@ This repo contains a collection of resources for use with [panaudia.com](https:/
 
 ## examples
 
-We have only one example so far, a simple web/javascript client app:
+We have two web examples:
 
-[examples/web](examples/web-with-cloud/README.md)
+- A very simple static web page without tickets for local testing [examples/web-minimal-static](examples/web-minimal-static/README.md)
+- A  web/javascript client app that makes tickets and connects to Panaudia Cloud [examples/web-with-cloud](examples/web-with-cloud/README.md)
 
 ## schemata
 
@@ -28,3 +29,7 @@ These are the specs for pieces of our public APIs, full documentation is on the 
 ## sdks
 
 - [JavaScript/TypeScript SDK](sdks/javascript/README.md)
+
+## Dockerfiles
+
+- [docker](docker/README.md)
