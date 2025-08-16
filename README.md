@@ -6,7 +6,7 @@ This repo contains a collection of resources for use with [panaudia.com](https:/
 
 We have only one example so far, a simple web/javascript client app:
 
-[examples/web](examples/web/README.md)
+[examples/web](examples/web-with-cloud/README.md)
 
 ## schemata
 

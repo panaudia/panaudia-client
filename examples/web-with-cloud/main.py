@@ -18,7 +18,7 @@ app = Flask("town_square")
 def index():
 
     player_id = str(uuid.uuid4())
-    ticket = make_ticket(PRIVATE_KEY, config.SPACE_ID, "anon", uid=player_id, issued_by=config.AUTHORITY)
+    ticket = make_ticket(PRIVATE_KEY, config.PANAUDIA_SPACE_ID, "anon", uid=player_id, issued_by=config.AUTHORITY)
     lookup_url = "%s://%s/gateway" % (APP_SCHEME, APP_HOST)
     rsp = render_template('index.html', player_id=player_id, ticket=ticket, lookup_url=lookup_url)
     return rsp, 200, {}

@@ -109,7 +109,7 @@ function connectDirect(
         rotation.z,
     );
 
-    connectAmbisonicDirect(ticket, data, domParentId, nodeState, attrs, url);
+    connectAmbisonicDirect(data, domParentId, nodeState, attrs, url);
 }
 
 function connectAmbisonicDirect(
@@ -225,9 +225,9 @@ async function connectToSpace(url, domPlayerParentId) {
         {
             audio: {
                 autoGainControl: true,
-                echoCancellation: false,
+                echoCancellation: true,
                 latency: 0,
-                noiseSuppression: false,
+                noiseSuppression: true,
                 sampleRate: 48000,
                 sampleSize: 16,
             },

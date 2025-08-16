@@ -26,7 +26,7 @@ pip install -r requirements.txt
 There is a file called `config.py`, this holds the ID for a Panaudia Space and the authority name that will be used to sign keys:
 
 ```python
-SPACE_ID = "space_0b76c074-b21b-4fc9-aee5-e1a5de4b7c6f"
+PANAUDIA_SPACE_ID = "space_0b76c074-b21b-4fc9-aee5-e1a5de4b7c6f"
 AUTHORITY = "dev.panaudia.com"
 ```
 

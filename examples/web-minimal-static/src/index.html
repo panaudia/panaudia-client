@@ -1,0 +1,102 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="utf-8">
+    <title>Panaudia Town Square</title>
+    <link rel="stylesheet" href="css/main.css">
+    <link rel="stylesheet" href="css/controls.css">
+    <link rel="stylesheet" href="css/square-controls.css">
+    <script type="importmap">
+        {
+          "imports": {
+            "three": "/js/three/three.module.min.js",
+            "three/addons/": "/js/three/jsm/",
+            "panaudia": "/js/panaudia-sdk.js",
+            "world": "/js/world.js",
+            "elements": "/js/square-elements.js"
+          }
+        }
+    </script>
+</head>
+<body>
+    <div id="ident" class="ident">
+        <a href="/"><img class="pan-logo" src="images/grey_wide.png"></a>
+        <a id="title" class="title" href="/">PANAUDIA</a>
+    </div>
+<div id="side" class="side">
+    <div id="info-box" class="info-box">
+        <div class="center-holder">
+            <h2>Panaudia Town Square</h2>
+            <p>Pick your colours</p>
+            <div class="colours-picker">
+                <div class="picker-wrapper" id="outer-picker-wrapper">
+                    <input type="color" id="outer-picker" name="body" value="#00bbff"/>
+                </div>
+                <div class="picker-wrapper" id="inner-picker-wrapper">
+                    <input type="color" id="inner-picker" name="head" value="#2f56ee"/>
+                </div>
+
+                <script>
+                    var inner_picker = document.getElementById("inner-picker");
+                    var outer_picker = document.getElementById("outer-picker");
+                    var outer_picker_wrapper = document.getElementById("outer-picker-wrapper");
+                    var inner_picker_wrapper = document.getElementById("inner-picker-wrapper");
+                    outer_picker.oninput = function () {
+                        outer_picker_wrapper.style.backgroundColor = outer_picker.value;
+                    }
+
+                    inner_picker.oninput = function () {
+                        inner_picker_wrapper.style.backgroundColor = inner_picker.value;
+                    }
+                    outer_picker_wrapper.style.backgroundColor = outer_picker.value;
+                    inner_picker_wrapper.style.backgroundColor = inner_picker.value;
+                </script>
+            </div>
+        </div>
+    </div>
+    <button id="connect" onclick="(() => {
+            const inner_colour = document.getElementById('inner-picker').value.slice(1);
+            const outer_colour = document.getElementById('outer-picker').value.slice(1);
+            window.connectToSquareDirect('ws://localhost:8080/join', inner_colour,
+            outer_colour);
+            })()">
+        Enter
+    </button>
+    <button id="disconnect" class="hidden" onclick="window.disconnectFromGateway()">
+        leave
+    </button>
+    <div class="spinner hidden" id="spinner">
+        <div class="lds-dual-ring"></div>
+    </div>
+    <div id="error-block" class="info-box">
+        <img class="info-icon" src="images/warning.svg"/>
+        <p id="error-msg">this is a p</p>
+    </div>
+    <div id="mobile-turn" class="mobile-turn">
+        <img class="turn-img" src="images/turn_right_handed.png"/>
+        <p>Turn your device to landscape</p>
+    </div>
+</div>
+<div id="instructions" class="instructions">
+    Use your mouse to look around and the W, A, S, D keys to move - press ESC to get your mouse pointer back - X to
+    dismiss
+</div>
+<div id="touch-move" class="touch touch-move">
+    <span class="touch-hand move-decoration"> &#xf256;</span>
+    <span class="touch-label move-decoration">move</span>
+    <span id="touch-arrow-move-up" class="touch-arrow touch-arrow-up">&#xf0d8;</span>
+    <span id="touch-arrow-move-down" class="touch-arrow touch-arrow-down">&#xf0d8;</span>
+    <span id="touch-arrow-move-left" class="touch-arrow touch-arrow-left">&#xf0d8;</span>
+    <span id="touch-arrow-move-right" class="touch-arrow touch-arrow-right">&#xf0d8;</span>
+</div>
+<div id="touch-look" class="touch touch-look">
+    <span class="touch-hand look-decoration"> &#xf256;</span>
+    <span class="touch-label look-decoration">look</span>
+    <span id="touch-arrow-look-up" class="touch-arrow touch-arrow-up">&#xf0d8;</span>
+    <span id="touch-arrow-look-down" class="touch-arrow touch-arrow-down">&#xf0d8;</span>
+    <span id="touch-arrow-look-left" class="touch-arrow touch-arrow-left">&#xf0d8;</span>
+    <span id="touch-arrow-look-right" class="touch-arrow touch-arrow-right">&#xf0d8;</span>
+</div>
+<script type="module" src="js/start.js"></script>
+</body>
+</html>
