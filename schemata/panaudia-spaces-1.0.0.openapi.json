@@ -287,8 +287,7 @@
                                 "required": [
                                     "name",
                                     "start_time",
-                                    "end_time",
-                                    "end_time",
+                                    "duration_minutes",
                                     "region",
                                     "capacity",
                                     "size"
@@ -793,7 +792,7 @@
                                 "$ref": "#/components/schemas/panaudia_uuid"
                             },
                             {
-                                "description": "A unique UUID for this ticket. This is optional and if ommitted Pnaudia will automatically generate one.",
+                                "description": "A unique UUID for this ticket. This is optional and if omitted Panaudia will automatically generate one.",
                                 "example": "7dc3d357-63f4-433b-b8cd-5b7cd6bee3aa"
                             }
                         ]
@@ -1008,7 +1007,7 @@
                             250,
                             500
                         ],
-                        "example": 128
+                        "example": 100
                     },
                     "size": {
                         "description": "Spaces are always cubes, this is the equivalent physical size of the space in meters. When you give x, y, z coordinates for users they are always normalised to the range 0.0 - 1.0, but this size dimension determines how we model the sound within the space.",

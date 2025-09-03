@@ -50,6 +50,12 @@
                 "priority": {
                     "type": "boolean"
                 },
+                "subspaces": {
+                    "type": "array",
+                    "items": {
+                        "type": "string"
+                    }
+                },
                 "attrs": {
                     "type": "object"
                 }
