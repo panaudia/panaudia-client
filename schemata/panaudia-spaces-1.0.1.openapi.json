@@ -2,7 +2,7 @@
     "openapi": "3.0.0",
     "info": {
         "title": "Panaudia Spaces API V1",
-        "version": "1.0",
+        "version": "1.0.1",
         "description": "Panaudia's Spaces API for our hosted cloud mixers.",
         "termsOfService": "https://panaudia.com/terms",
         "contact": {
@@ -317,6 +317,9 @@
                                     },
                                     "public_key": {
                                         "$ref": "#/components/schemas/space/properties/public_key"
+                                    },
+                                    "link": {
+                                        "$ref": "#/components/schemas/space/properties/link"
                                     }
                                 }
                             }
@@ -1088,6 +1091,10 @@
                         "maximum": 1440,
                         "minimum": 15,
                         "example": 60
+                    },
+                    "link": {
+                        "description": "Set to true to enable Panaudia Link for this Space",
+                        "type": "boolean"
                     },
                     "total_price": {
                         "allOf": [
