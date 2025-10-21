@@ -5,6 +5,8 @@ import {
     _setConnectionStatusCallback,
     _move,
     _moveAmbisonic,
+    _mute,
+    _unmute,
     _disconnect,
     _connect,
     _connectDirect,
@@ -81,6 +83,14 @@ export function setConnectionStatusCallback(cb: ConnectionStatusCallback) {
 
 export function move(position: Vec3, rotation: Vec3): void {
     _move(position, rotation)
+}
+
+export function mute(nodeId: String): void {
+    _mute(nodeId)
+}
+
+export function unmute(nodeId: String): void {
+    _unmute(nodeId)
 }
 
 export function moveAmbisonic(coordinates: AmbisonicCoordinates): void {

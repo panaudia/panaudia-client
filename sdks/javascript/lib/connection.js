@@ -4,6 +4,7 @@ import {PanaudiaNodeState} from './state.js';
 let ws;
 let pc;
 let dcData;
+let dcControl;
 let attributesCallback;
 let stateCallback;
 let ambisonicStateCallback;
@@ -54,6 +55,24 @@ function moveAmbisonic(coordinates) {
                 coordinates.roll
             );
             dcData.send(sourceState.toDataBuffer());
+        }
+    }
+}
+
+function mute(node_id) {
+    if (dcControl !== undefined) {
+        if (dcControl.readyState === 'open') {
+            const msg = {type: "mute", message: {node: node_id}}
+            dcControl.send(JSON.stringify(msg));
+        }
+    }
+}
+
+function unmute(node_id) {
+    if (dcControl !== undefined) {
+        if (dcControl.readyState === 'open') {
+            const msg = {type: "unmute", message: {node: node_id}}
+            dcControl.send(JSON.stringify(msg));
         }
     }
 }
@@ -224,10 +243,10 @@ async function connectToSpace(url, domPlayerParentId) {
     const stream = await navigator.mediaDevices.getUserMedia(
         {
             audio: {
-                autoGainControl: true,
-                echoCancellation: true,
+                autoGainControl: false,
+                echoCancellation: false,
                 latency: 0,
-                noiseSuppression: true,
+                noiseSuppression: false,
                 sampleRate: 48000,
                 sampleSize: 16,
             },
@@ -257,6 +276,10 @@ function addDataChannels(pc) {
                 }
                 attributesCallback(attributes);
             };
+        }
+
+        if (receiveChannel.label === "control") {
+            dcControl = receiveChannel;
         }
 
         if (receiveChannel.label === "state") {
@@ -359,4 +382,6 @@ export {
     connect as _connect,
     connectDirect as _connectDirect,
     connectAmbisonic as _connectAmbisonic,
+    mute as _mute,
+    unmute as _unmute
 };
