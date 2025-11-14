@@ -9,6 +9,7 @@
 #include "AudioDevice.h"
 #include "AudioCapture.h"
 #include "DSP/BufferVectorOperations.h"
+#include "PanaudiaConnectionManager.h"
 
 UPanaudiaAudioComponent::UPanaudiaAudioComponent()
 {

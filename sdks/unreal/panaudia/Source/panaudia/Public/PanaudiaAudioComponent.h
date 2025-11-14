@@ -12,9 +12,10 @@
 #include "HAL/Platform.h"
 
 #include "PanaudiaTypes.h"
-#include "PanaudiaConnectionManager.h"
 
 #include "PanaudiaAudioComponent.generated.h"
+
+class FPanaudiaConnectionManager;
 
 /**
  * Actor component that handles audio capture, WebRTC connection, and binaural playback
