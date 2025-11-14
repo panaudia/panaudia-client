@@ -87,21 +87,28 @@ public class Panaudia : ModuleRules
         }
         else if (Target.Platform == UnrealTargetPlatform.Win64)
         {
-            // Windows configuration
-            string LibDataChannelPath = Path.Combine(ThirdPartyPath, "libdatachannel");
-            PublicIncludePaths.Add(Path.Combine(LibDataChannelPath, "include"));
-            PublicAdditionalLibraries.Add(Path.Combine(LibDataChannelPath, "build/Win64/Release/datachannel.lib"));
+                PublicSystemLibraries.AddRange(new string[]
+                {
+                    "ws2_32.lib",
+                    "iphlpapi.lib",
+                    "bcrypt.lib"
+                });
 
-            string LibOpusPath = Path.Combine(ThirdPartyPath, "opus");
-            PublicIncludePaths.Add(Path.Combine(LibOpusPath, "include"));
-            PublicAdditionalLibraries.Add(Path.Combine(LibOpusPath, "build/Win64/Release/Release/opus.lib"));
+                // libdatachannel
+                string LibDataChannelPath = Path.Combine(ThirdPartyPath, "libdatachannel");
+                PublicIncludePaths.Add(Path.Combine(LibDataChannelPath, "include"));
+                PublicAdditionalLibraries.Add(Path.Combine(LibDataChannelPath, "build/Win64/Release/libdatachannel.lib"));
 
-            PublicSystemLibraries.AddRange(new string[]
-            {
-                "ws2_32.lib",
-                "iphlpapi.lib",
-                "bcrypt.lib"
-            });
+                // libopus
+                string LibOpusPath = Path.Combine(ThirdPartyPath, "opus");
+                PublicIncludePaths.Add(Path.Combine(LibOpusPath, "include"));
+                PublicAdditionalLibraries.Add(Path.Combine(LibOpusPath, "build/Win64/Release/opus.lib"));
+
+                // OpenSSL (our custom build)
+                string OpenSSLPath = Path.Combine(ThirdPartyPath, "openssl-1.1.1w/build/Win64");
+                PublicIncludePaths.Add(Path.Combine(OpenSSLPath, "include"));
+                PublicAdditionalLibraries.Add(Path.Combine(OpenSSLPath, "lib/libssl.lib"));
+                PublicAdditionalLibraries.Add(Path.Combine(OpenSSLPath, "lib/libcrypto.lib"));
         }
 
         PublicDefinitions.Add("RTC_ENABLE_WEBSOCKET=0");
