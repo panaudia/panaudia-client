@@ -1,0 +1,51 @@
+# --- Unreal engine common ---
+
+# Compiled binaries
+Binaries/
+Plugins/*/Binaries/
+
+# Build intermediates & caches
+Intermediate/
+Plugins/*/Intermediate/
+DerivedDataCache/
+Saved/
+
+# Optional: if you generate project files frequently and don't want them in git
+#.vs/
+*.sln
+#*.vcxproj
+#*.vcxproj.*
+#*.xcodeproj
+*.xcworkspace
+#*.idea/
+#.vscode/
+
+# Platform-specific junk
+.DS_Store
+Thumbs.db
+
+# Crash reports, logs, etc.
+*.log
+*.dmp
+
+# If you have local-only config that shouldn’t be shared
+#Config/DefaultEditorPerProjectUserSettings.ini
+#Config/DefaultEditorSettings.ini
+#Saved/
+#*.local.ini
+
+# If you use Rider / JetBrains
+.idea/
+
+# If you use Visual Studio Code
+.vscode/
+
+# If you use Visual Studio
+.vs/
+
+# If you generate documentation locally
+Documentation/**
+!Documentation/README.md
+
+
+
