@@ -67,7 +67,7 @@ struct FPanaudiaConnectionConfig
     FString Ticket;
 
     UPROPERTY(BlueprintReadWrite, Category = "Panaudia")
-    bool bEnableDataChannel = true;
+    bool bEnableDataChannel = false;
 
     UPROPERTY(BlueprintReadWrite, Category = "Panaudia")
     FVector InitialPosition = FVector::ZeroVector;
@@ -79,7 +79,8 @@ struct FPanaudiaConnectionConfig
     TMap<FString, FString> CustomAttributes;
 
     UPROPERTY(BlueprintReadWrite, Category = "Panaudia")
-    FString EntranceURL = TEXT("https://panaudia.com/entrance");
+    //FString EntranceURL = TEXT("https://panaudia.com/entrance");
+    FString EntranceURL = TEXT("http://localhost:8000/gateway");
 };
 
 // Typedef to avoid comma issues with macros

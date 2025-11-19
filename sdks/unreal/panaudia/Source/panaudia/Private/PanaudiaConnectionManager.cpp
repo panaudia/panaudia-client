@@ -25,7 +25,7 @@ FPanaudiaConnectionManager::FPanaudiaConnectionManager()
     , LastErrorMessage()
     , bIsDataChannelOpen(false)
     , StatusLock()
-    , bAutoReconnectEnabled(true)
+    , bAutoReconnectEnabled(false)
     , bIsManualDisconnect(false)
     , bIsReconnecting(false)
     , ReconnectAttemptCount(0)
@@ -248,28 +248,84 @@ void FPanaudiaConnectionManager::InitializePeerConnection()
 
         PeerConnection = std::make_shared<rtc::PeerConnection>(Config);
 
-            // Set up ICE candidate callback
-            PeerConnection->onLocalCandidate([this](rtc::Candidate Candidate)
+
+			 //UE_LOG(LogTemp, Log, TEXT("made answer"));
+
+        // Set up ICE candidate callback
+        PeerConnection->onLocalCandidate([this](rtc::Candidate Candidate)
+        {
+            // Send ICE candidate via WebSocket
+            // Note: libdatachannel's Candidate API varies by version
+            // The candidate string already contains all necessary information
+            FString CandidateStr = FString(UTF8_TO_TCHAR(Candidate.candidate().c_str()));
+            FString MidStr = FString(UTF8_TO_TCHAR(Candidate.mid().c_str()));
+
+            // Build JSON manually since sdpMLineIndex might not be available
+            TSharedPtr<FJsonObject> CandidateObj = MakeShared<FJsonObject>();
+            CandidateObj->SetStringField(TEXT("candidate"), CandidateStr);
+            CandidateObj->SetStringField(TEXT("sdpMid"), MidStr);
+            // sdpMLineIndex is optional and often not needed by the server
+            CandidateObj->SetNumberField(TEXT("sdpMLineIndex"), 0);
+
+            FString CandidateJson;
+            TSharedRef<TJsonWriter<>> Writer = TJsonWriterFactory<>::Create(&CandidateJson);
+            FJsonSerializer::Serialize(CandidateObj.ToSharedRef(), Writer);
+
+            SendICECandidate(CandidateJson);
+        });
+
+	       // The answer will be created automatically by libdatachannel
+		PeerConnection->onLocalDescription([this](rtc::Description Description)
+        {
+
+            // Only send answer once
+            if (bAnswerSent.exchange(true))
             {
-                // Send ICE candidate via WebSocket
-                // Note: libdatachannel's Candidate API varies by version
-                // The candidate string already contains all necessary information
-                FString CandidateStr = FString(UTF8_TO_TCHAR(Candidate.candidate().c_str()));
-                FString MidStr = FString(UTF8_TO_TCHAR(Candidate.mid().c_str()));
+                UE_LOG(LogTemp, Warning, TEXT("onLocalDescription called again, ignoring duplicate"));
+                return;
+            }
 
-                // Build JSON manually since sdpMLineIndex might not be available
-                TSharedPtr<FJsonObject> CandidateObj = MakeShared<FJsonObject>();
-                CandidateObj->SetStringField(TEXT("candidate"), CandidateStr);
-                CandidateObj->SetStringField(TEXT("sdpMid"), MidStr);
-                // sdpMLineIndex is optional and often not needed by the server
-                CandidateObj->SetNumberField(TEXT("sdpMLineIndex"), 0);
+			 UE_LOG(LogTemp, Log, TEXT("made answer"));
+            std::string SDP = Description.generateSdp();
+            FString SDPString = FString(UTF8_TO_TCHAR(SDP.c_str()));
 
-                FString CandidateJson;
-                TSharedRef<TJsonWriter<>> Writer = TJsonWriterFactory<>::Create(&CandidateJson);
-                FJsonSerializer::Serialize(CandidateObj.ToSharedRef(), Writer);
+            // Modify SDP to enable stereo (matches JavaScript implementation)
+           // SDPString = SDPString.Replace(TEXT("a=fmtp:111 "), TEXT("a=fmtp:111 stereo=1; sprop-stereo=1; "));
 
-                SendICECandidate(CandidateJson);
-            });
+            // Send answer via WebSocket
+            TSharedPtr<FJsonObject> AnswerObj = MakeShared<FJsonObject>();
+            AnswerObj->SetStringField(TEXT("type"), TEXT("answer"));
+            AnswerObj->SetStringField(TEXT("sdp"), SDPString);
+
+            FString AnswerJson;
+            TSharedRef<TJsonWriter<>> Writer = TJsonWriterFactory<>::Create(&AnswerJson);
+            FJsonSerializer::Serialize(AnswerObj.ToSharedRef(), Writer);
+
+            // Wrap in event message
+            TSharedPtr<FJsonObject> EventObj = MakeShared<FJsonObject>();
+            EventObj->SetStringField(TEXT("event"), TEXT("answer"));
+            EventObj->SetStringField(TEXT("data"), AnswerJson);
+
+            FString EventJson;
+            TSharedRef<TJsonWriter<>> EventWriter = TJsonWriterFactory<>::Create(&EventJson);
+            FJsonSerializer::Serialize(EventObj.ToSharedRef(), EventWriter);
+
+            if (WebSocket && WebSocket->IsConnected())
+            {
+                WebSocket->Send(EventJson);
+                UE_LOG(LogTemp, Log, TEXT("Sent answer"));
+            } else {
+				if (!WebSocket)	{
+					UE_LOG(LogTemp, Warning, TEXT("WebSocket nis nil, not sending answer"));
+				} else {
+					if (!WebSocket->IsConnected()){
+						UE_LOG(LogTemp, Warning, TEXT("WebSocket not connected, not sending answer"));
+					} else {
+						UE_LOG(LogTemp, Warning, TEXT("WTF this shouldnt happen, not sending answer"));
+					}
+				}
+            }
+        });
 
         // Set up gathering state callback
         PeerConnection->onGatheringStateChange([this](rtc::PeerConnection::GatheringState State)
@@ -416,45 +472,16 @@ void FPanaudiaConnectionManager::CreateAnswer(const FString& OfferSDP)
             return;
         }
 
+        bAnswerSent = false;
+
         // Set remote description (the offer)
         rtc::Description Offer(std::string(TCHAR_TO_UTF8(*OfferSDP)), rtc::Description::Type::Offer);
         PeerConnection->setRemoteDescription(Offer);
 
         UE_LOG(LogTemp, Log, TEXT("Remote description (offer) set"));
 
-        // The answer will be created automatically by libdatachannel
-        PeerConnection->onLocalDescription([this](rtc::Description Description)
-        {
-            std::string SDP = Description.generateSdp();
-            FString SDPString = FString(UTF8_TO_TCHAR(SDP.c_str()));
 
-            // Modify SDP to enable stereo (matches JavaScript implementation)
-            SDPString = SDPString.Replace(TEXT("a=fmtp:111 "), TEXT("a=fmtp:111 stereo=1; sprop-stereo=1; "));
 
-            // Send answer via WebSocket
-            TSharedPtr<FJsonObject> AnswerObj = MakeShared<FJsonObject>();
-            AnswerObj->SetStringField(TEXT("type"), TEXT("answer"));
-            AnswerObj->SetStringField(TEXT("sdp"), SDPString);
-
-            FString AnswerJson;
-            TSharedRef<TJsonWriter<>> Writer = TJsonWriterFactory<>::Create(&AnswerJson);
-            FJsonSerializer::Serialize(AnswerObj.ToSharedRef(), Writer);
-
-            // Wrap in event message
-            TSharedPtr<FJsonObject> EventObj = MakeShared<FJsonObject>();
-            EventObj->SetStringField(TEXT("event"), TEXT("answer"));
-            EventObj->SetStringField(TEXT("data"), AnswerJson);
-
-            FString EventJson;
-            TSharedRef<TJsonWriter<>> EventWriter = TJsonWriterFactory<>::Create(&EventJson);
-            FJsonSerializer::Serialize(EventObj.ToSharedRef(), EventWriter);
-
-            if (WebSocket && WebSocket->IsConnected())
-            {
-                WebSocket->Send(EventJson);
-                UE_LOG(LogTemp, Log, TEXT("Sent answer"));
-            }
-        });
     }
     catch (const std::exception& e)
     {
@@ -948,11 +975,13 @@ void FPanaudiaConnectionManager::SubmitAudioData(const float* AudioData, int32 N
 {
     if (!OpusEncoder || !OpusEncoder->IsInitialized())
     {
+		UE_LOG(LogTemp, Log, TEXT("not sending audio data because OpusEncoder is not initialized"));
         return;
     }
 
     if (!AudioTrack || !AudioTrack->isOpen())
     {
+		UE_LOG(LogTemp, Log, TEXT("not sending audio data because AudioTrack is not open"));
         return;
     }
 

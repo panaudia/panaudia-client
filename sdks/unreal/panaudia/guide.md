@@ -130,29 +130,40 @@ In your EndPlay event, call `Disconnect` on your PanaudiaAudioComponent to prope
 ### Adding the Component in C++
 
 **MyCharacter.h:**
-```cpp #include "Panaudia.h"
-UCLASS() class MYGAME_API AMyCharacter : public ACharacter { GENERATED_BODY()
-public: AMyCharacter();
-protected: virtual void BeginPlay() override;
-UPROPERTY(VisibleAnywhere, BlueprintReadOnly, Category = "Audio")
-UPanaudiaAudioComponent* PanaudiaAudio;
+```cpp 
+
+#include "Panaudia.h"
+
+UCLASS() class MYGAME_API AMyCharacter : public ACharacter { 
+
+GENERATED_BODY()
+public: 
+    AMyCharacter();
+protected: 
+    virtual void BeginPlay() override;
+    
+    UPROPERTY(VisibleAnywhere, BlueprintReadOnly, Category = "Audio")
+    UPanaudiaAudioComponent* PanaudiaAudio;
 };
 ```
 
 **MyCharacter.cpp:**
 ```cpp
 #include "MyCharacter.h"
-AMyCharacter::AMyCharacter() { // Create and attach the Panaudia audio component PanaudiaAudio = CreateDefaultSubobject(TEXT("PanaudiaAudio")); }
-void AMyCharacter::BeginPlay() { Super::BeginPlay();
-// Configure connection
-FPanaudiaConnectionConfig Config;
-Config.Ticket = TEXT("your-session-ticket");
-Config.bEnableDataChannel = true;
-Config.InitialPosition = GetActorLocation();
-Config.InitialRotation = GetActorRotation();
+AMyCharacter::AMyCharacter() { 
 
-// Connect
-PanaudiaAudio->Connect(Config);
+// Create and attach the Panaudia audio component PanaudiaAudio = CreateDefaultSubobject(TEXT("PanaudiaAudio")); }
+void AMyCharacter::BeginPlay() { 
+    Super::BeginPlay();
+    // Configure connection
+    FPanaudiaConnectionConfig Config;
+    Config.Ticket = TEXT("your-session-ticket");
+    Config.bEnableDataChannel = true;
+    Config.InitialPosition = GetActorLocation();
+    Config.InitialRotation = GetActorRotation();
+    
+    // Connect
+    PanaudiaAudio->Connect(Config);
 }
 ``` 
 

@@ -99,6 +99,7 @@ private:
     // WebSocket connection for signaling
     TSharedPtr<IWebSocket> WebSocket;
     FString WebSocketURL;
+    std::atomic<bool> bAnswerSent{false};
 
     // WebRTC peer connection
     std::shared_ptr<rtc::PeerConnection> PeerConnection;
