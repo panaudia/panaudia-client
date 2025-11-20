@@ -28,13 +28,13 @@ export class PanaudiaNodeState {
         let rotation = new Euler(rx, ry, rz);
         rotation.reorder('YXZ');
 
+        let x = -(pz / 2) + 0.5;
+        let y = -(px / 2) + 0.5;
+        let z = py / 2 + 0.5;
+
         // let x = -(pz / 2) + 0.5;
         // let y = -(px / 2) + 0.5;
         // let z = py / 2 + 0.5;
-
-        let x = (px / 2) + 0.5;
-        let y = -(pz / 2) + 0.5;
-        let z = py / 2 + 0.5;
 
         return new PanaudiaNodeState(
             x,
@@ -42,8 +42,7 @@ export class PanaudiaNodeState {
             z,
             radiansToDegrees(rotation.y),
             radiansToDegrees(rotation.x),
-            radiansToDegrees(rotation.z),
-        );
+            radiansToDegrees(rotation.z));
     }
 
 
@@ -128,9 +127,12 @@ export class PanaudiaNodeState {
         return {
             uuid: this.uuid,
             position: {
-                x: (this.x - 0.5) * 2,
+                // x: (this.x - 0.5) * 2,
+                // y: (this.z - 0.5) * 2,
+                // z: -((this.y - 0.5) * 2),
+                x: -(this.y - 0.5) * 2,
                 y: (this.z - 0.5) * 2,
-                z: -((this.y - 0.5) * 2),
+                z: -((this.x - 0.5) * 2),
             },
             rotation: { x: rotation.x, y: rotation.y, z: rotation.z },
             volume: this.volume,

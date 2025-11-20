@@ -1,11 +1,37 @@
 import { assert, test } from 'vitest';
 import { PanaudiaNodeState } from '../state.js';
 
-test('WebGL to PanaudiaNodeState coordinates', () => {
+test('WebGL to PanaudiaNodeState coordinates A', () => {
     let xp = 1.0;
     let yp = 1.0;
     let zp = 1.0;
-    let xr = Math.PI / 4;
+    let xr = 0;
+    let yr = 0;
+    let zr = 0;
+
+    let panaudiaNodeState = PanaudiaNodeState.fromWebGLCoordinates(
+        xp,
+        yp,
+        zp,
+        xr,
+        yr,
+        zr,
+    );
+
+    let delta = 0.000001;
+    assert.closeTo(panaudiaNodeState.x, 0, delta);
+    assert.closeTo(panaudiaNodeState.y, 0, delta);
+    assert.closeTo(panaudiaNodeState.z, 1, delta);
+    assert.closeTo(panaudiaNodeState.yaw, 0, delta);
+    assert.closeTo(panaudiaNodeState.pitch, 0, delta);
+    assert.closeTo(panaudiaNodeState.roll, 0, delta);
+});
+
+test('WebGL to PanaudiaNodeState coordinates B', () => {
+    let xp = -1.0;
+    let yp = 1.0;
+    let zp = -1.0;
+    let xr = 0;
     let yr = 0;
     let zr = 0;
 
@@ -20,17 +46,17 @@ test('WebGL to PanaudiaNodeState coordinates', () => {
 
     let delta = 0.000001;
     assert.closeTo(panaudiaNodeState.x, 1, delta);
-    assert.closeTo(panaudiaNodeState.y, 0, delta);
+    assert.closeTo(panaudiaNodeState.y, 1, delta);
     assert.closeTo(panaudiaNodeState.z, 1, delta);
     assert.closeTo(panaudiaNodeState.yaw, 0, delta);
-    assert.closeTo(panaudiaNodeState.pitch, 45, delta);
+    assert.closeTo(panaudiaNodeState.pitch, 0, delta);
     assert.closeTo(panaudiaNodeState.roll, 0, delta);
 });
 
-test('WebGL to PanaudiaNodeState coordinates 2', () => {
-    let xp = 1.0;
-    let yp = 1.0;
-    let zp = 1.0;
+test('WebGL to PanaudiaNodeState coordinates C', () => {
+    let xp = 0.0;
+    let yp = 0.0;
+    let zp = -1.0;
     let xr = 0;
     let yr = Math.PI / 4;
     let zr = 0;
@@ -46,17 +72,44 @@ test('WebGL to PanaudiaNodeState coordinates 2', () => {
 
     let delta = 0.000001;
     assert.closeTo(panaudiaNodeState.x, 1, delta);
-    assert.closeTo(panaudiaNodeState.y, 0, delta);
-    assert.closeTo(panaudiaNodeState.z, 1, delta);
+    assert.closeTo(panaudiaNodeState.y, 0.5, delta);
+    assert.closeTo(panaudiaNodeState.z, 0.5, delta);
     assert.closeTo(panaudiaNodeState.yaw, 45, delta);
     assert.closeTo(panaudiaNodeState.pitch, 0, delta);
     assert.closeTo(panaudiaNodeState.roll, 0, delta);
 });
 
-test('WebGL to PanaudiaNodeState coordinates 3', () => {
-    let xp = 1.0;
-    let yp = 1.0;
-    let zp = 1.0;
+test('WebGL to PanaudiaNodeState coordinates D', () => {
+    let xp = 0.0;
+    let yp = 0.0;
+    let zp = -1.0;
+    let xr = Math.PI / 4;
+    let yr = 0;
+    let zr = 0;
+
+    let panaudiaNodeState = PanaudiaNodeState.fromWebGLCoordinates(
+        xp,
+        yp,
+        zp,
+        xr,
+        yr,
+        zr,
+    );
+
+    let delta = 0.000001;
+    assert.closeTo(panaudiaNodeState.x, 1, delta);
+    assert.closeTo(panaudiaNodeState.y, 0.5, delta);
+    assert.closeTo(panaudiaNodeState.z, 0.5, delta);
+    assert.closeTo(panaudiaNodeState.yaw, 0, delta);
+    assert.closeTo(panaudiaNodeState.pitch, 45.0, delta);
+    assert.closeTo(panaudiaNodeState.roll, 0.0, delta);
+});
+
+
+test('WebGL to PanaudiaNodeState coordinates E', () => {
+    let xp = 0.0;
+    let yp = 0.0;
+    let zp = -1.0;
     let xr = 0;
     let yr = 0;
     let zr = Math.PI / 4;
@@ -72,73 +125,13 @@ test('WebGL to PanaudiaNodeState coordinates 3', () => {
 
     let delta = 0.000001;
     assert.closeTo(panaudiaNodeState.x, 1, delta);
-    assert.closeTo(panaudiaNodeState.y, 0, delta);
-    assert.closeTo(panaudiaNodeState.z, 1, delta);
+    assert.closeTo(panaudiaNodeState.y, 0.5, delta);
+    assert.closeTo(panaudiaNodeState.z, 0.5, delta);
     assert.closeTo(panaudiaNodeState.yaw, 0, delta);
-    assert.closeTo(panaudiaNodeState.pitch, 0, delta);
-    assert.closeTo(panaudiaNodeState.roll, 45, delta);
+    assert.closeTo(panaudiaNodeState.pitch, 0.0, delta);
+    assert.closeTo(panaudiaNodeState.roll, 45.0, delta);
 });
 
-test('PanaudiaNodeState to WebGL coordinates', () => {
-    let x = 1.0;
-    let y = 0;
-    let z = 1.0;
-    let yaw = 0;
-    let pitch = 45;
-    let roll = 0;
-    let panaudiaNodeState = new PanaudiaNodeState(x, y, z, yaw, pitch, roll);
-
-    let webGL = panaudiaNodeState.asWebGLCoordinates();
-
-    let delta = 0.000001;
-    assert.closeTo(webGL.position.x, 1, delta);
-    assert.closeTo(webGL.position.y, 1, delta);
-    assert.closeTo(webGL.position.z, 1, delta);
-    assert.closeTo(webGL.rotation.x, Math.PI / 4, delta);
-    assert.closeTo(webGL.rotation.y, 0, delta);
-    assert.closeTo(webGL.rotation.z, 0, delta);
-});
-
-test('PanaudiaNodeState to WebGL coordinates 2', () => {
-    let x = 1.0;
-    let y = 0;
-    let z = 1.0;
-    let yaw = 45;
-    let pitch = 0;
-    let roll = 0;
-
-    let panaudiaNodeState = new PanaudiaNodeState(x, y, z, yaw, pitch, roll);
-
-    let webGL = panaudiaNodeState.asWebGLCoordinates();
-
-    let delta = 0.000001;
-    assert.closeTo(webGL.position.x, 1, delta);
-    assert.closeTo(webGL.position.y, 1, delta);
-    assert.closeTo(webGL.position.z, 1, delta);
-    assert.closeTo(webGL.rotation.x, 0, delta);
-    assert.closeTo(webGL.rotation.y, Math.PI / 4, delta);
-    assert.closeTo(webGL.rotation.z, 0, delta);
-});
-
-test('PanaudiaNodeState to WebGL coordinates 3', () => {
-    let x = 1.0;
-    let y = 0;
-    let z = 1.0;
-    let yaw = 0;
-    let pitch = 0;
-    let roll = -45;
-    let panaudiaNodeState = new PanaudiaNodeState(x, y, z, yaw, pitch, roll);
-
-    let webGL = panaudiaNodeState.asWebGLCoordinates();
-
-    let delta = 0.000001;
-    assert.closeTo(webGL.position.x, 1, delta);
-    assert.closeTo(webGL.position.y, 1, delta);
-    assert.closeTo(webGL.position.z, 1, delta);
-    assert.closeTo(webGL.rotation.x, 0, delta);
-    assert.closeTo(webGL.rotation.y, 0, delta);
-    assert.closeTo(webGL.rotation.z, -Math.PI / 4, delta);
-});
 
 test('PanaudiaNodeState angle round trip', () => {
     let x = 1.0;

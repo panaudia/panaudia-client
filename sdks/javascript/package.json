@@ -1,6 +1,6 @@
 {
     "name": "panaudia-sdk",
-    "version": "1.0.8",
+    "version": "1.1.0",
     "description": "Panaudia client SDK",
     "files": [
         "dist"
