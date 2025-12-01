@@ -52,8 +52,15 @@ export function makeNode(attributes) {
     const user_attrs = attributes["connection"];
     console.log(attributes)
     if (user_attrs !== undefined) {
-        inner_colour = parseInt(user_attrs["inner_colour"], 16);
-        outer_colour = parseInt(user_attrs["outer_colour"], 16);
+        const inner = user_attrs["inner_colour"];
+        if (inner !== undefined){
+           inner_colour = parseInt(user_attrs["inner_colour"], 16);
+           outer_colour = parseInt(user_attrs["outer_colour"], 16);
+        } else {
+            inner_colour = parseInt(user_attrs["colour"], 16);
+            inner_colour = parseInt(user_attrs["colour"], 16);
+        }
+
     } else {
         inner_colour = 0x2f56ee;
         outer_colour = 0x00bbff;
