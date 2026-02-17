@@ -110,6 +110,9 @@ int32 FPanaudiaOpusEncoder::Encode(const float* PCMData, int32 NumSamples, TArra
     OutEncodedData.SetNum(EncodedBytes);
     FMemory::Memcpy(OutEncodedData.GetData(), EncodingBuffer.GetData(), EncodedBytes);
 
+    // TODO remove this
+    //UE_LOG(LogTemp, Error, TEXT("Encoded %d bytes"), EncodedBytes );
+
     return EncodedBytes;
 }
 

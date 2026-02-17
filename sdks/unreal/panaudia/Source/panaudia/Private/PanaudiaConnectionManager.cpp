@@ -200,8 +200,8 @@ void FPanaudiaConnectionManager::ConnectDirect(const FString& DirectURL, const F
     // Initialize WebRTC peer connection first
     InitializePeerConnection();
 
-    // Setup audio track
-    SetupAudioTrack();
+
+    //SetupAudioTrack();
 
     // Connect WebSocket for signaling
     SetConnectionStatus(EPanaudiaConnectionStatus::Connecting, TEXT("Connecting"));
@@ -246,19 +246,34 @@ void FPanaudiaConnectionManager::InitializePeerConnection()
         Config.iceServers.emplace_back("stun:stun.l.google.com:5349");
         Config.iceServers.emplace_back("stun:stun1.l.google.com:3478");
 
+        // Enable TCP candidates
+        Config.enableIceTcp = true;
+
+        // Optional: Set port range if needed
+        // Config.portRangeBegin = 49152;
+        // Config.portRangeEnd = 65535;
+
         PeerConnection = std::make_shared<rtc::PeerConnection>(Config);
 
+        // Add state change callback to debug connection state
+        PeerConnection->onStateChange([this](rtc::PeerConnection::State State)
+        {
+            const TCHAR* StateNames[] = {TEXT("New"), TEXT("Connecting"), TEXT("Connected"), TEXT("Disconnected"), TEXT("Failed"), TEXT("Closed")};
+            UE_LOG(LogTemp, Warning, TEXT("*** PeerConnection State Changed: %s ***"), StateNames[(int)State]);
+        });
 
 			 //UE_LOG(LogTemp, Log, TEXT("made answer"));
 
         // Set up ICE candidate callback
-        PeerConnection->onLocalCandidate([this](rtc::Candidate Candidate)
-        {
+        PeerConnection->onLocalCandidate([this](rtc::Candidate Candidate){
+
             // Send ICE candidate via WebSocket
             // Note: libdatachannel's Candidate API varies by version
             // The candidate string already contains all necessary information
             FString CandidateStr = FString(UTF8_TO_TCHAR(Candidate.candidate().c_str()));
             FString MidStr = FString(UTF8_TO_TCHAR(Candidate.mid().c_str()));
+
+            UE_LOG(LogTemp, Log, TEXT("*** Local ICE Candidate Generated: %s (mid: %s) ***"), *CandidateStr, *MidStr);
 
             // Build JSON manually since sdpMLineIndex might not be available
             TSharedPtr<FJsonObject> CandidateObj = MakeShared<FJsonObject>();
@@ -393,6 +408,8 @@ void FPanaudiaConnectionManager::InitializePeerConnection()
         }
     });
 
+
+
         // Handle incoming tracks (audio from server)
         PeerConnection->onTrack([this](std::shared_ptr<rtc::Track> Track)
         {
@@ -407,6 +424,41 @@ void FPanaudiaConnectionManager::InitializePeerConnection()
             });
         });
 
+/*
+        PeerConnection->onTrack([this](std::shared_ptr<rtc::Track> Track)
+        {
+            UE_LOG(LogTemp, Warning, TEXT("*** Received audio track from server ***"));
+
+            // This is the track the server is offering - store it and set up callbacks
+            AudioTrack = Track;
+
+            UE_LOG(LogTemp, Warning, TEXT("*** Setting up callbacks for received audio track ***"));
+
+            AudioTrack->onOpen([this]() {
+                UE_LOG(LogTemp, Warning, TEXT("*** AudioTrack->onOpen callback triggered! ***"));
+                OnAudioTrackOpen();
+            });
+
+            AudioTrack->onClosed([this]() {
+                UE_LOG(LogTemp, Warning, TEXT("Audio track CLOSED"));
+            });
+
+            AudioTrack->onError([this](std::string error) {
+                UE_LOG(LogTemp, Error, TEXT("Audio track ERROR: %s"), *FString(error.c_str()));
+            });
+
+            Track->onMessage([this](auto Data)
+            {
+                if (std::holds_alternative<std::vector<std::byte>>(Data))
+                {
+                    OnAudioTrackMessage(std::get<std::vector<std::byte>>(Data));
+                }
+            });
+
+            UE_LOG(LogTemp, Warning, TEXT("*** Audio track from server configured ***"));
+        });
+*/
+
         UE_LOG(LogTemp, Log, TEXT("WebRTC PeerConnection initialized"));
     }
     catch (const std::exception& e)
@@ -415,6 +467,7 @@ void FPanaudiaConnectionManager::InitializePeerConnection()
         SetConnectionStatus(EPanaudiaConnectionStatus::Error, TEXT("Failed to initialize WebRTC"));
     }
 }
+
 
 void FPanaudiaConnectionManager::SetupAudioTrack()
 {
@@ -426,8 +479,8 @@ void FPanaudiaConnectionManager::SetupAudioTrack()
             return;
         }
 
-        // Add audio track - API may vary by version
-        rtc::Description::Audio AudioDescription("audio", rtc::Description::Direction::SendRecv);
+        // Add audio track - configured for send-only mono output
+        rtc::Description::Audio AudioDescription("audio", rtc::Description::Direction::SendOnly);
         AudioDescription.addOpusCodec(111);  // Opus codec with payload type 111
 
         // SSRC addition API might differ - wrap in try-catch
@@ -443,22 +496,28 @@ void FPanaudiaConnectionManager::SetupAudioTrack()
 
         AudioTrack = PeerConnection->addTrack(AudioDescription);
 
-        AudioTrack->onOpen([this]() { OnAudioTrackOpen(); });
+        UE_LOG(LogTemp, Log, TEXT("Send-only mono audio track created, setting up callbacks"));
 
-        // Handle incoming audio data
-        AudioTrack->onMessage([this](auto Data)
-        {
-            if (std::holds_alternative<std::vector<std::byte>>(Data))
-            {
-                OnAudioTrackMessage(std::get<std::vector<std::byte>>(Data));
-            }
+        AudioTrack->onOpen([this]() {
+            UE_LOG(LogTemp, Log, TEXT("Send-only AudioTrack opened!"));
+            OnAudioTrackOpen();
         });
 
-        UE_LOG(LogTemp, Log, TEXT("Audio track added to PeerConnection"));
+        AudioTrack->onClosed([this]() {
+            UE_LOG(LogTemp, Warning, TEXT("Send-only audio track closed!"));
+        });
+
+        AudioTrack->onError([this](std::string error) {
+            UE_LOG(LogTemp, Error, TEXT("Send-only audio track error: %s"), *FString(error.c_str()));
+        });
+
+        // No onMessage handler needed for send-only track
+
+        UE_LOG(LogTemp, Log, TEXT("Send-only mono audio track added to PeerConnection"));
     }
     catch (const std::exception& e)
     {
-        UE_LOG(LogTemp, Error, TEXT("Failed to setup audio track: %s"), *FString(e.what()));
+        UE_LOG(LogTemp, Error, TEXT("Failed to setup send-only audio track: %s"), *FString(e.what()));
     }
 }
 
@@ -639,6 +698,8 @@ void FPanaudiaConnectionManager::OnWebSocketMessage(const FString& Message)
 
     FString Event = JsonObject->GetStringField(TEXT("event"));
 
+    UE_LOG(LogTemp, Warning, TEXT("*** Message event type: %s ***"), *Event);
+
     if (Event == TEXT("offer"))
     {
         HandleOfferMessage(JsonObject->GetStringField(TEXT("data")));
@@ -650,6 +711,10 @@ void FPanaudiaConnectionManager::OnWebSocketMessage(const FString& Message)
     else if (Event == TEXT("error"))
     {
         HandleErrorMessage(JsonObject->GetStringField(TEXT("data")));
+    }
+    else
+    {
+        UE_LOG(LogTemp, Warning, TEXT("*** Unknown event type: %s ***"), *Event);
     }
 }
 
@@ -669,28 +734,36 @@ void FPanaudiaConnectionManager::HandleOfferMessage(const FString& OfferJson)
 
 void FPanaudiaConnectionManager::HandleCandidateMessage(const FString& CandidateJson)
 {
-    UE_LOG(LogTemp, Verbose, TEXT("Received ICE candidate"));
+    UE_LOG(LogTemp, Warning, TEXT("*** HandleCandidateMessage called ***"));
+    UE_LOG(LogTemp, Log, TEXT("Candidate JSON: %s"), *CandidateJson);
 
     TSharedPtr<FJsonObject> CandidateObject;
     TSharedRef<TJsonReader<>> Reader = TJsonReaderFactory<>::Create(CandidateJson);
 
     if (FJsonSerializer::Deserialize(Reader, CandidateObject) && CandidateObject.IsValid())
     {
+        UE_LOG(LogTemp, Log, TEXT("*** Candidate JSON parsed successfully ***"));
+
+
+
         try
         {
             FString Candidate = CandidateObject->GetStringField(TEXT("candidate"));
             FString SdpMid = CandidateObject->GetStringField(TEXT("sdpMid"));
+
+            UE_LOG(LogTemp, Warning, TEXT("*** Adding remote candidate: %s (mid: %s) ***"), *Candidate, *SdpMid);
 
             if (PeerConnection)
             {
                 // Different libdatachannel versions have different Candidate constructors
                 // Try the simpler two-parameter version first
                 try
-                {
+                {    UE_LOG(LogTemp, Log, TEXT("addRemoteCandidate"));
                     PeerConnection->addRemoteCandidate(rtc::Candidate(
                         std::string(TCHAR_TO_UTF8(*Candidate)),
                         std::string(TCHAR_TO_UTF8(*SdpMid))
                     ));
+                    UE_LOG(LogTemp, Warning, TEXT("*** Remote candidate added successfully ***"));
                 }
                 catch (const std::exception& e)
                 {
@@ -700,7 +773,12 @@ void FPanaudiaConnectionManager::HandleCandidateMessage(const FString& Candidate
                     PeerConnection->addRemoteCandidate(rtc::Candidate(
                         std::string(TCHAR_TO_UTF8(*Candidate))
                     ));
+                    UE_LOG(LogTemp, Warning, TEXT("*** Remote candidate added successfully (alternate format) ***"));
                 }
+            }
+            else
+            {
+                UE_LOG(LogTemp, Error, TEXT("*** PeerConnection is null, cannot add candidate ***"));
             }
         }
         catch (const std::exception& e)
@@ -849,7 +927,7 @@ void FPanaudiaConnectionManager::OnAttributesChannelMessage(const std::string& M
 
 void FPanaudiaConnectionManager::OnAudioTrackOpen()
 {
-    UE_LOG(LogTemp, Log, TEXT("Audio track opened"));
+    UE_LOG(LogTemp, Log, TEXT("Audio track opened xx"));
     SetConnectionStatus(EPanaudiaConnectionStatus::Connected, TEXT("Connected"));
 }
 
@@ -973,6 +1051,8 @@ void FPanaudiaConnectionManager::SendControlMessage(const FString& Type, const T
 
 void FPanaudiaConnectionManager::SubmitAudioData(const float* AudioData, int32 NumSamples, int32 NumChannels, int32 SampleRate)
 {
+    //UE_LOG(LogTemp, Log, TEXT("SubmitAudioData"));
+
     if (!OpusEncoder || !OpusEncoder->IsInitialized())
     {
 		UE_LOG(LogTemp, Log, TEXT("not sending audio data because OpusEncoder is not initialized"));

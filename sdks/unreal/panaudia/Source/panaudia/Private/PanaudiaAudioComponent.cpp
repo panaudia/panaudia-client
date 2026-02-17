@@ -321,8 +321,15 @@ void UPanaudiaAudioComponent::OnAudioCapture(
     double StreamTime,
     bool bOverflow)
 {
-    if (!ConnectionManager.IsValid() || !ConnectionManager->IsConnected())
+    if (!ConnectionManager.IsValid())
     {
+        UE_LOG(LogTemp, Warning, TEXT("Failed to send audio: not valid"));
+        return;
+    }
+
+    if (!ConnectionManager->IsConnected())
+    {
+        //UE_LOG(LogTemp, Warning, TEXT("Failed to send audio: not connected"));
         return;
     }
 

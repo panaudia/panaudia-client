@@ -77,6 +77,22 @@ function unmute(node_id) {
     }
 }
 
+function muteMic() {
+    if (micTracks !== undefined) {
+        micTracks.forEach((track) => {
+            track.enabled = false;
+        });
+    }
+}
+
+function unmuteMic() {
+    if (micTracks !== undefined) {
+        micTracks.forEach((track) => {
+            track.enabled = true;
+        });
+    }
+}
+
 function disconnect() {
     console.log("disconnecting");
     if (micTracks !== undefined){
@@ -383,5 +399,7 @@ export {
     connectDirect as _connectDirect,
     connectAmbisonic as _connectAmbisonic,
     mute as _mute,
-    unmute as _unmute
+    unmute as _unmute,
+    muteMic as _muteMic,
+    unmuteMic as _unmuteMic
 };
