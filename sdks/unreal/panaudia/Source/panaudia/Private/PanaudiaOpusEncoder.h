@@ -1,14 +1,13 @@
 #pragma once
 
-#include "Containers/Array.h"
 #include "HAL/Platform.h"
 
 // Forward declare Opus types
 typedef struct OpusEncoder OpusEncoder;
 
 /**
- * Opus audio encoder for WebRTC
- * Encodes PCM float audio to Opus packets
+ * Opus audio encoder — thread-safe (no UE API calls, plain C/C++ only).
+ * Safe to call from Core Audio capture thread or msquic threads.
  */
 class PANAUDIA_API FPanaudiaOpusEncoder
 {
@@ -20,47 +19,33 @@ public:
      * Initialize the encoder
      * @param SampleRate Sample rate (48000 for WebRTC)
      * @param NumChannels Number of channels (1 for mono, 2 for stereo)
-     * @param Application Application type (VOIP, Audio, or Restricted Low Delay)
+     * @param Application Opus application type (2048=VOIP, 2049=Audio, 2051=LowDelay)
+     * @param InFrameSize Samples per channel per frame (240=5ms, 480=10ms, 960=20ms at 48kHz)
      * @return true if initialization succeeded
      */
-    bool Initialize(int32 SampleRate = 48000, int32 NumChannels = 1, int32 Application = 2048);
+    bool Initialize(int32 SampleRate = 48000, int32 NumChannels = 1,
+                    int32 Application = 2048, int32 InFrameSize = 960);
 
     /**
-     * Encode PCM audio to Opus
+     * Encode PCM audio to Opus, writing into caller-provided buffer (zero-alloc).
      * @param PCMData Input PCM float samples [-1.0, 1.0]
-     * @param NumSamples Number of samples per channel
-     * @param OutEncodedData Output Opus packet
+     * @param NumSamples Number of samples per channel (must equal FrameSize)
+     * @param OutBuffer Output buffer for Opus packet
+     * @param OutBufferSize Size of output buffer in bytes
      * @return Number of bytes encoded, or negative on error
      */
-    int32 Encode(const float* PCMData, int32 NumSamples, TArray<uint8>& OutEncodedData);
+    int32 Encode(const float* PCMData, int32 NumSamples, uint8* OutBuffer, int32 OutBufferSize);
 
-    /**
-     * Set encoder bitrate
-     * @param Bitrate Bitrate in bits per second (e.g., 64000 for 64 kbps)
-     */
     void SetBitrate(int32 Bitrate);
-
-    /**
-     * Set encoder complexity (0-10, higher = better quality but slower)
-     */
     void SetComplexity(int32 Complexity);
-
-    /**
-     * Enable/disable DTX (Discontinuous Transmission)
-     */
     void SetDTX(bool bEnabled);
 
-    /**
-     * Check if encoder is initialized
-     */
     bool IsInitialized() const { return Encoder != nullptr; }
+    int32 GetFrameSize() const { return FrameSize; }
 
 private:
     OpusEncoder* Encoder;
     int32 SampleRate;
     int32 NumChannels;
-    int32 FrameSize; // Samples per channel per frame
-
-    // Encoding buffer
-    TArray<uint8> EncodingBuffer;
+    int32 FrameSize;
 };

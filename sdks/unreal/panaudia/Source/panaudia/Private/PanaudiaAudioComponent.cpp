@@ -300,15 +300,64 @@ void UPanaudiaAudioComponent::StartAudioCapture()
         return;
     }
 
-    // UE 5.6+ FOnAudioCaptureFunction expects const void* as first parameter
+    // Enumerate all capture devices and find the built-in mic
+    TArray<Audio::FCaptureDeviceInfo> Devices;
+    AudioCapture.GetCaptureDevicesAvailable(Devices);
+
+    int32 SelectedDevice = 0;
+    UE_LOG(LogTemp, Log, TEXT("Available capture devices (%d):"), Devices.Num());
+    for (int32 i = 0; i < Devices.Num(); ++i)
+    {
+        UE_LOG(LogTemp, Log, TEXT("  [%d] \"%s\" — %d ch, %d Hz"),
+            i, *Devices[i].DeviceName, Devices[i].InputChannels, Devices[i].PreferredSampleRate);
+    }
+
+    // Find the built-in mic: prefer device with "Built-in" or "MacBook" in name, 1-2 channels
+    int32 BuiltInIndex = INDEX_NONE;
+    int32 FirstLowChIndex = INDEX_NONE;
+    for (int32 i = 0; i < Devices.Num(); ++i)
+    {
+        if (Devices[i].InputChannels >= 1 && Devices[i].InputChannels <= 2)
+        {
+            if (FirstLowChIndex == INDEX_NONE)
+            {
+                FirstLowChIndex = i;
+            }
+            if (Devices[i].DeviceName.Contains(TEXT("Built-in")) ||
+                Devices[i].DeviceName.Contains(TEXT("MacBook")) ||
+                Devices[i].DeviceName.Contains(TEXT("Internal")))
+            {
+                BuiltInIndex = i;
+                break;
+            }
+        }
+    }
+
+    if (BuiltInIndex != INDEX_NONE)
+    {
+        SelectedDevice = BuiltInIndex;
+        UE_LOG(LogTemp, Log, TEXT("Selected built-in mic: [%d] \"%s\" (%d ch)"),
+            SelectedDevice, *Devices[SelectedDevice].DeviceName, Devices[SelectedDevice].InputChannels);
+    }
+    else if (FirstLowChIndex != INDEX_NONE)
+    {
+        SelectedDevice = FirstLowChIndex;
+        UE_LOG(LogTemp, Warning, TEXT("No built-in mic found, using first 1-2ch device: [%d] \"%s\" (%d ch)"),
+            SelectedDevice, *Devices[SelectedDevice].DeviceName, Devices[SelectedDevice].InputChannels);
+    }
+    else
+    {
+        UE_LOG(LogTemp, Warning, TEXT("No 1-2ch device found, using device 0 (%d ch)"),
+            Devices.Num() > 0 ? Devices[0].InputChannels : 0);
+    }
+
     Audio::FAudioCaptureDeviceParams Params;
-    Params.DeviceIndex = 0; // Default device
+    Params.DeviceIndex = SelectedDevice;
 
     if (AudioCapture.OpenAudioCaptureStream(
         Params,
         [this](const void* AudioData, int32 NumFrames, int32 NumChannels, int32 SampleRate, double StreamTime, bool bOverflow)
         {
-            // Cast void* to float* for our internal handler
             OnAudioCapture(reinterpret_cast<const float*>(AudioData), NumFrames, NumChannels, SampleRate, StreamTime, bOverflow);
         },
         1024))
@@ -316,7 +365,7 @@ void UPanaudiaAudioComponent::StartAudioCapture()
         if (AudioCapture.StartStream())
         {
             bIsCapturing = true;
-            UE_LOG(LogTemp, Log, TEXT("Audio capture started"));
+            UE_LOG(LogTemp, Log, TEXT("Audio capture started on device [%d]"), SelectedDevice);
         }
         else
         {
@@ -325,7 +374,7 @@ void UPanaudiaAudioComponent::StartAudioCapture()
     }
     else
     {
-        UE_LOG(LogTemp, Error, TEXT("Failed to open audio capture stream"));
+        UE_LOG(LogTemp, Error, TEXT("Failed to open audio capture stream on device [%d]"), SelectedDevice);
     }
 }
 
@@ -351,27 +400,22 @@ void UPanaudiaAudioComponent::OnAudioCapture(
     double StreamTime,
     bool bOverflow)
 {
-    if (!ConnectionManager.IsValid())
-    {
-        UE_LOG(LogTemp, Warning, TEXT("Failed to send audio: not valid"));
-        return;
-    }
+    if (!ConnectionManager.IsValid()) return;
+    if (!ConnectionManager->IsConnected()) return;
 
-    if (!ConnectionManager->IsConnected())
-    {
-        //UE_LOG(LogTemp, Warning, TEXT("Failed to send audio: not connected"));
-        return;
-    }
+    // Clamp to buffer limits
+    if (NumFrames > MaxCaptureFrames) NumFrames = MaxCaptureFrames;
+    if (NumChannels > MaxCaptureChannels) NumChannels = MaxCaptureChannels;
 
-    // Apply input volume
+    // Apply input volume into pre-allocated CaptureBuffer (no allocation)
     if (FMath::Abs(InputVolume - 1.0f) > SMALL_NUMBER)
     {
-        CaptureBuffer.SetNum(NumFrames * NumChannels);
-        for (int32 i = 0; i < NumFrames * NumChannels; ++i)
+        int32 TotalSamples = NumFrames * NumChannels;
+        for (int32 i = 0; i < TotalSamples; ++i)
         {
             CaptureBuffer[i] = AudioData[i] * InputVolume;
         }
-        AudioData = CaptureBuffer.GetData();
+        AudioData = CaptureBuffer;
     }
 
     // Submit to connection manager

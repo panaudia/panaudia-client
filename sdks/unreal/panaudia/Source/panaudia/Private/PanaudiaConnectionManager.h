@@ -149,9 +149,12 @@ private:
     // Pre-allocated decode buffer for msquic thread (960 stereo samples max)
     float DecodeBuffer[960 * 2];
 
-    // Audio resampling buffer (for accumulating partial frames)
-    TArray<float> PCMAccumulationBuffer;
+    // Pre-allocated mic send path buffers (capture thread only — no sync needed)
+    float MonoBuffer[1024];              // Stereo→mono scratch (max capture frame)
+    float AccumulationBuffer[240];       // Accumulate until 240 samples (5ms at 48kHz)
     int32 AccumulatedSamples = 0;
+    uint8 EncodeOutputBuffer[512];       // Max Opus frame (~200 bytes typical)
+    uint8 DatagramBuffer[600];           // MOQ header + Opus payload
 
     // Jitter buffer
     FPanaudiaJitterBuffer* JitterBuffer = nullptr;
@@ -178,6 +181,7 @@ private:
     std::atomic<bool> bPendingPeerShutdown{false};
     std::atomic<bool> bMoqSessionStarted{false};
 
+
     // Control stream receive buffer (game thread only, used in Tick)
     TArray<uint8> ControlStreamRecvBuffer;
 
@@ -200,6 +204,7 @@ private:
 
     // --- Data sending ---
     void SendDatagram(const TArray<uint8>& Data);
+    void SendDatagramDirect(const uint8* Data, int32 Len);
     void SendStateUpdate(const FPanaudiaNodeState& State);
     void SendControlMessage(const FString& Type, const TSharedPtr<FJsonObject>& MessageData);
 

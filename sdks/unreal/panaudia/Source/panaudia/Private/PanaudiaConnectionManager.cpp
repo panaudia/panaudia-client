@@ -102,7 +102,6 @@ FPanaudiaConnectionManager::FPanaudiaConnectionManager()
     , LastErrorMessage()
     , OpusEncoder(nullptr)
     , OpusDecoder(nullptr)
-    , PCMAccumulationBuffer()
     , AccumulatedSamples(0)
     , JitterBuffer(nullptr)
 {
@@ -129,9 +128,9 @@ FPanaudiaConnectionManager::~FPanaudiaConnectionManager()
 
 void FPanaudiaConnectionManager::InitializeAudioCodecs()
 {
-    // Mono encoder for microphone input
+    // Mono encoder for microphone input — 5ms frames (240 samples at 48kHz)
     OpusEncoder = new FPanaudiaOpusEncoder();
-    if (!OpusEncoder->Initialize(48000, 1, 2048))
+    if (!OpusEncoder->Initialize(48000, 1, 2048, 240))
     {
         UE_LOG(LogTemp, Error, TEXT("Failed to initialize Opus encoder"));
         delete OpusEncoder;
@@ -142,7 +141,7 @@ void FPanaudiaConnectionManager::InitializeAudioCodecs()
         OpusEncoder->SetBitrate(64000);
         OpusEncoder->SetComplexity(5);
         OpusEncoder->SetDTX(true);
-        UE_LOG(LogTemp, Log, TEXT("Opus encoder initialized (mono 48kHz)"));
+        UE_LOG(LogTemp, Log, TEXT("Opus encoder initialized (mono 48kHz, 5ms frames)"));
     }
 
     // Stereo decoder for binaural output from server
@@ -157,8 +156,6 @@ void FPanaudiaConnectionManager::InitializeAudioCodecs()
     {
         UE_LOG(LogTemp, Log, TEXT("Opus decoder initialized (stereo 48kHz)"));
     }
-
-    PCMAccumulationBuffer.Reserve(960);
 }
 
 void FPanaudiaConnectionManager::CleanupAudioCodecs()
@@ -508,23 +505,9 @@ QUIC_STATUS FPanaudiaConnectionManager::OnConnectionEvent(
                     DgTrackAlias, DgGroupID, DgObjectID,
                     DgPriority, DgPayload, DgPayloadLen))
             {
-                // Debug: log every 50th datagram
-                static int DgCount = 0;
-                DgCount++;
-                if (DgCount <= 3 || DgCount % 50 == 0)
-                {
-                    printf("[Panaudia] DG#%d alias=%llu len=%d (audioAlias=%llu decoder=%p jb=%p)\n",
-                        DgCount, (unsigned long long)DgTrackAlias, DgPayloadLen,
-                        (unsigned long long)AudioOutputTrackAlias,
-                        (void*)OpusDecoder, (void*)JitterBuffer);
-                }
-
                 if (DgTrackAlias == AudioOutputTrackAlias && OpusDecoder && OpusDecoder->IsInitialized() && JitterBuffer)
                 {
                     // Decode audio inline on msquic thread — no game tick involved
-                    // Note: no size filter here. The server's Opus encoder produces
-                    // legitimate 3-byte DTX frames for silence. The >= 10 filter
-                    // was only needed for WebCodecs encoder warmup on the TS client.
                     if (DgPayloadLen > 0)
                     {
                         int32 DecodedSamples = OpusDecoder->Decode(
@@ -533,21 +516,6 @@ QUIC_STATUS FPanaudiaConnectionManager::OnConnectionEvent(
 
                         if (DecodedSamples > 0)
                         {
-                            // Debug: check decoded peak amplitude
-                            static int DecodeCount = 0;
-                            DecodeCount++;
-                            if (DecodeCount <= 3 || DecodeCount % 200 == 0)
-                            {
-                                float Peak = 0.0f;
-                                int32 TotalFloats = DecodedSamples * 2;
-                                for (int32 i = 0; i < TotalFloats; ++i)
-                                {
-                                    float A = DecodeBuffer[i] > 0 ? DecodeBuffer[i] : -DecodeBuffer[i];
-                                    if (A > Peak) Peak = A;
-                                }
-                                printf("[Panaudia] Decoded #%d: %d samples, peak=%.6f, payloadLen=%d\n",
-                                    DecodeCount, DecodedSamples, Peak, DgPayloadLen);
-                            }
                             JitterBuffer->AddPacket(DecodeBuffer, DecodedSamples * 2, 2);
                         }
                         else
@@ -572,7 +540,8 @@ QUIC_STATUS FPanaudiaConnectionManager::OnConnectionEvent(
 
     case QUIC_CONNECTION_EVENT_DATAGRAM_SEND_STATE_CHANGED:
         {
-            // Free send context on terminal states
+            // Free single-block send context on terminal states
+            // Layout: [QUIC_BUFFER][payload] — one malloc, one free
             void* RawCtx = Event->DATAGRAM_SEND_STATE_CHANGED.ClientContext;
             auto DgState = Event->DATAGRAM_SEND_STATE_CHANGED.State;
             if (RawCtx &&
@@ -580,14 +549,7 @@ QUIC_STATUS FPanaudiaConnectionManager::OnConnectionEvent(
                 DgState != QUIC_DATAGRAM_SEND_SENT &&
                 DgState != QUIC_DATAGRAM_SEND_LOST_SUSPECT)
             {
-                struct DatagramSendContext {
-                    uint8_t* DataBuf;
-                    QUIC_BUFFER* QuicBuf;
-                };
-                DatagramSendContext* DgCtx = static_cast<DatagramSendContext*>(RawCtx);
-                free(DgCtx->DataBuf);
-                free(DgCtx->QuicBuf);
-                free(DgCtx);
+                free(RawCtx);
             }
         }
         break;
@@ -1086,43 +1048,36 @@ void FPanaudiaConnectionManager::HandleIncomingSubscribe(
 
 void FPanaudiaConnectionManager::SendDatagram(const TArray<uint8>& Data)
 {
-    if (!MsQuic || !QuicConnection)
+    SendDatagramDirect(Data.GetData(), Data.Num());
+}
+
+void FPanaudiaConnectionManager::SendDatagramDirect(const uint8* Data, int32 Len)
+{
+    if (!MsQuic || !QuicConnection || Len <= 0)
     {
         return;
     }
 
-    struct DatagramSendContext {
-        uint8_t* DataBuf;
-        QUIC_BUFFER* QuicBuf;
-    };
+    // Single allocation: [QUIC_BUFFER][payload bytes]
+    // msquic frees the context asynchronously on its own thread,
+    // so we must heap-allocate. The DATAGRAM_SEND_STATE_CHANGED handler
+    // calls free() on this single block.
+    size_t TotalSize = sizeof(QUIC_BUFFER) + (size_t)Len;
+    uint8_t* Block = (uint8_t*)malloc(TotalSize);
+    if (!Block) return;
 
-    size_t DataLen = (size_t)Data.Num();
-    size_t AllocSize = DataLen + 256; // padding for diagnostics
-    uint8* SendBuf = static_cast<uint8*>(calloc(1, AllocSize));
-    if (!SendBuf) return;
-    memcpy(SendBuf, Data.GetData(), DataLen);
-
-    QUIC_BUFFER* QuicBufPtr = static_cast<QUIC_BUFFER*>(calloc(1, sizeof(QUIC_BUFFER)));
-    if (!QuicBufPtr) { free(SendBuf); return; }
-    QuicBufPtr->Buffer = SendBuf;
-    QuicBufPtr->Length = (uint32_t)DataLen;
-
-    DatagramSendContext* Ctx = static_cast<DatagramSendContext*>(calloc(1, sizeof(DatagramSendContext)));
-    if (!Ctx) { free(SendBuf); free(QuicBufPtr); return; }
-    Ctx->DataBuf = SendBuf;
-    Ctx->QuicBuf = QuicBufPtr;
+    QUIC_BUFFER* QB = (QUIC_BUFFER*)Block;
+    QB->Buffer = Block + sizeof(QUIC_BUFFER);
+    QB->Length = (uint32_t)Len;
+    memcpy(QB->Buffer, Data, Len);
 
     QUIC_STATUS Status = MsQuic->DatagramSend(
-        QuicConnection,
-        QuicBufPtr, 1,
-        QUIC_SEND_FLAG_NONE,
-        Ctx);
+        QuicConnection, QB, 1,
+        QUIC_SEND_FLAG_NONE, Block);
 
     if (QUIC_FAILED(Status))
     {
-        free(SendBuf);
-        free(QuicBufPtr);
-        free(Ctx);
+        free(Block);
     }
 }
 
@@ -1322,14 +1277,14 @@ void FPanaudiaConnectionManager::SubmitAudioData(
 {
     if (!OpusEncoder || !OpusEncoder->IsInitialized()) return;
     if (!bAudioAliasAssigned) return;
+    if (!MsQuic || !QuicConnection) return;
 
-    // Convert to mono if needed
-    TArray<float> MonoBuffer;
+    const int32 FrameSize = 240; // 5ms at 48kHz
+
+    // Stereo→mono into pre-allocated MonoBuffer (no allocation)
     const float* ProcessData = AudioData;
-
     if (NumChannels > 1)
     {
-        MonoBuffer.SetNum(NumSamples);
         for (int32 i = 0; i < NumSamples; ++i)
         {
             float Sum = 0.0f;
@@ -1339,39 +1294,56 @@ void FPanaudiaConnectionManager::SubmitAudioData(
             }
             MonoBuffer[i] = Sum / NumChannels;
         }
-        ProcessData = MonoBuffer.GetData();
+        ProcessData = MonoBuffer;
     }
 
-    // Accumulate until full 20ms frame (960 samples at 48kHz)
-    const int32 FrameSize = 960;
+    // Accumulate in bulk and encode when 240 samples ready
+    int32 Remaining = NumSamples;
+    int32 SrcOffset = 0;
 
-    for (int32 i = 0; i < NumSamples; ++i)
+    while (Remaining > 0)
     {
-        PCMAccumulationBuffer.Add(ProcessData[i]);
-        AccumulatedSamples++;
+        int32 Space = FrameSize - AccumulatedSamples;
+        int32 ToCopy = (Remaining < Space) ? Remaining : Space;
+
+        memcpy(AccumulationBuffer + AccumulatedSamples,
+               ProcessData + SrcOffset,
+               ToCopy * sizeof(float));
+        AccumulatedSamples += ToCopy;
+        SrcOffset += ToCopy;
+        Remaining -= ToCopy;
 
         if (AccumulatedSamples >= FrameSize)
         {
-            TArray<uint8> Encoded;
+            // Encode into pre-allocated buffer (no allocation)
             int32 EncodedBytes = OpusEncoder->Encode(
-                PCMAccumulationBuffer.GetData(),
-                FrameSize,
-                Encoded);
+                AccumulationBuffer, FrameSize,
+                EncodeOutputBuffer, sizeof(EncodeOutputBuffer));
 
             if (EncodedBytes > 0)
             {
-                TArray<uint8> Datagram = MoqProtocol::BuildObjectDatagram(
-                    AudioInputTrackAlias,
-                    0,               // GroupID
-                    AudioObjectId++,
-                    0,               // Highest priority
-                    Encoded.GetData(),
-                    Encoded.Num());
+                // Build MOQ datagram header + payload inline (no allocation)
+                int32 DgOffset = 0;
 
-                SendDatagram(Datagram);
+                // Type = 0x00 (Object Datagram)
+                DgOffset += MoqProtocol::EncodeVarint(0x00, DatagramBuffer + DgOffset);
+                // TrackAlias
+                DgOffset += MoqProtocol::EncodeVarint(AudioInputTrackAlias, DatagramBuffer + DgOffset);
+                // GroupID = 0
+                DgOffset += MoqProtocol::EncodeVarint(0, DatagramBuffer + DgOffset);
+                // ObjectID
+                DgOffset += MoqProtocol::EncodeVarint(AudioObjectId++, DatagramBuffer + DgOffset);
+                // Priority = 0 (highest)
+                DatagramBuffer[DgOffset++] = 0;
+                // Payload
+                memcpy(DatagramBuffer + DgOffset, EncodeOutputBuffer, EncodedBytes);
+                DgOffset += EncodedBytes;
+
+                // Single malloc for msquic async send
+                SendDatagramDirect(DatagramBuffer, DgOffset);
             }
+            // else: encode failed — Opus DTX may produce 0 bytes for silence
 
-            PCMAccumulationBuffer.Empty();
             AccumulatedSamples = 0;
         }
     }
@@ -1605,39 +1577,10 @@ void FPanaudiaConnectionManager::Tick(float DeltaTime)
     // --- Flush queued outgoing datagrams ---
     if (MsQuic && QuicConnection)
     {
-        struct DatagramSendContext {
-            uint8_t* DataBuf;
-            QUIC_BUFFER* QuicBuf;
-        };
-
         TArray<uint8> QueuedData;
         while (OutgoingDatagramQueue.Dequeue(QueuedData))
         {
-            size_t DataLen = (size_t)QueuedData.Num();
-            uint8* SendBuf = static_cast<uint8*>(calloc(1, DataLen + 256));
-            if (!SendBuf) continue;
-            memcpy(SendBuf, QueuedData.GetData(), DataLen);
-
-            QUIC_BUFFER* QuicBufPtr = static_cast<QUIC_BUFFER*>(calloc(1, sizeof(QUIC_BUFFER)));
-            if (!QuicBufPtr) { free(SendBuf); continue; }
-            QuicBufPtr->Buffer = SendBuf;
-            QuicBufPtr->Length = (uint32_t)DataLen;
-
-            DatagramSendContext* Ctx = static_cast<DatagramSendContext*>(calloc(1, sizeof(DatagramSendContext)));
-            if (!Ctx) { free(SendBuf); free(QuicBufPtr); continue; }
-            Ctx->DataBuf = SendBuf;
-            Ctx->QuicBuf = QuicBufPtr;
-
-            QUIC_STATUS Status = MsQuic->DatagramSend(
-                QuicConnection, QuicBufPtr, 1,
-                QUIC_SEND_FLAG_NONE, Ctx);
-
-            if (QUIC_FAILED(Status))
-            {
-                free(SendBuf);
-                free(QuicBufPtr);
-                free(Ctx);
-            }
+            SendDatagramDirect(QueuedData.GetData(), QueuedData.Num());
         }
     }
 

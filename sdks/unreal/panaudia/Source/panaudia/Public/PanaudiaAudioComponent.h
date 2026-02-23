@@ -141,7 +141,9 @@ private:
     // Audio capture
     Audio::FAudioCapture AudioCapture;
     bool bIsCapturing;
-    TArray<float> CaptureBuffer;
+    static constexpr int32 MaxCaptureFrames = 1024;
+    static constexpr int32 MaxCaptureChannels = 8;
+    float CaptureBuffer[MaxCaptureFrames * MaxCaptureChannels];
 
     // Audio playback
     UPROPERTY()
