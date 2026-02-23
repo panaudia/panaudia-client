@@ -16,9 +16,10 @@
 #include "PanaudiaAudioComponent.generated.h"
 
 class FPanaudiaConnectionManager;
+class UPanaudiaProceduralSound;
 
 /**
- * Actor component that handles audio capture, WebRTC connection, and binaural playback
+ * Actor component that handles audio capture, MOQ/QUIC connection, and binaural playback
  * This component should be attached to the player pawn/character
  */
 UCLASS(ClassGroup=(Audio), meta=(BlueprintSpawnableComponent))
@@ -61,7 +62,7 @@ public:
     bool bAutoUpdatePosition = true;
 
     UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Panaudia")
-    float PositionUpdateRate = 0.1f; // 10 Hz
+    float PositionUpdateRate = 0.05f; // 20 Hz (matches TS client)
 
     UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Panaudia")
     bool bCaptureMicrophone = true;
@@ -71,6 +72,12 @@ public:
 
     UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Panaudia")
     float OutputVolume = 1.0f;
+
+    // Half-width of the UE world in cm that maps to the Panaudia 0-1 range.
+    // UE origin maps to Panaudia center (0.5, 0.5, 0.5).
+    // Default 5000 cm = 50m per side = 100m total world size.
+    UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Panaudia", meta = (ClampMin = "100", ClampMax = "100000"))
+    float WorldExtent = 5000.0f;
 
     // Jitter buffer settings
     UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Panaudia|JitterBuffer")
@@ -138,7 +145,7 @@ private:
 
     // Audio playback
     UPROPERTY()
-    USoundWaveProcedural* ProceduralSound;
+    UPanaudiaProceduralSound* ProceduralSound;
 
     UPROPERTY()
     UAudioComponent* AudioComponent;
@@ -152,7 +159,6 @@ private:
     void OnAudioCapture(const float* AudioData, int32 NumFrames, int32 NumChannels, int32 SampleRate, double StreamTime, bool bOverflow);
 
     void SetupAudioPlayback();
-    void ProcessIncomingAudio();
 
     // Position tracking
     void AutoUpdatePosition();

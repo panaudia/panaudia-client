@@ -13,39 +13,37 @@
 #include "Tickable.h"
 
 #include "PanaudiaTypes.h"
-#include "IWebSocket.h"
 #include "PanaudiaJitterBuffer.h"
+#include "PanaudiaMoqProtocol.h"
 
-
-// Include STL headers after Unreal headers to avoid conflicts
+// Plain C++ types for msquic thread safety (msquic threads are NOT registered with UE)
 #include <vector>
-#include <string>
-#include <memory>
+#include <mutex>
+#include <atomic>
+#include <queue>
+#include <cstdint>
+
+// msquic (suppress warnings from third-party headers)
+THIRD_PARTY_INCLUDES_START
+#include "msquic.h"
+THIRD_PARTY_INCLUDES_END
 
 // Forward declarations
-namespace rtc
-{
-    class PeerConnection;
-    class DataChannel;
-    class Track;
-    struct Configuration;
-}
-
 class FPanaudiaOpusEncoder;
 class FPanaudiaOpusDecoder;
 
-// Audio packet structure
-struct FPanaudiaAudioPacket
-{
-    TArray<uint8> Data;
-    int32 NumSamples;
-    int32 NumChannels;
-    double Timestamp;
-};
+// (FPanaudiaAudioPacket removed — audio is now decoded inline on msquic thread)
 
 /**
- * Manages WebRTC connection using libdatachannel
- * Mirrors the functionality of connection.js with auto-reconnection
+ * Manages MOQ/QUIC connection using msquic.
+ *
+ * IMPORTANT THREADING MODEL:
+ * msquic callbacks fire on msquic's own worker threads which are NOT registered
+ * with UE's thread system. Calling ANY UE API (UE_LOG, TArray, new/delete, AsyncTask,
+ * FString, etc.) from these threads will crash UE's CPU profiler trace system.
+ *
+ * Therefore: msquic callbacks ONLY use plain C/C++ types (std::vector, std::mutex,
+ * std::atomic, malloc/free, printf). All UE work is deferred to Tick() on the game thread.
  */
 class PANAUDIA_API FPanaudiaConnectionManager : public FTickableGameObject
 {
@@ -67,22 +65,23 @@ public:
     void SetReconnectBaseDelay(float DelaySeconds);
 
     // Position updates
-    void UpdatePosition(const FVector& Position, const FRotator& Rotation);
+    void UpdatePosition(const FVector& Position, const FRotator& Rotation, float WorldExtent = 5000.0f);
     void UpdateAmbisonicPosition(const FPanaudiaNodeState& State);
 
     // Audio control
     void Mute(const FString& NodeId);
     void Unmute(const FString& NodeId);
 
-    // Audio data handling (called from audio thread)
+    // Audio data handling (called from audio capture thread)
     void SubmitAudioData(const float* AudioData, int32 NumSamples, int32 NumChannels, int32 SampleRate);
-    bool GetReceivedAudioData(float* OutAudioData, int32 NumSamples, int32 NumChannels);
 
-    // Callbacks - Use NATIVE versions that support lambdas
+    // Jitter buffer access (for UPanaudiaProceduralSound to read from audio render thread)
+    FPanaudiaJitterBuffer* GetJitterBuffer() const { return JitterBuffer; }
+
+    // Callbacks
     FOnConnectionStatusChangedNative OnConnectionStatusChanged;
     FOnNodeStateReceivedNative OnNodeStateReceived;
     FOnAttributesReceivedNative OnAttributesReceived;
-
 
     // FTickableGameObject interface
     virtual void Tick(float DeltaTime) override;
@@ -96,104 +95,137 @@ public:
     float GetCurrentAudioLatency() const;
 
 private:
-    // WebSocket connection for signaling
-    TSharedPtr<IWebSocket> WebSocket;
-    FString WebSocketURL;
-    std::atomic<bool> bAnswerSent{false};
+    // --- msquic handles ---
+    const QUIC_API_TABLE* MsQuic = nullptr;
+    HQUIC Registration = nullptr;
+    HQUIC Configuration = nullptr;
+    HQUIC QuicConnection = nullptr;
+    HQUIC ControlStream = nullptr;
 
-    // WebRTC peer connection
-    std::shared_ptr<rtc::PeerConnection> PeerConnection;
+    // --- MOQ state ---
+    uint64 NextRequestId = 0;          // Client uses even IDs (0, 2, 4...)
 
-    // Data channels
-    std::shared_ptr<rtc::DataChannel> StateChannel;
-    std::shared_ptr<rtc::DataChannel> ControlChannel;
-    std::shared_ptr<rtc::DataChannel> AttributesChannel;
+    // Track aliases assigned by server (via incoming SUBSCRIBE)
+    uint64 AudioInputTrackAlias = 0;
+    uint64 StateTrackAlias = 0;
+    uint64 ControlTrackAlias = 0;
+    bool bAudioAliasAssigned = false;
+    bool bStateAliasAssigned = false;
+    bool bControlAliasAssigned = false;
 
-    // Audio track
-    std::shared_ptr<rtc::Track> AudioTrack;
+    // Track aliases we assign (for our subscriptions)
+    uint64 AudioOutputTrackAlias = 100;
+    uint64 StateOutputTrackAlias = 101;
+    uint64 AttributesTrackAlias = 102;
 
-    // Connection state
+    // Object IDs for outgoing datagrams
+    uint64 AudioObjectId = 0;
+    uint64 StateObjectId = 0;
+    uint64 ControlObjectId = 0;
+
+    // Node ID from JWT
+    FString NodeId;
+
+    // --- Connection state ---
     EPanaudiaConnectionStatus CurrentStatus;
     FString LastErrorMessage;
-    bool bIsDataChannelOpen;
-    FCriticalSection StatusLock;
 
     // Auto-reconnection state
-    bool bAutoReconnectEnabled;
-    bool bIsManualDisconnect;
-    bool bIsReconnecting;
-    int32 ReconnectAttemptCount;
-    int32 MaxReconnectAttempts;
-    float ReconnectBaseDelay;
-    float ReconnectTimer;
-    float CurrentReconnectDelay;
+    bool bAutoReconnectEnabled = false;
+    bool bIsManualDisconnect = false;
+    bool bIsReconnecting = false;
+    int32 ReconnectAttemptCount = 0;
+    int32 MaxReconnectAttempts = 10;
+    float ReconnectBaseDelay = 2.0f;
+    float ReconnectTimer = 0.0f;
+    float CurrentReconnectDelay = 0.0f;
     FPanaudiaConnectionConfig LastConnectionConfig;
-    bool bHasConnectionConfig;
+    bool bHasConnectionConfig = false;
 
-    // Audio encoding/decoding
-    FPanaudiaOpusEncoder* OpusEncoder;
-    FPanaudiaOpusDecoder* OpusDecoder;
+    // --- Audio ---
+    FPanaudiaOpusEncoder* OpusEncoder = nullptr;
+    FPanaudiaOpusDecoder* OpusDecoder = nullptr;
 
-    // Audio buffers (thread-safe queues)
-    TQueue<TArray<float>, EQueueMode::Mpsc> OutgoingPCMQueue;
-    TQueue<FPanaudiaAudioPacket, EQueueMode::Mpsc> IncomingPacketQueue;
-    TQueue<TArray<float>, EQueueMode::Mpsc> DecodedAudioQueue;
+    // Pre-allocated decode buffer for msquic thread (960 stereo samples max)
+    float DecodeBuffer[960 * 2];
 
     // Audio resampling buffer (for accumulating partial frames)
     TArray<float> PCMAccumulationBuffer;
-    int32 AccumulatedSamples;
+    int32 AccumulatedSamples = 0;
 
     // Jitter buffer
-    FPanaudiaJitterBuffer* JitterBuffer;
+    FPanaudiaJitterBuffer* JitterBuffer = nullptr;
 
-    // WebSocket handlers
-    void OnWebSocketConnected();
-    void OnWebSocketConnectionError(const FString& Error);
-    void OnWebSocketClosed(int32 StatusCode, const FString& Reason, bool bWasClean);
-    void OnWebSocketMessage(const FString& Message);
+    // --- Queued outgoing datagrams (from non-QUIC threads) ---
+    TQueue<TArray<uint8>, EQueueMode::Mpsc> OutgoingDatagramQueue;
 
-    // Signaling message handlers
-    void HandleOfferMessage(const FString& OfferJson);
-    void HandleCandidateMessage(const FString& CandidateJson);
-    void HandleErrorMessage(const FString& ErrorJson);
+    // =========================================================================
+    // msquic thread-safe queues (plain C++ only — NO UE types!)
+    // These are written from msquic callback threads and read from Tick().
+    // =========================================================================
 
-    // WebRTC setup
-    void InitializePeerConnection();
-    void SetupAudioTrack();
-    void CreateAnswer(const FString& OfferSDP);
-    void SendICECandidate(const FString& CandidateJson);
+    // Incoming control stream data chunks
+    std::queue<std::vector<uint8_t>> PendingControlData;
+    std::mutex ControlDataMutex;
 
-    // Data channel handlers
-    void OnStateChannelOpen();
-    void OnStateChannelMessage(const std::vector<std::byte>& Data);
-    void OnControlChannelOpen();
-    void OnControlChannelMessage(const std::string& Message);
-    void OnAttributesChannelOpen();
-    void OnAttributesChannelMessage(const std::string& Message);;
+    // Incoming datagrams
+    std::queue<std::vector<uint8_t>> PendingDatagrams;
+    std::mutex DatagramMutex;
 
-    // Audio track handlers
-    void OnAudioTrackOpen();
-    void OnAudioTrackMessage(const std::vector<std::byte>& Data);
-    void ProcessOutgoingAudio();
-    void ProcessIncomingAudio();
+    // Connection event flags (set by msquic callbacks, read by Tick)
+    std::atomic<bool> bPendingConnected{false};
+    std::atomic<bool> bPendingTransportShutdown{false};
+    std::atomic<bool> bPendingPeerShutdown{false};
+    std::atomic<bool> bMoqSessionStarted{false};
 
-    // Auto-reconnection
+    // Control stream receive buffer (game thread only, used in Tick)
+    TArray<uint8> ControlStreamRecvBuffer;
+
+    // =========================================================================
+
+    // --- QUIC initialization ---
+    bool InitializeQuic();
+    void CleanupQuic();
+
+    // --- MOQ session (called from Tick/game thread) ---
+    void StartMoqSession();
+    void SendClientSetup();
+    void AnnounceAndSubscribe();
+    void SendOnControlStream(const TArray<uint8>& Data);
+    void ProcessControlStreamData(const uint8* Data, int32 Len);
+    void HandleServerSetup(const uint8* Content, int32 ContentLen);
+    void HandleAnnounceOk(const uint8* Content, int32 ContentLen);
+    void HandleSubscribeOk(const uint8* Content, int32 ContentLen);
+    void HandleIncomingSubscribe(const uint8* Content, int32 ContentLen);
+
+    // --- Data sending ---
+    void SendDatagram(const TArray<uint8>& Data);
+    void SendStateUpdate(const FPanaudiaNodeState& State);
+    void SendControlMessage(const FString& Type, const TSharedPtr<FJsonObject>& MessageData);
+
+    // --- Data receiving (called from Tick/game thread) ---
+    void ProcessPendingDatagrams();
+    void OnStateDataReceived(const uint8* Payload, int32 PayloadLen);
+    void OnAttributesDataReceived(const uint8* Payload, int32 PayloadLen);
+
+    // --- Audio codec ---
+    void InitializeAudioCodecs();
+    void CleanupAudioCodecs();
+    void InitializeJitterBuffer();
+
+    // --- Connection helpers ---
+    void SetConnectionStatus(EPanaudiaConnectionStatus NewStatus, const FString& Message);
     void HandleConnectionLost(const FString& Reason);
     void AttemptReconnect();
     void ResetReconnectionState();
     float CalculateReconnectDelay() const;
 
-    // Helper methods
-    void SetConnectionStatus(EPanaudiaConnectionStatus NewStatus, const FString& Message);
-    void SendControlMessage(const FString& Type, const TSharedPtr<FJsonObject>& MessageData);
-    FString BuildConnectionURL(const FPanaudiaConnectionConfig& Config, const FString& BaseURL);
-    void SendStateUpdate(const FPanaudiaNodeState& State);
+    // --- msquic callbacks (static, run on msquic threads — NO UE APIS!) ---
+    static QUIC_STATUS QUIC_API StaticConnectionCallback(
+        HQUIC Connection, void* Context, QUIC_CONNECTION_EVENT* Event);
+    static QUIC_STATUS QUIC_API StaticStreamCallback(
+        HQUIC Stream, void* Context, QUIC_STREAM_EVENT* Event);
 
-    void InitializeJitterBuffer();
-
-    // Cleanup
-    void CleanupWebRTC();
-    void CleanupWebSocket();
-    void InitializeAudioCodecs();
-    void CleanupAudioCodecs();
+    QUIC_STATUS OnConnectionEvent(HQUIC Connection, QUIC_CONNECTION_EVENT* Event);
+    QUIC_STATUS OnStreamEvent(HQUIC Stream, QUIC_STREAM_EVENT* Event);
 };

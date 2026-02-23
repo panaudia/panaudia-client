@@ -46,14 +46,15 @@ struct FPanaudiaNodeState
     UPROPERTY(BlueprintReadWrite, Category = "Panaudia")
     float Roll = 0.0f;
 
-    // Convert from Unreal coordinates (Z-up, left-handed) to Panaudia coordinates
-    static FPanaudiaNodeState FromUnrealCoordinates(const FVector& Position, const FRotator& Rotation);
+    // Convert from Unreal coordinates (Z-up, left-handed, cm) to Panaudia coordinates (0-1 range)
+    // WorldExtent = half the world size in cm. UE origin maps to Panaudia center (0.5, 0.5, 0.5).
+    static FPanaudiaNodeState FromUnrealCoordinates(const FVector& Position, const FRotator& Rotation, float WorldExtent = 5000.0f);
 
     // Convert to Unreal coordinates
     FVector GetUnrealPosition() const;
     FRotator GetUnrealRotation() const;
 
-    // Serialize to binary buffer for WebRTC data channel (matches JavaScript implementation)
+    // Serialize to binary buffer (matches JavaScript implementation)
     TArray<uint8> ToDataBuffer() const;
     static FPanaudiaNodeState FromDataBuffer(const uint8* Data, int32 Size);
 };
@@ -67,9 +68,6 @@ struct FPanaudiaConnectionConfig
     FString Ticket;
 
     UPROPERTY(BlueprintReadWrite, Category = "Panaudia")
-    bool bEnableDataChannel = false;
-
-    UPROPERTY(BlueprintReadWrite, Category = "Panaudia")
     FVector InitialPosition = FVector::ZeroVector;
 
     UPROPERTY(BlueprintReadWrite, Category = "Panaudia")
@@ -79,8 +77,10 @@ struct FPanaudiaConnectionConfig
     TMap<FString, FString> CustomAttributes;
 
     UPROPERTY(BlueprintReadWrite, Category = "Panaudia")
-    //FString EntranceURL = TEXT("https://panaudia.com/entrance");
-    FString EntranceURL = TEXT("http://localhost:8000/gateway");
+    FString ServerURL = TEXT("quic://localhost:4433");
+
+    UPROPERTY(BlueprintReadWrite, Category = "Panaudia")
+    bool bSkipCertValidation = true;
 };
 
 // Typedef to avoid comma issues with macros

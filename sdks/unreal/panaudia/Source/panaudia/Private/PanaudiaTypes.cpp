@@ -1,22 +1,26 @@
 
 #include "PanaudiaTypes.h"
 
-FPanaudiaNodeState FPanaudiaNodeState::FromUnrealCoordinates(const FVector& Position, const FRotator& Rotation)
+FPanaudiaNodeState FPanaudiaNodeState::FromUnrealCoordinates(const FVector& Position, const FRotator& Rotation, float WorldExtent)
 {
     FPanaudiaNodeState State;
 
-    // Convert Unreal (Z-up, cm) to Panaudia coordinates (Y-up, meters)
-    // X (forward) -> X
-    // Y (right) -> Z
-    // Z (up) -> Y
-    State.X = Position.X / 100.0f;  // cm to meters
-    State.Y = Position.Z / 100.0f;  // Z becomes Y (up)
-    State.Z = Position.Y / 100.0f;  // Y becomes Z
+    // Convert Unreal (Z-up, left-handed, cm) to Panaudia coordinates (0-1 range)
+    // UE origin (0,0,0) maps to Panaudia center (0.5, 0.5, 0.5)
+    // UE ±WorldExtent maps to Panaudia 0..1
+    // Axis remapping: UE X (forward) -> Panaudia X, UE Z (up) -> Panaudia Y, UE Y (right) -> Panaudia Z
+    float Scale = 1.0f / (2.0f * WorldExtent);  // cm to 0-1 range
+    State.X = FMath::Clamp(Position.X * Scale + 0.5f, 0.0f, 1.0f);
+    State.Y = FMath::Clamp(Position.Z * Scale + 0.5f, 0.0f, 1.0f);  // Z (up) -> Y
+    State.Z = FMath::Clamp(Position.Y * Scale + 0.5f, 0.0f, 1.0f);  // Y (right) -> Z
 
-    // Convert rotation
-    State.Yaw = FMath::DegreesToRadians(Rotation.Yaw);
-    State.Pitch = FMath::DegreesToRadians(Rotation.Pitch);
-    State.Roll = FMath::DegreesToRadians(Rotation.Roll);
+    // Convert rotation — Panaudia expects degrees, intrinsic Tait-Bryan yaw-pitch-roll
+    // Both systems use same semantic: yaw=horizontal, pitch=up/down, roll=tilt
+    // UE is left-handed (positive yaw = clockwise from above)
+    // Panaudia expects anti-clockwise positive yaw, so negate
+    State.Yaw = -Rotation.Yaw;
+    State.Pitch = Rotation.Pitch;
+    State.Roll = Rotation.Roll;
 
     return State;
 }
@@ -33,10 +37,11 @@ FVector FPanaudiaNodeState::GetUnrealPosition() const
 
 FRotator FPanaudiaNodeState::GetUnrealRotation() const
 {
+    // Reverse of FromUnrealCoordinates: negate yaw back, direct pitch/roll
     return FRotator(
-        FMath::RadiansToDegrees(Pitch),
-        FMath::RadiansToDegrees(Yaw),
-        FMath::RadiansToDegrees(Roll)
+        Pitch,  // UE Pitch
+        -Yaw,   // UE Yaw (negate back from anti-clockwise to clockwise)
+        Roll    // UE Roll
     );
 }
 

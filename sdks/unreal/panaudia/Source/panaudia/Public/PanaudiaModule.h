@@ -11,6 +11,4 @@ public:
     virtual void ShutdownModule() override;
 
 private:
-    /** Handle to the loaded libdatachannel library */
-    void* LibDataChannelHandle;
 };

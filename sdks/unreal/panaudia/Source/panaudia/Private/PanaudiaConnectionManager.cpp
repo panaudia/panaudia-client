@@ -4,53 +4,111 @@
 #include "CoreMinimal.h"
 #include "PanaudiaOpusEncoder.h"
 #include "PanaudiaOpusDecoder.h"
-#include "WebSocketsModule.h"
-#include "IWebSocket.h"
 #include "Json.h"
 #include "JsonUtilities.h"
 #include "Misc/Base64.h"
-#include "HttpModule.h"
-#include "Interfaces/IHttpResponse.h"
 #include "Async/Async.h"
 
+// ALPN for raw QUIC MOQ connection (matching Go server's handleQuicConnection)
+static const char* MOQ_ALPN = "moq-00";
 
+// MOQ Transport version (draft-11: 0xff000000 + 11)
+static const uint64 MOQ_TRANSPORT_VERSION = 0xff00000b;
 
-// libdatachannel includes
-#include "rtc/rtc.hpp"
+// NodeInfo3 binary size: UUID(16) + Position(12) + Rotation(12) + Volume(4) + Gone(4)
+static const int32 NODE_INFO3_SIZE = 48;
 
-class FJsonObject;
+// ============================================================================
+// Helper: Extract NodeID (jti claim) from JWT token
+// ============================================================================
+
+static FString ExtractNodeIdFromJwt(const FString& Token)
+{
+    // JWT format: header.payload.signature
+    TArray<FString> Parts;
+    Token.ParseIntoArray(Parts, TEXT("."));
+    if (Parts.Num() != 3)
+    {
+        UE_LOG(LogTemp, Error, TEXT("Invalid JWT: expected 3 parts, got %d"), Parts.Num());
+        return FString();
+    }
+
+    // Base64url → base64
+    FString Payload = Parts[1];
+    Payload = Payload.Replace(TEXT("-"), TEXT("+"));
+    Payload = Payload.Replace(TEXT("_"), TEXT("/"));
+    while (Payload.Len() % 4 != 0)
+    {
+        Payload += TEXT("=");
+    }
+
+    TArray<uint8> DecodedBytes;
+    if (!FBase64::Decode(Payload, DecodedBytes))
+    {
+        UE_LOG(LogTemp, Error, TEXT("Failed to base64-decode JWT payload"));
+        return FString();
+    }
+
+    // Null-terminate for string conversion
+    DecodedBytes.Add(0);
+    FString JsonString = FString(UTF8_TO_TCHAR(
+        reinterpret_cast<const char*>(DecodedBytes.GetData())));
+
+    TSharedPtr<FJsonObject> JsonObject;
+    TSharedRef<TJsonReader<>> Reader = TJsonReaderFactory<>::Create(JsonString);
+
+    if (!FJsonSerializer::Deserialize(Reader, JsonObject) || !JsonObject.IsValid())
+    {
+        UE_LOG(LogTemp, Error, TEXT("Failed to parse JWT payload JSON"));
+        return FString();
+    }
+
+    // Get node ID from jti claim
+    FString NodeIdValue = JsonObject->GetStringField(TEXT("jti"));
+    if (!NodeIdValue.IsEmpty())
+    {
+        return NodeIdValue;
+    }
+
+    UE_LOG(LogTemp, Error, TEXT("No jti claim found in JWT payload"));
+    return FString();
+}
+
+// ============================================================================
+// Helper: Convert UUID string "550e8400-e29b-41d4-..." to 16 raw bytes
+// ============================================================================
+
+static bool UuidStringToBytes(const FString& UuidStr, uint8* OutBytes)
+{
+    FString Hex = UuidStr.Replace(TEXT("-"), TEXT(""));
+    if (Hex.Len() != 32)
+    {
+        return false;
+    }
+    for (int32 i = 0; i < 16; ++i)
+    {
+        FString ByteStr = Hex.Mid(i * 2, 2);
+        OutBytes[i] = (uint8)FCString::Strtoi(*ByteStr, nullptr, 16);
+    }
+    return true;
+}
+
+// ============================================================================
+// Constructor / Destructor
+// ============================================================================
 
 FPanaudiaConnectionManager::FPanaudiaConnectionManager()
     : CurrentStatus(EPanaudiaConnectionStatus::Disconnected)
     , LastErrorMessage()
-    , bIsDataChannelOpen(false)
-    , StatusLock()
-    , bAutoReconnectEnabled(false)
-    , bIsManualDisconnect(false)
-    , bIsReconnecting(false)
-    , ReconnectAttemptCount(0)
-    , MaxReconnectAttempts(10)
-    , ReconnectBaseDelay(2.0f)
-    , ReconnectTimer(0.0f)
-    , CurrentReconnectDelay(0.0f)
-    , LastConnectionConfig()
-    , bHasConnectionConfig(false)
     , OpusEncoder(nullptr)
     , OpusDecoder(nullptr)
     , PCMAccumulationBuffer()
     , AccumulatedSamples(0)
     , JitterBuffer(nullptr)
 {
-    UE_LOG(LogTemp, Log, TEXT("PanaudiaConnectionManager created with auto-reconnect enabled"));
+    UE_LOG(LogTemp, Log, TEXT("PanaudiaConnectionManager created (MOQ/QUIC)"));
     InitializeAudioCodecs();
     InitializeJitterBuffer();
-}
-
-void FPanaudiaConnectionManager::InitializeJitterBuffer()
-{
-    JitterBuffer = new FPanaudiaJitterBuffer();
-    JitterBuffer->Initialize(20, 200, 60, 48000); // Min=20ms, Max=200ms, Target=60ms
-    UE_LOG(LogTemp, Log, TEXT("Jitter buffer initialized"));
 }
 
 FPanaudiaConnectionManager::~FPanaudiaConnectionManager()
@@ -65,11 +123,15 @@ FPanaudiaConnectionManager::~FPanaudiaConnectionManager()
     }
 }
 
+// ============================================================================
+// Audio Codec Initialization
+// ============================================================================
+
 void FPanaudiaConnectionManager::InitializeAudioCodecs()
 {
-    // Initialize Opus encoder (mono 48kHz for microphone input)
+    // Mono encoder for microphone input
     OpusEncoder = new FPanaudiaOpusEncoder();
-    if (!OpusEncoder->Initialize(48000, 1, 2048)) // VOIP application
+    if (!OpusEncoder->Initialize(48000, 1, 2048))
     {
         UE_LOG(LogTemp, Error, TEXT("Failed to initialize Opus encoder"));
         delete OpusEncoder;
@@ -77,16 +139,15 @@ void FPanaudiaConnectionManager::InitializeAudioCodecs()
     }
     else
     {
-        // Configure for voice chat
-        OpusEncoder->SetBitrate(64000);  // 64 kbps
-        OpusEncoder->SetComplexity(5);   // Medium complexity
-        OpusEncoder->SetDTX(true);       // Enable DTX for bandwidth savings
-        UE_LOG(LogTemp, Log, TEXT("Opus encoder initialized"));
+        OpusEncoder->SetBitrate(64000);
+        OpusEncoder->SetComplexity(5);
+        OpusEncoder->SetDTX(true);
+        UE_LOG(LogTemp, Log, TEXT("Opus encoder initialized (mono 48kHz)"));
     }
 
-    // Initialize Opus decoder (stereo 48kHz for binaural output)
+    // Stereo decoder for binaural output from server
     OpusDecoder = new FPanaudiaOpusDecoder();
-    if (!OpusDecoder->Initialize(48000, 2)) // Stereo
+    if (!OpusDecoder->Initialize(48000, 2))
     {
         UE_LOG(LogTemp, Error, TEXT("Failed to initialize Opus decoder"));
         delete OpusDecoder;
@@ -94,818 +155,1151 @@ void FPanaudiaConnectionManager::InitializeAudioCodecs()
     }
     else
     {
-        UE_LOG(LogTemp, Log, TEXT("Opus decoder initialized"));
+        UE_LOG(LogTemp, Log, TEXT("Opus decoder initialized (stereo 48kHz)"));
     }
 
-    // Pre-allocate accumulation buffer (20ms frame = 960 samples at 48kHz)
     PCMAccumulationBuffer.Reserve(960);
 }
 
 void FPanaudiaConnectionManager::CleanupAudioCodecs()
 {
-    if (OpusEncoder)
+    if (OpusEncoder) { delete OpusEncoder; OpusEncoder = nullptr; }
+    if (OpusDecoder) { delete OpusDecoder; OpusDecoder = nullptr; }
+}
+
+void FPanaudiaConnectionManager::InitializeJitterBuffer()
+{
+    JitterBuffer = new FPanaudiaJitterBuffer();
+    JitterBuffer->Initialize(48000, 2, 60, 20, 30, 10, 200, 16);
+    UE_LOG(LogTemp, Log, TEXT("Jitter buffer initialized"));
+}
+
+// ============================================================================
+// QUIC Initialization
+// ============================================================================
+
+bool FPanaudiaConnectionManager::InitializeQuic()
+{
+    QUIC_STATUS Status = MsQuicOpen2(&MsQuic);
+    if (QUIC_FAILED(Status))
     {
-        delete OpusEncoder;
-        OpusEncoder = nullptr;
+        UE_LOG(LogTemp, Error, TEXT("MsQuicOpen2 failed: 0x%x"), Status);
+        return false;
     }
 
-    if (OpusDecoder)
+    // Registration with low-latency profile
+    QUIC_REGISTRATION_CONFIG RegConfig = {};
+    RegConfig.AppName = "Panaudia";
+    RegConfig.ExecutionProfile = QUIC_EXECUTION_PROFILE_LOW_LATENCY;
+
+    Status = MsQuic->RegistrationOpen(&RegConfig, &Registration);
+    if (QUIC_FAILED(Status))
     {
-        delete OpusDecoder;
-        OpusDecoder = nullptr;
+        UE_LOG(LogTemp, Error, TEXT("RegistrationOpen failed: 0x%x"), Status);
+        return false;
+    }
+
+    // ALPN buffer
+    QUIC_BUFFER AlpnBuffer;
+    AlpnBuffer.Length = (uint32_t)strlen(MOQ_ALPN);
+    AlpnBuffer.Buffer = (uint8_t*)MOQ_ALPN;
+
+    // QUIC settings: enable datagrams, reasonable timeouts
+    QUIC_SETTINGS Settings = {};
+    Settings.IsSet.DatagramReceiveEnabled = TRUE;
+    Settings.DatagramReceiveEnabled = TRUE;
+    Settings.IsSet.IdleTimeoutMs = TRUE;
+    Settings.IdleTimeoutMs = 30000;
+    Settings.IsSet.PeerBidiStreamCount = TRUE;
+    Settings.PeerBidiStreamCount = 10;
+    Settings.IsSet.PeerUnidiStreamCount = TRUE;
+    Settings.PeerUnidiStreamCount = 10;
+
+    Status = MsQuic->ConfigurationOpen(
+        Registration, &AlpnBuffer, 1,
+        &Settings, sizeof(Settings),
+        nullptr, &Configuration);
+    if (QUIC_FAILED(Status))
+    {
+        UE_LOG(LogTemp, Error, TEXT("ConfigurationOpen failed: 0x%x"), Status);
+        return false;
+    }
+
+    // TLS credential (client mode)
+    QUIC_CREDENTIAL_CONFIG CredConfig = {};
+    CredConfig.Type = QUIC_CREDENTIAL_TYPE_NONE;
+    CredConfig.Flags = QUIC_CREDENTIAL_FLAG_CLIENT;
+    if (LastConnectionConfig.bSkipCertValidation)
+    {
+        CredConfig.Flags |= QUIC_CREDENTIAL_FLAG_NO_CERTIFICATE_VALIDATION;
+    }
+
+    Status = MsQuic->ConfigurationLoadCredential(Configuration, &CredConfig);
+    if (QUIC_FAILED(Status))
+    {
+        UE_LOG(LogTemp, Error, TEXT("ConfigurationLoadCredential failed: 0x%x"), Status);
+        return false;
+    }
+
+    UE_LOG(LogTemp, Log, TEXT("QUIC initialized (ALPN: %hs)"), MOQ_ALPN);
+    return true;
+}
+
+void FPanaudiaConnectionManager::CleanupQuic()
+{
+    if (ControlStream && MsQuic)
+    {
+        MsQuic->StreamClose(ControlStream);
+        ControlStream = nullptr;
+    }
+
+    if (QuicConnection && MsQuic)
+    {
+        MsQuic->ConnectionClose(QuicConnection);
+        QuicConnection = nullptr;
+    }
+
+    if (Configuration && MsQuic)
+    {
+        MsQuic->ConfigurationClose(Configuration);
+        Configuration = nullptr;
+    }
+
+    if (Registration && MsQuic)
+    {
+        MsQuic->RegistrationClose(Registration);
+        Registration = nullptr;
+    }
+
+    if (MsQuic)
+    {
+        MsQuicClose(MsQuic);
+        MsQuic = nullptr;
+    }
+
+    // Reset MOQ state
+    NextRequestId = 0;
+    bAudioAliasAssigned = false;
+    bStateAliasAssigned = false;
+    bControlAliasAssigned = false;
+    AudioObjectId = 0;
+    StateObjectId = 0;
+    ControlObjectId = 0;
+    ControlStreamRecvBuffer.Empty();
+    bMoqSessionStarted.store(false);
+    bPendingConnected.store(false);
+    bPendingTransportShutdown.store(false);
+    bPendingPeerShutdown.store(false);
+
+    // Drain queues
+    {
+        std::lock_guard<std::mutex> Lock(ControlDataMutex);
+        while (!PendingControlData.empty()) PendingControlData.pop();
+    }
+    {
+        std::lock_guard<std::mutex> Lock(DatagramMutex);
+        while (!PendingDatagrams.empty()) PendingDatagrams.pop();
     }
 }
 
-void FPanaudiaConnectionManager::SetAutoReconnectEnabled(bool bEnabled)
-{
-    bAutoReconnectEnabled = bEnabled;
-    UE_LOG(LogTemp, Log, TEXT("Auto-reconnect %s"), bEnabled ? TEXT("enabled") : TEXT("disabled"));
-}
-
-void FPanaudiaConnectionManager::SetMaxReconnectAttempts(int32 MaxAttempts)
-{
-    MaxReconnectAttempts = FMath::Max(0, MaxAttempts);
-    UE_LOG(LogTemp, Log, TEXT("Max reconnect attempts set to: %d"), MaxReconnectAttempts);
-}
-
-void FPanaudiaConnectionManager::SetReconnectBaseDelay(float DelaySeconds)
-{
-    ReconnectBaseDelay = FMath::Max(0.5f, DelaySeconds);
-    UE_LOG(LogTemp, Log, TEXT("Reconnect base delay set to: %.2f seconds"), ReconnectBaseDelay);
-}
+// ============================================================================
+// Connection Management
+// ============================================================================
 
 void FPanaudiaConnectionManager::Connect(const FPanaudiaConnectionConfig& Config)
 {
-    UE_LOG(LogTemp, Log, TEXT("Connecting to Panaudia with ticket: %s"), *Config.Ticket);
+    UE_LOG(LogTemp, Warning, TEXT("*** PANAUDIA Connect() CALLED — printing stack trace: ***"));
+    FDebug::DumpStackTraceToLog(ELogVerbosity::Warning);
+    UE_LOG(LogTemp, Log, TEXT("Connecting via MOQ/QUIC"));
 
-    // Store config for reconnection
     LastConnectionConfig = Config;
     bHasConnectionConfig = true;
     bIsManualDisconnect = false;
     ResetReconnectionState();
 
-    // First, lookup the WebSocket URL from the entrance server
-    TSharedRef<IHttpRequest> HttpRequest = FHttpModule::Get().CreateRequest();
-    HttpRequest->SetURL(Config.EntranceURL + TEXT("?ticket=") + Config.Ticket);
-    HttpRequest->SetVerb(TEXT("GET"));
-
-    HttpRequest->OnProcessRequestComplete().BindLambda([this, Config](
-        FHttpRequestPtr Request,
-        FHttpResponsePtr Response,
-        bool bWasSuccessful)
-    {
-        if (bWasSuccessful && Response.IsValid())
-        {
-            FString ResponseStr = Response->GetContentAsString();
-            TSharedPtr<FJsonObject> JsonObject;
-            TSharedRef<TJsonReader<>> Reader = TJsonReaderFactory<>::Create(ResponseStr);
-
-            if (FJsonSerializer::Deserialize(Reader, JsonObject) && JsonObject.IsValid())
-            {
-                FString Status = JsonObject->GetStringField(TEXT("status"));
-                if (Status == TEXT("ok"))
-                {
-                    FString ServerURL = JsonObject->GetStringField(TEXT("url"));
-                    FString FullURL = BuildConnectionURL(Config, ServerURL);
-                    ConnectDirect(FullURL, Config);
-                }
-                else
-                {
-                    SetConnectionStatus(EPanaudiaConnectionStatus::Error, TEXT("Entrance lookup failed"));
-                    HandleConnectionLost(TEXT("Entrance lookup failed"));
-                }
-            }
-        }
-        else
-        {
-            SetConnectionStatus(EPanaudiaConnectionStatus::Error, TEXT("Failed to contact entrance server"));
-            HandleConnectionLost(TEXT("Failed to contact entrance server"));
-        }
-    });
-
-    HttpRequest->ProcessRequest();
+    // For MOQ we connect directly (no entrance server HTTP lookup)
+    ConnectDirect(Config.ServerURL, Config);
 }
 
-void FPanaudiaConnectionManager::ConnectDirect(const FString& DirectURL, const FPanaudiaConnectionConfig& Config)
+void FPanaudiaConnectionManager::ConnectDirect(
+    const FString& DirectURL, const FPanaudiaConnectionConfig& Config)
 {
-    UE_LOG(LogTemp, Log, TEXT("Connecting directly to: %s"), *DirectURL);
+    UE_LOG(LogTemp, Log, TEXT("ConnectDirect: %s"), *DirectURL);
 
-    WebSocketURL = DirectURL;
-
-    // Store config for reconnection
     LastConnectionConfig = Config;
     bHasConnectionConfig = true;
     bIsManualDisconnect = false;
 
-    // Initialize WebRTC peer connection first
-    InitializePeerConnection();
+    // Extract NodeID from JWT
+    NodeId = ExtractNodeIdFromJwt(Config.Ticket);
+    if (NodeId.IsEmpty())
+    {
+        SetConnectionStatus(EPanaudiaConnectionStatus::Error,
+            TEXT("Failed to extract node ID from JWT"));
+        return;
+    }
+    UE_LOG(LogTemp, Log, TEXT("Node ID: %s"), *NodeId);
 
-
-    //SetupAudioTrack();
-
-    // Connect WebSocket for signaling
     SetConnectionStatus(EPanaudiaConnectionStatus::Connecting, TEXT("Connecting"));
 
-    if (!FModuleManager::Get().IsModuleLoaded("WebSockets"))
+    if (!InitializeQuic())
     {
-        FModuleManager::Get().LoadModule("WebSockets");
+        SetConnectionStatus(EPanaudiaConnectionStatus::Error,
+            TEXT("Failed to initialize QUIC"));
+        return;
     }
 
-    WebSocket = FWebSocketsModule::Get().CreateWebSocket(DirectURL);
+    // Parse host:port from URL (strip scheme if present)
+    FString Host;
+    int32 Port = 4433;
 
-    WebSocket->OnConnected().AddRaw(this, &FPanaudiaConnectionManager::OnWebSocketConnected);
-    WebSocket->OnConnectionError().AddRaw(this, &FPanaudiaConnectionManager::OnWebSocketConnectionError);
-    WebSocket->OnClosed().AddRaw(this, &FPanaudiaConnectionManager::OnWebSocketClosed);
-    WebSocket->OnMessage().AddRaw(this, &FPanaudiaConnectionManager::OnWebSocketMessage);
+    FString WorkURL = DirectURL;
+    if (WorkURL.StartsWith(TEXT("quic://")))  WorkURL.RightChopInline(7);
+    else if (WorkURL.StartsWith(TEXT("https://"))) WorkURL.RightChopInline(8);
+    else if (WorkURL.StartsWith(TEXT("http://")))  WorkURL.RightChopInline(7);
 
-    WebSocket->Connect();
+    // Remove trailing path (e.g. /gateway)
+    int32 SlashIdx;
+    if (WorkURL.FindChar('/', SlashIdx))
+    {
+        WorkURL.LeftInline(SlashIdx);
+    }
+
+    int32 ColonIdx;
+    if (WorkURL.FindChar(':', ColonIdx))
+    {
+        Host = WorkURL.Left(ColonIdx);
+        Port = FCString::Atoi(*WorkURL.Mid(ColonIdx + 1));
+    }
+    else
+    {
+        Host = WorkURL;
+    }
+
+    // Open QUIC connection
+    QUIC_STATUS Status = MsQuic->ConnectionOpen(
+        Registration,
+        StaticConnectionCallback,
+        this,
+        &QuicConnection);
+    if (QUIC_FAILED(Status))
+    {
+        UE_LOG(LogTemp, Error, TEXT("ConnectionOpen failed: 0x%x"), Status);
+        SetConnectionStatus(EPanaudiaConnectionStatus::Error,
+            TEXT("Failed to open QUIC connection"));
+        CleanupQuic();
+        return;
+    }
+
+    // Start QUIC handshake
+    FTCHARToUTF8 HostUTF8(*Host);
+    Status = MsQuic->ConnectionStart(
+        QuicConnection,
+        Configuration,
+        QUIC_ADDRESS_FAMILY_UNSPEC,
+        HostUTF8.Get(),
+        (uint16_t)Port);
+    if (QUIC_FAILED(Status))
+    {
+        UE_LOG(LogTemp, Error, TEXT("ConnectionStart failed: 0x%x"), Status);
+        SetConnectionStatus(EPanaudiaConnectionStatus::Error,
+            TEXT("Failed to start QUIC connection"));
+        CleanupQuic();
+        return;
+    }
+
+    UE_LOG(LogTemp, Log, TEXT("QUIC connection started to %s:%d"), *Host, Port);
 }
 
 void FPanaudiaConnectionManager::Disconnect()
 {
-    UE_LOG(LogTemp, Log, TEXT("Manual disconnect from Panaudia"));
+    UE_LOG(LogTemp, Log, TEXT("Disconnect"));
 
     bIsManualDisconnect = true;
     bIsReconnecting = false;
     ResetReconnectionState();
 
-    CleanupWebSocket();
-    CleanupWebRTC();
+    CleanupQuic();
 
     SetConnectionStatus(EPanaudiaConnectionStatus::Disconnected, TEXT("Disconnected"));
 }
 
-void FPanaudiaConnectionManager::InitializePeerConnection()
+// ============================================================================
+// msquic Static Callbacks → Instance Methods
+//
+// CRITICAL: These run on msquic worker threads.
+// Do NOT call any UE API (UE_LOG, TArray, FString, new, delete, AsyncTask, etc.)
+// Only use: printf, std::vector, std::mutex, std::atomic, malloc/free, msquic API.
+// ============================================================================
+
+QUIC_STATUS QUIC_API FPanaudiaConnectionManager::StaticConnectionCallback(
+    HQUIC Connection, void* Context, QUIC_CONNECTION_EVENT* Event)
 {
-    try
+    auto* Self = static_cast<FPanaudiaConnectionManager*>(Context);
+    return Self->OnConnectionEvent(Connection, Event);
+}
+
+QUIC_STATUS QUIC_API FPanaudiaConnectionManager::StaticStreamCallback(
+    HQUIC Stream, void* Context, QUIC_STREAM_EVENT* Event)
+{
+    auto* Self = static_cast<FPanaudiaConnectionManager*>(Context);
+    return Self->OnStreamEvent(Stream, Event);
+}
+
+QUIC_STATUS FPanaudiaConnectionManager::OnConnectionEvent(
+    HQUIC Connection, QUIC_CONNECTION_EVENT* Event)
+{
+    // *** msquic thread — NO UE API calls! ***
+
+    switch (Event->Type)
     {
-        rtc::Configuration Config;
+    case QUIC_CONNECTION_EVENT_CONNECTED:
+        printf("[Panaudia] QUIC connected (ALPN len: %u)\n",
+            Event->CONNECTED.NegotiatedAlpnLength);
+        bPendingConnected.store(true);
+        break;
 
-        // Add STUN servers (matching connection.js)
-        Config.iceServers.emplace_back("stun:stun.l.google.com:19302");
-        Config.iceServers.emplace_back("stun:stun.l.google.com:5349");
-        Config.iceServers.emplace_back("stun:stun1.l.google.com:3478");
+    case QUIC_CONNECTION_EVENT_SHUTDOWN_INITIATED_BY_TRANSPORT:
+        printf("[Panaudia] QUIC transport shutdown: 0x%llx\n",
+            (unsigned long long)Event->SHUTDOWN_INITIATED_BY_TRANSPORT.Status);
+        bPendingTransportShutdown.store(true);
+        break;
 
-        // Enable TCP candidates
-        Config.enableIceTcp = true;
+    case QUIC_CONNECTION_EVENT_SHUTDOWN_INITIATED_BY_PEER:
+        printf("[Panaudia] QUIC peer shutdown: %llu\n",
+            (unsigned long long)Event->SHUTDOWN_INITIATED_BY_PEER.ErrorCode);
+        bPendingPeerShutdown.store(true);
+        break;
 
-        // Optional: Set port range if needed
-        // Config.portRangeBegin = 49152;
-        // Config.portRangeEnd = 65535;
+    case QUIC_CONNECTION_EVENT_SHUTDOWN_COMPLETE:
+        printf("[Panaudia] QUIC shutdown complete\n");
+        break;
 
-        PeerConnection = std::make_shared<rtc::PeerConnection>(Config);
+    case QUIC_CONNECTION_EVENT_PEER_STREAM_STARTED:
+        printf("[Panaudia] Peer stream started\n");
+        MsQuic->SetCallbackHandler(
+            Event->PEER_STREAM_STARTED.Stream,
+            (void*)StaticStreamCallback,
+            this);
+        break;
 
-        // Add state change callback to debug connection state
-        PeerConnection->onStateChange([this](rtc::PeerConnection::State State)
+    case QUIC_CONNECTION_EVENT_DATAGRAM_STATE_CHANGED:
+        printf("[Panaudia] Datagram state: send=%d, maxLen=%u\n",
+            Event->DATAGRAM_STATE_CHANGED.SendEnabled,
+            Event->DATAGRAM_STATE_CHANGED.MaxSendLength);
+        break;
+
+    case QUIC_CONNECTION_EVENT_DATAGRAM_RECEIVED:
         {
-            const TCHAR* StateNames[] = {TEXT("New"), TEXT("Connecting"), TEXT("Connected"), TEXT("Disconnected"), TEXT("Failed"), TEXT("Closed")};
-            UE_LOG(LogTemp, Warning, TEXT("*** PeerConnection State Changed: %s ***"), StateNames[(int)State]);
-        });
+            // Parse MOQ datagram inline on msquic thread
+            const uint8_t* RawData = Event->DATAGRAM_RECEIVED.Buffer->Buffer;
+            uint32_t RawLen = Event->DATAGRAM_RECEIVED.Buffer->Length;
 
-			 //UE_LOG(LogTemp, Log, TEXT("made answer"));
+            // ParseObjectDatagram uses pure C types — safe on msquic thread
+            // We use local variables matching the UE typedefs (uint64/uint8/int32)
+            // since these are just stdint aliases
+            uint64 DgTrackAlias, DgGroupID, DgObjectID;
+            uint8 DgPriority;
+            const uint8* DgPayload;
+            int32 DgPayloadLen;
 
-        // Set up ICE candidate callback
-        PeerConnection->onLocalCandidate([this](rtc::Candidate Candidate){
-
-            // Send ICE candidate via WebSocket
-            // Note: libdatachannel's Candidate API varies by version
-            // The candidate string already contains all necessary information
-            FString CandidateStr = FString(UTF8_TO_TCHAR(Candidate.candidate().c_str()));
-            FString MidStr = FString(UTF8_TO_TCHAR(Candidate.mid().c_str()));
-
-            UE_LOG(LogTemp, Log, TEXT("*** Local ICE Candidate Generated: %s (mid: %s) ***"), *CandidateStr, *MidStr);
-
-            // Build JSON manually since sdpMLineIndex might not be available
-            TSharedPtr<FJsonObject> CandidateObj = MakeShared<FJsonObject>();
-            CandidateObj->SetStringField(TEXT("candidate"), CandidateStr);
-            CandidateObj->SetStringField(TEXT("sdpMid"), MidStr);
-            // sdpMLineIndex is optional and often not needed by the server
-            CandidateObj->SetNumberField(TEXT("sdpMLineIndex"), 0);
-
-            FString CandidateJson;
-            TSharedRef<TJsonWriter<>> Writer = TJsonWriterFactory<>::Create(&CandidateJson);
-            FJsonSerializer::Serialize(CandidateObj.ToSharedRef(), Writer);
-
-            SendICECandidate(CandidateJson);
-        });
-
-	       // The answer will be created automatically by libdatachannel
-		PeerConnection->onLocalDescription([this](rtc::Description Description)
-        {
-
-            // Only send answer once
-            if (bAnswerSent.exchange(true))
+            if (MoqProtocol::ParseObjectDatagram(
+                    RawData, (int32)RawLen,
+                    DgTrackAlias, DgGroupID, DgObjectID,
+                    DgPriority, DgPayload, DgPayloadLen))
             {
-                UE_LOG(LogTemp, Warning, TEXT("onLocalDescription called again, ignoring duplicate"));
-                return;
+                // Debug: log every 50th datagram
+                static int DgCount = 0;
+                DgCount++;
+                if (DgCount <= 3 || DgCount % 50 == 0)
+                {
+                    printf("[Panaudia] DG#%d alias=%llu len=%d (audioAlias=%llu decoder=%p jb=%p)\n",
+                        DgCount, (unsigned long long)DgTrackAlias, DgPayloadLen,
+                        (unsigned long long)AudioOutputTrackAlias,
+                        (void*)OpusDecoder, (void*)JitterBuffer);
+                }
+
+                if (DgTrackAlias == AudioOutputTrackAlias && OpusDecoder && OpusDecoder->IsInitialized() && JitterBuffer)
+                {
+                    // Decode audio inline on msquic thread — no game tick involved
+                    // Note: no size filter here. The server's Opus encoder produces
+                    // legitimate 3-byte DTX frames for silence. The >= 10 filter
+                    // was only needed for WebCodecs encoder warmup on the TS client.
+                    if (DgPayloadLen > 0)
+                    {
+                        int32 DecodedSamples = OpusDecoder->Decode(
+                            DgPayload, DgPayloadLen,
+                            DecodeBuffer, 960);
+
+                        if (DecodedSamples > 0)
+                        {
+                            // Debug: check decoded peak amplitude
+                            static int DecodeCount = 0;
+                            DecodeCount++;
+                            if (DecodeCount <= 3 || DecodeCount % 200 == 0)
+                            {
+                                float Peak = 0.0f;
+                                int32 TotalFloats = DecodedSamples * 2;
+                                for (int32 i = 0; i < TotalFloats; ++i)
+                                {
+                                    float A = DecodeBuffer[i] > 0 ? DecodeBuffer[i] : -DecodeBuffer[i];
+                                    if (A > Peak) Peak = A;
+                                }
+                                printf("[Panaudia] Decoded #%d: %d samples, peak=%.6f, payloadLen=%d\n",
+                                    DecodeCount, DecodedSamples, Peak, DgPayloadLen);
+                            }
+                            JitterBuffer->AddPacket(DecodeBuffer, DecodedSamples * 2, 2);
+                        }
+                        else
+                        {
+                            printf("[Panaudia] Opus decode failed: %d (payloadLen=%d)\n",
+                                DecodedSamples, DgPayloadLen);
+                        }
+                    }
+                }
+                else
+                {
+                    // Non-audio datagrams: queue for game thread (state, attributes)
+                    std::vector<uint8_t> Buf(RawData, RawData + RawLen);
+                    {
+                        std::lock_guard<std::mutex> Lock(DatagramMutex);
+                        PendingDatagrams.push(std::move(Buf));
+                    }
+                }
             }
+        }
+        break;
 
-			 UE_LOG(LogTemp, Log, TEXT("made answer"));
-            std::string SDP = Description.generateSdp();
-            FString SDPString = FString(UTF8_TO_TCHAR(SDP.c_str()));
-
-            // Modify SDP to enable stereo (matches JavaScript implementation)
-           // SDPString = SDPString.Replace(TEXT("a=fmtp:111 "), TEXT("a=fmtp:111 stereo=1; sprop-stereo=1; "));
-
-            // Send answer via WebSocket
-            TSharedPtr<FJsonObject> AnswerObj = MakeShared<FJsonObject>();
-            AnswerObj->SetStringField(TEXT("type"), TEXT("answer"));
-            AnswerObj->SetStringField(TEXT("sdp"), SDPString);
-
-            FString AnswerJson;
-            TSharedRef<TJsonWriter<>> Writer = TJsonWriterFactory<>::Create(&AnswerJson);
-            FJsonSerializer::Serialize(AnswerObj.ToSharedRef(), Writer);
-
-            // Wrap in event message
-            TSharedPtr<FJsonObject> EventObj = MakeShared<FJsonObject>();
-            EventObj->SetStringField(TEXT("event"), TEXT("answer"));
-            EventObj->SetStringField(TEXT("data"), AnswerJson);
-
-            FString EventJson;
-            TSharedRef<TJsonWriter<>> EventWriter = TJsonWriterFactory<>::Create(&EventJson);
-            FJsonSerializer::Serialize(EventObj.ToSharedRef(), EventWriter);
-
-            if (WebSocket && WebSocket->IsConnected())
+    case QUIC_CONNECTION_EVENT_DATAGRAM_SEND_STATE_CHANGED:
+        {
+            // Free send context on terminal states
+            void* RawCtx = Event->DATAGRAM_SEND_STATE_CHANGED.ClientContext;
+            auto DgState = Event->DATAGRAM_SEND_STATE_CHANGED.State;
+            if (RawCtx &&
+                DgState != QUIC_DATAGRAM_SEND_UNKNOWN &&
+                DgState != QUIC_DATAGRAM_SEND_SENT &&
+                DgState != QUIC_DATAGRAM_SEND_LOST_SUSPECT)
             {
-                WebSocket->Send(EventJson);
-                UE_LOG(LogTemp, Log, TEXT("Sent answer"));
-            } else {
-				if (!WebSocket)	{
-					UE_LOG(LogTemp, Warning, TEXT("WebSocket nis nil, not sending answer"));
-				} else {
-					if (!WebSocket->IsConnected()){
-						UE_LOG(LogTemp, Warning, TEXT("WebSocket not connected, not sending answer"));
-					} else {
-						UE_LOG(LogTemp, Warning, TEXT("WTF this shouldnt happen, not sending answer"));
-					}
-				}
+                struct DatagramSendContext {
+                    uint8_t* DataBuf;
+                    QUIC_BUFFER* QuicBuf;
+                };
+                DatagramSendContext* DgCtx = static_cast<DatagramSendContext*>(RawCtx);
+                free(DgCtx->DataBuf);
+                free(DgCtx->QuicBuf);
+                free(DgCtx);
             }
-        });
+        }
+        break;
 
-        // Set up gathering state callback
-        PeerConnection->onGatheringStateChange([this](rtc::PeerConnection::GatheringState State)
-        {
-            UE_LOG(LogTemp, Log, TEXT("ICE Gathering State: %d"), (int)State);
-        });
+    default:
+        break;
+    }
 
-        // Handle incoming data channels from server
-    PeerConnection->onDataChannel([this](std::shared_ptr<rtc::DataChannel> Channel)
+    return QUIC_STATUS_SUCCESS;
+}
+
+QUIC_STATUS FPanaudiaConnectionManager::OnStreamEvent(
+    HQUIC Stream, QUIC_STREAM_EVENT* Event)
+{
+    // *** msquic thread — NO UE API calls! ***
+
+    switch (Event->Type)
     {
-        // Convert std::string to FString at boundary
-        FString ChannelLabel = FString(UTF8_TO_TCHAR(Channel->label().c_str()));
-
-        UE_LOG(LogTemp, Log, TEXT("Panaudia: Data channel opened: %s"), *ChannelLabel);
-
-        if (ChannelLabel == TEXT("state"))
+    case QUIC_STREAM_EVENT_RECEIVE:
         {
-            StateChannel = Channel;
-
-            // Set up message handler with boundary conversion
-            Channel->onMessage([this](std::variant<rtc::binary, rtc::string> Data)
+            // Copy received bytes into std::vector and queue for game thread
+            for (uint32_t i = 0; i < Event->RECEIVE.BufferCount; ++i)
             {
-                if (std::holds_alternative<rtc::binary>(Data))
+                const uint8_t* Data = Event->RECEIVE.Buffers[i].Buffer;
+                uint32_t Len = Event->RECEIVE.Buffers[i].Length;
+
+                std::vector<uint8_t> Buf(Data, Data + Len);
                 {
-                    const auto& BinaryData = std::get<rtc::binary>(Data);
-
-                    // Convert std::vector<std::byte> to std::vector<std::byte> view for our handler
-                    OnStateChannelMessage(BinaryData);
+                    std::lock_guard<std::mutex> Lock(ControlDataMutex);
+                    PendingControlData.push(std::move(Buf));
                 }
-            });
-
-            Channel->onOpen([this]() { OnStateChannelOpen(); });
+            }
         }
-        else if (ChannelLabel == TEXT("control"))
+        break;
+
+    case QUIC_STREAM_EVENT_SEND_COMPLETE:
+        // Free the SendContext allocated in SendOnControlStream
+        if (Event->SEND_COMPLETE.ClientContext)
         {
-            ControlChannel = Channel;
-
-            // Set up message handler with boundary conversion
-            Channel->onMessage([this](std::variant<rtc::binary, rtc::string> Data)
-            {
-                if (std::holds_alternative<rtc::string>(Data))
-                {
-                    const auto& StringData = std::get<rtc::string>(Data);
-                    OnControlChannelMessage(StringData);
-                }
-            });
-
-            Channel->onOpen([this]() { OnControlChannelOpen(); });
+            struct SendContext {
+                uint8_t* DataBuf;
+                QUIC_BUFFER* QuicBuf;
+            };
+            SendContext* Ctx = static_cast<SendContext*>(Event->SEND_COMPLETE.ClientContext);
+            free(Ctx->DataBuf);
+            free(Ctx->QuicBuf);
+            free(Ctx);
         }
-        else if (ChannelLabel == TEXT("attributes"))
-        {
-            AttributesChannel = Channel;
+        break;
 
-            // Set up message handler with boundary conversion
-            Channel->onMessage([this](std::variant<rtc::binary, rtc::string> Data)
-            {
-                if (std::holds_alternative<rtc::string>(Data))
-                {
-                    const auto& StringData = std::get<rtc::string>(Data);
-                    OnAttributesChannelMessage(StringData);
-                }
-            });
+    case QUIC_STREAM_EVENT_PEER_SEND_SHUTDOWN:
+        printf("[Panaudia] Control stream: peer send shutdown\n");
+        break;
 
-            Channel->onOpen([this]() { OnAttributesChannelOpen(); });
-        }
-    });
+    case QUIC_STREAM_EVENT_SHUTDOWN_COMPLETE:
+        printf("[Panaudia] Control stream: shutdown complete\n");
+        break;
 
-
-
-        // Handle incoming tracks (audio from server)
-        PeerConnection->onTrack([this](std::shared_ptr<rtc::Track> Track)
-        {
-            UE_LOG(LogTemp, Log, TEXT("Received audio track"));
-
-            Track->onMessage([this](auto Data)
-            {
-                if (std::holds_alternative<std::vector<std::byte>>(Data))
-                {
-                    OnAudioTrackMessage(std::get<std::vector<std::byte>>(Data));
-                }
-            });
-        });
-
-/*
-        PeerConnection->onTrack([this](std::shared_ptr<rtc::Track> Track)
-        {
-            UE_LOG(LogTemp, Warning, TEXT("*** Received audio track from server ***"));
-
-            // This is the track the server is offering - store it and set up callbacks
-            AudioTrack = Track;
-
-            UE_LOG(LogTemp, Warning, TEXT("*** Setting up callbacks for received audio track ***"));
-
-            AudioTrack->onOpen([this]() {
-                UE_LOG(LogTemp, Warning, TEXT("*** AudioTrack->onOpen callback triggered! ***"));
-                OnAudioTrackOpen();
-            });
-
-            AudioTrack->onClosed([this]() {
-                UE_LOG(LogTemp, Warning, TEXT("Audio track CLOSED"));
-            });
-
-            AudioTrack->onError([this](std::string error) {
-                UE_LOG(LogTemp, Error, TEXT("Audio track ERROR: %s"), *FString(error.c_str()));
-            });
-
-            Track->onMessage([this](auto Data)
-            {
-                if (std::holds_alternative<std::vector<std::byte>>(Data))
-                {
-                    OnAudioTrackMessage(std::get<std::vector<std::byte>>(Data));
-                }
-            });
-
-            UE_LOG(LogTemp, Warning, TEXT("*** Audio track from server configured ***"));
-        });
-*/
-
-        UE_LOG(LogTemp, Log, TEXT("WebRTC PeerConnection initialized"));
+    default:
+        break;
     }
-    catch (const std::exception& e)
-    {
-        UE_LOG(LogTemp, Error, TEXT("Failed to initialize PeerConnection: %s"), *FString(e.what()));
-        SetConnectionStatus(EPanaudiaConnectionStatus::Error, TEXT("Failed to initialize WebRTC"));
-    }
+
+    return QUIC_STATUS_SUCCESS;
 }
 
+// ============================================================================
+// MOQ Session Lifecycle (called from Tick/game thread)
+// ============================================================================
 
-void FPanaudiaConnectionManager::SetupAudioTrack()
+void FPanaudiaConnectionManager::StartMoqSession()
 {
-    try
+    // Open bidirectional control stream
+    QUIC_STATUS Status = MsQuic->StreamOpen(
+        QuicConnection,
+        QUIC_STREAM_OPEN_FLAG_NONE, // bidirectional
+        StaticStreamCallback,
+        this,
+        &ControlStream);
+    if (QUIC_FAILED(Status))
     {
-        if (!PeerConnection)
-        {
-            UE_LOG(LogTemp, Error, TEXT("Cannot setup audio track: PeerConnection is null"));
-            return;
-        }
-
-        // Add audio track - configured for send-only mono output
-        rtc::Description::Audio AudioDescription("audio", rtc::Description::Direction::SendOnly);
-        AudioDescription.addOpusCodec(111);  // Opus codec with payload type 111
-
-        // SSRC addition API might differ - wrap in try-catch
-        try
-        {
-            AudioDescription.addSSRC(1, "panaudia-audio");
-        }
-        catch (const std::exception& e)
-        {
-            UE_LOG(LogTemp, Warning, TEXT("Could not add SSRC (API version): %s"), *FString(e.what()));
-            // Continue anyway - SSRC is often optional
-        }
-
-        AudioTrack = PeerConnection->addTrack(AudioDescription);
-
-        UE_LOG(LogTemp, Log, TEXT("Send-only mono audio track created, setting up callbacks"));
-
-        AudioTrack->onOpen([this]() {
-            UE_LOG(LogTemp, Log, TEXT("Send-only AudioTrack opened!"));
-            OnAudioTrackOpen();
-        });
-
-        AudioTrack->onClosed([this]() {
-            UE_LOG(LogTemp, Warning, TEXT("Send-only audio track closed!"));
-        });
-
-        AudioTrack->onError([this](std::string error) {
-            UE_LOG(LogTemp, Error, TEXT("Send-only audio track error: %s"), *FString(error.c_str()));
-        });
-
-        // No onMessage handler needed for send-only track
-
-        UE_LOG(LogTemp, Log, TEXT("Send-only mono audio track added to PeerConnection"));
-    }
-    catch (const std::exception& e)
-    {
-        UE_LOG(LogTemp, Error, TEXT("Failed to setup send-only audio track: %s"), *FString(e.what()));
-    }
-}
-
-void FPanaudiaConnectionManager::CreateAnswer(const FString& OfferSDP)
-{
-    try
-    {
-        if (!PeerConnection)
-        {
-            UE_LOG(LogTemp, Error, TEXT("Cannot create answer: PeerConnection is null"));
-            return;
-        }
-
-        bAnswerSent = false;
-
-        // Set remote description (the offer)
-        rtc::Description Offer(std::string(TCHAR_TO_UTF8(*OfferSDP)), rtc::Description::Type::Offer);
-        PeerConnection->setRemoteDescription(Offer);
-
-        UE_LOG(LogTemp, Log, TEXT("Remote description (offer) set"));
-
-
-
-    }
-    catch (const std::exception& e)
-    {
-        UE_LOG(LogTemp, Error, TEXT("Failed to create answer: %s"), *FString(e.what()));
-    }
-}
-
-void FPanaudiaConnectionManager::SendICECandidate(const FString& CandidateJson)
-{
-    if (WebSocket && WebSocket->IsConnected())
-    {
-        TSharedPtr<FJsonObject> EventObj = MakeShareable(new FJsonObject());
-        EventObj->SetStringField(TEXT("event"), TEXT("candidate"));
-        EventObj->SetStringField(TEXT("data"), CandidateJson);
-
-        FString EventJson;
-        TSharedRef<TJsonWriter<>> Writer = TJsonWriterFactory<>::Create(&EventJson);
-        FJsonSerializer::Serialize(EventObj.ToSharedRef(), Writer);
-
-        WebSocket->Send(EventJson);
-        UE_LOG(LogTemp, Verbose, TEXT("Sent ICE candidate"));
-    }
-}
-
-// WebSocket Handlers
-
-// When connection succeeds, reset reconnection state
-void FPanaudiaConnectionManager::OnWebSocketConnected()
-{
-    UE_LOG(LogTemp, Log, TEXT("WebSocket connected"));
-
-    // Reset reconnection state on successful connection
-    if (bIsReconnecting)
-    {
-        UE_LOG(LogTemp, Log, TEXT("Reconnection successful!"));
-        ResetReconnectionState();
-    }
-}
-
-void FPanaudiaConnectionManager::OnWebSocketConnectionError(const FString& Error)
-{
-    UE_LOG(LogTemp, Error, TEXT("WebSocket connection error: %s"), *Error);
-    SetConnectionStatus(EPanaudiaConnectionStatus::Error, Error);
-    HandleConnectionLost(FString::Printf(TEXT("WebSocket error: %s"), *Error));
-}
-
-void FPanaudiaConnectionManager::OnWebSocketClosed(int32 StatusCode, const FString& Reason, bool bWasClean)
-{
-    UE_LOG(LogTemp, Log, TEXT("WebSocket closed: %d - %s (clean: %d)"), StatusCode, *Reason, bWasClean);
-
-    if (!bIsManualDisconnect)
-    {
-        SetConnectionStatus(EPanaudiaConnectionStatus::Disconnected, TEXT("Connection closed"));
-        HandleConnectionLost(FString::Printf(TEXT("Connection closed: %s"), *Reason));
-    }
-}
-
-void FPanaudiaConnectionManager::HandleConnectionLost(const FString& Reason)
-{
-    if (bIsManualDisconnect)
-    {
-        UE_LOG(LogTemp, Log, TEXT("Connection lost but was manual disconnect, not reconnecting"));
-        return;
-    }
-
-    if (!bAutoReconnectEnabled)
-    {
-        UE_LOG(LogTemp, Log, TEXT("Connection lost but auto-reconnect is disabled"));
-        return;
-    }
-
-    if (!bHasConnectionConfig)
-    {
-        UE_LOG(LogTemp, Warning, TEXT("Connection lost but no config stored for reconnection"));
-        return;
-    }
-
-    if (MaxReconnectAttempts > 0 && ReconnectAttemptCount >= MaxReconnectAttempts)
-    {
-        UE_LOG(LogTemp, Error, TEXT("Max reconnect attempts (%d) reached. Giving up."), MaxReconnectAttempts);
+        UE_LOG(LogTemp, Error, TEXT("StreamOpen failed: 0x%x"), Status);
         SetConnectionStatus(EPanaudiaConnectionStatus::Error,
-            FString::Printf(TEXT("Connection lost: %s. Max reconnect attempts reached."), *Reason));
-        ResetReconnectionState();
+            TEXT("Failed to open control stream"));
         return;
     }
 
-    bIsReconnecting = true;
-    CurrentReconnectDelay = CalculateReconnectDelay();
-    ReconnectTimer = CurrentReconnectDelay;
+    Status = MsQuic->StreamStart(ControlStream, QUIC_STREAM_START_FLAG_NONE);
+    if (QUIC_FAILED(Status))
+    {
+        UE_LOG(LogTemp, Error, TEXT("StreamStart failed: 0x%x"), Status);
+        SetConnectionStatus(EPanaudiaConnectionStatus::Error,
+            TEXT("Failed to start control stream"));
+        return;
+    }
 
-    UE_LOG(LogTemp, Warning, TEXT("Connection lost: %s. Will attempt reconnect #%d in %.1f seconds"),
-        *Reason, ReconnectAttemptCount + 1, CurrentReconnectDelay);
-
-    SetConnectionStatus(EPanaudiaConnectionStatus::Error,
-        FString::Printf(TEXT("Reconnecting in %.1f seconds (attempt %d/%d)..."),
-            CurrentReconnectDelay,
-            ReconnectAttemptCount + 1,
-            MaxReconnectAttempts));
+    UE_LOG(LogTemp, Log, TEXT("Control stream opened, sending CLIENT_SETUP"));
+    SendClientSetup();
+    bMoqSessionStarted.store(true);
 }
 
-void FPanaudiaConnectionManager::AttemptReconnect()
+void FPanaudiaConnectionManager::SendClientSetup()
 {
-    if (!bIsReconnecting || !bHasConnectionConfig)
+    // CLIENT_SETUP content:
+    //   [version_count varint=1][version varint]
+    //   [param_count varint=3]
+    //   [role: key=0x00 (even) → bare varint value=0x03 (PubSub)]
+    //   [path: key=0x01 (odd) → length-prefixed bytes "/" ]
+    //   [max_subscribe_id: key=0x02 (even) → bare varint value=100]
+    //
+    // Path is REQUIRED for raw QUIC (moqtransport validates it).
+    // For WebTransport the path comes from the HTTP URL.
+    TArray<uint8> Content;
+    uint8 Buf[8];
+    int32 Len;
+
+    // 1 supported version
+    Len = MoqProtocol::EncodeVarint(1, Buf);
+    Content.Append(Buf, Len);
+    Len = MoqProtocol::EncodeVarint(MOQ_TRANSPORT_VERSION, Buf);
+    Content.Append(Buf, Len);
+
+    // 3 parameters
+    Len = MoqProtocol::EncodeVarint(3, Buf);
+    Content.Append(Buf, Len);
+
+    // Role = PubSub (0x03). Key 0x00 is even → value is bare varint
+    Len = MoqProtocol::EncodeVarint(0x00, Buf);
+    Content.Append(Buf, Len);
+    Len = MoqProtocol::EncodeVarint(0x03, Buf);
+    Content.Append(Buf, Len);
+
+    // Path = "/". Key 0x01 is odd → length-prefixed bytes
+    Len = MoqProtocol::EncodeVarint(0x01, Buf);
+    Content.Append(Buf, Len);
+    Len = MoqProtocol::EncodeVarint(1, Buf); // length of "/"
+    Content.Append(Buf, Len);
+    Content.Add(0x2F); // '/'
+
+    // MaxSubscribeId = 100. Key 0x02 is even → value is bare varint
+    Len = MoqProtocol::EncodeVarint(0x02, Buf);
+    Content.Append(Buf, Len);
+    Len = MoqProtocol::EncodeVarint(100, Buf);
+    Content.Append(Buf, Len);
+
+    TArray<uint8> Message = MoqProtocol::BuildControlMessage(
+        EMoqMessageType::ClientSetup, Content);
+    SendOnControlStream(Message);
+}
+
+void FPanaudiaConnectionManager::AnnounceAndSubscribe()
+{
+    // Matches the TypeScript client flow:
+    // 1. Subscribe to output tracks (audio, state, attributes) — first with JWT auth
+    // 2. Announce input tracks (audio, state, control)
+
+    // --- Subscribe to output audio (with JWT authorization) ---
+    {
+        uint64 ReqId = NextRequestId; NextRequestId += 2;
+        TArray<FString> Ns = { TEXT("out"), TEXT("audio"), TEXT("opus-stereo"), NodeId };
+        TArray<uint8> Msg = MoqProtocol::BuildSubscribe(
+            ReqId, AudioOutputTrackAlias, Ns, TEXT(""),
+            128, LastConnectionConfig.Ticket);
+        SendOnControlStream(Msg);
+        UE_LOG(LogTemp, Log, TEXT("SUBSCRIBE audio output (req=%llu, alias=%llu)"),
+            ReqId, AudioOutputTrackAlias);
+    }
+
+    // --- Subscribe to state output ---
+    {
+        uint64 ReqId = NextRequestId; NextRequestId += 2;
+        TArray<FString> Ns = { TEXT("out"), TEXT("state"), NodeId };
+        TArray<uint8> Msg = MoqProtocol::BuildSubscribe(
+            ReqId, StateOutputTrackAlias, Ns, TEXT(""),
+            128, LastConnectionConfig.Ticket);
+        SendOnControlStream(Msg);
+        UE_LOG(LogTemp, Log, TEXT("SUBSCRIBE state output (req=%llu, alias=%llu)"),
+            ReqId, StateOutputTrackAlias);
+    }
+
+    // --- Subscribe to attributes output ---
+    {
+        uint64 ReqId = NextRequestId; NextRequestId += 2;
+        TArray<FString> Ns = { TEXT("out"), TEXT("attributes"), NodeId };
+        TArray<uint8> Msg = MoqProtocol::BuildSubscribe(
+            ReqId, AttributesTrackAlias, Ns, TEXT(""),
+            128, LastConnectionConfig.Ticket);
+        SendOnControlStream(Msg);
+        UE_LOG(LogTemp, Log, TEXT("SUBSCRIBE attributes output (req=%llu, alias=%llu)"),
+            ReqId, AttributesTrackAlias);
+    }
+
+    // --- Announce audio input ---
+    {
+        uint64 ReqId = NextRequestId; NextRequestId += 2;
+        TArray<FString> Ns = { TEXT("in"), TEXT("audio"), TEXT("opus-mono"), NodeId };
+        TArray<uint8> Msg = MoqProtocol::BuildAnnounce(ReqId, Ns);
+        SendOnControlStream(Msg);
+        UE_LOG(LogTemp, Log, TEXT("ANNOUNCE audio input (req=%llu)"), ReqId);
+    }
+
+    // --- Announce state ---
+    {
+        uint64 ReqId = NextRequestId; NextRequestId += 2;
+        TArray<FString> Ns = { TEXT("state"), NodeId };
+        TArray<uint8> Msg = MoqProtocol::BuildAnnounce(ReqId, Ns);
+        SendOnControlStream(Msg);
+        UE_LOG(LogTemp, Log, TEXT("ANNOUNCE state (req=%llu)"), ReqId);
+    }
+
+    // --- Announce control ---
+    {
+        uint64 ReqId = NextRequestId; NextRequestId += 2;
+        TArray<FString> Ns = { TEXT("in"), TEXT("control"), NodeId };
+        TArray<uint8> Msg = MoqProtocol::BuildAnnounce(ReqId, Ns);
+        SendOnControlStream(Msg);
+        UE_LOG(LogTemp, Log, TEXT("ANNOUNCE control (req=%llu)"), ReqId);
+    }
+}
+
+void FPanaudiaConnectionManager::SendOnControlStream(const TArray<uint8>& Data)
+{
+    if (!ControlStream || !MsQuic)
     {
         return;
     }
 
-    ReconnectAttemptCount++;
+    // Allocate send buffer with padding to detect overflow.
+    // Use calloc to zero-fill (helps detect corruption patterns).
+    // QUIC_BUFFER struct is also heap-allocated to ensure it outlives the async send.
+    size_t DataLen = (size_t)Data.Num();
+    size_t AllocSize = DataLen + 256; // generous padding for diagnostics
+    uint8* SendBuf = static_cast<uint8*>(calloc(1, AllocSize));
+    if (!SendBuf) return;
+    memcpy(SendBuf, Data.GetData(), DataLen);
 
-    UE_LOG(LogTemp, Log, TEXT("Attempting reconnect #%d..."), ReconnectAttemptCount);
+    // Heap-allocate the QUIC_BUFFER so it survives beyond this stack frame
+    QUIC_BUFFER* QuicBufPtr = static_cast<QUIC_BUFFER*>(calloc(1, sizeof(QUIC_BUFFER)));
+    if (!QuicBufPtr) { free(SendBuf); return; }
+    QuicBufPtr->Buffer = SendBuf;
+    QuicBufPtr->Length = (uint32_t)DataLen;
 
-    // Cleanup previous connection
-    CleanupWebSocket();
-    CleanupWebRTC();
+    // Pack both pointers for cleanup: store QuicBufPtr as ClientContext,
+    // and SendBuf pointer at a known offset we can retrieve in SEND_COMPLETE
+    // Simple approach: use a small struct
+    struct SendContext {
+        uint8* DataBuf;
+        QUIC_BUFFER* QuicBuf;
+    };
+    SendContext* Ctx = static_cast<SendContext*>(calloc(1, sizeof(SendContext)));
+    if (!Ctx) { free(SendBuf); free(QuicBufPtr); return; }
+    Ctx->DataBuf = SendBuf;
+    Ctx->QuicBuf = QuicBufPtr;
 
-    // Attempt to reconnect using stored config
-    Connect(LastConnectionConfig);
+    QUIC_STATUS Status = MsQuic->StreamSend(
+        ControlStream,
+        QuicBufPtr, 1,
+        QUIC_SEND_FLAG_NONE,
+        Ctx); // ClientContext → freed in SEND_COMPLETE
+
+    if (QUIC_FAILED(Status))
+    {
+        UE_LOG(LogTemp, Error, TEXT("StreamSend failed: 0x%x"), Status);
+        free(SendBuf);
+        free(QuicBufPtr);
+        free(Ctx);
+    }
 }
 
-void FPanaudiaConnectionManager::ResetReconnectionState()
+// ============================================================================
+// Control Stream Message Parsing (called from Tick/game thread)
+// ============================================================================
+
+void FPanaudiaConnectionManager::ProcessControlStreamData(
+    const uint8* Data, int32 Len)
 {
-    bIsReconnecting = false;
-    ReconnectAttemptCount = 0;
-    ReconnectTimer = 0.0f;
-    CurrentReconnectDelay = 0.0f;
+    // Message framing: [Type varint][Length 2-byte BE][Content]
+    int32 Offset = 0;
+
+    while (Offset < Len)
+    {
+        // Need at least 3 bytes for minimal header
+        if (Len - Offset < 3)
+        {
+            break;
+        }
+
+        // Parse type varint
+        int32 TypeBytes = 0;
+        uint64 MsgType = MoqProtocol::DecodeVarint(
+            Data + Offset, Len - Offset, TypeBytes);
+        if (TypeBytes == 0) break;
+
+        int32 HeaderSize = TypeBytes + 2;
+        if (Offset + HeaderSize > Len) break;
+
+        // 2-byte big-endian content length
+        uint16 ContentLen =
+            ((uint16)Data[Offset + TypeBytes] << 8) |
+            (uint16)Data[Offset + TypeBytes + 1];
+
+        int32 TotalSize = HeaderSize + (int32)ContentLen;
+        if (Offset + TotalSize > Len) break; // incomplete message
+
+        const uint8* Content = Data + Offset + HeaderSize;
+
+        // Dispatch
+        switch (MsgType)
+        {
+        case (uint64)EMoqMessageType::ServerSetup:
+            HandleServerSetup(Content, ContentLen);
+            break;
+
+        case (uint64)EMoqMessageType::AnnounceOk:
+            HandleAnnounceOk(Content, ContentLen);
+            break;
+
+        case (uint64)EMoqMessageType::SubscribeOk:
+            HandleSubscribeOk(Content, ContentLen);
+            break;
+
+        case (uint64)EMoqMessageType::Subscribe:
+            HandleIncomingSubscribe(Content, ContentLen);
+            break;
+
+        case (uint64)EMoqMessageType::SubscribeAnnounces:
+            {
+                // Respond with SUBSCRIBE_ANNOUNCES_OK (0x12)
+                int32 Br = 0;
+                uint64 ReqId = MoqProtocol::DecodeVarint(Content, ContentLen, Br);
+                UE_LOG(LogTemp, Log, TEXT("SUBSCRIBE_ANNOUNCES req=%llu → OK"), ReqId);
+
+                TArray<uint8> OkBody;
+                uint8 Buf[8];
+                int32 BLen = MoqProtocol::EncodeVarint(ReqId, Buf);
+                OkBody.Append(Buf, BLen);
+
+                TArray<uint8> Msg = MoqProtocol::BuildControlMessage(
+                    EMoqMessageType::SubscribeAnnouncesOk, OkBody);
+                SendOnControlStream(Msg);
+            }
+            break;
+
+        case (uint64)EMoqMessageType::Announce:
+            {
+                // Server announcing to us → respond ANNOUNCE_OK
+                int32 Br = 0;
+                uint64 ReqId = MoqProtocol::DecodeVarint(Content, ContentLen, Br);
+                UE_LOG(LogTemp, Log, TEXT("Server ANNOUNCE req=%llu → OK"), ReqId);
+
+                TArray<uint8> OkBody;
+                uint8 Buf[8];
+                int32 BLen = MoqProtocol::EncodeVarint(ReqId, Buf);
+                OkBody.Append(Buf, BLen);
+
+                TArray<uint8> Msg = MoqProtocol::BuildControlMessage(
+                    EMoqMessageType::AnnounceOk, OkBody);
+                SendOnControlStream(Msg);
+            }
+            break;
+
+        case (uint64)EMoqMessageType::SubscribeError:
+            {
+                int32 Br = 0;
+                uint64 SubId = MoqProtocol::DecodeVarint(Content, ContentLen, Br);
+                UE_LOG(LogTemp, Error, TEXT("SUBSCRIBE_ERROR for req=%llu"), SubId);
+            }
+            break;
+
+        case (uint64)EMoqMessageType::AnnounceError:
+            UE_LOG(LogTemp, Error, TEXT("ANNOUNCE_ERROR received"));
+            break;
+
+        default:
+            UE_LOG(LogTemp, Log, TEXT("Unknown control message: 0x%llx"), MsgType);
+            break;
+        }
+
+        Offset += TotalSize;
+    }
+
+    // Remove consumed bytes
+    if (Offset > 0)
+    {
+        ControlStreamRecvBuffer.RemoveAt(0, Offset);
+    }
 }
 
-float FPanaudiaConnectionManager::CalculateReconnectDelay() const
+void FPanaudiaConnectionManager::HandleServerSetup(
+    const uint8* Content, int32 ContentLen)
 {
-    // Exponential backoff with jitter
-    // Delay = BaseDelay * (2 ^ AttemptCount) + RandomJitter
-    float ExponentialDelay = ReconnectBaseDelay * FMath::Pow(2.0f, FMath::Min(ReconnectAttemptCount, 5));
+    int32 Br = 0;
+    uint64 Version = MoqProtocol::DecodeVarint(Content, ContentLen, Br);
+    UE_LOG(LogTemp, Log, TEXT("SERVER_SETUP version=0x%llx"), Version);
 
-    // Cap at 60 seconds
-    ExponentialDelay = FMath::Min(ExponentialDelay, 60.0f);
-
-    // Add random jitter (±20%)
-    float Jitter = FMath::RandRange(-0.2f, 0.2f) * ExponentialDelay;
-
-    return ExponentialDelay + Jitter;
+    // Server is ready → subscribe to output tracks and announce input tracks
+    AnnounceAndSubscribe();
 }
 
-void FPanaudiaConnectionManager::OnWebSocketMessage(const FString& Message)
+void FPanaudiaConnectionManager::HandleAnnounceOk(
+    const uint8* Content, int32 ContentLen)
 {
-    UE_LOG(LogTemp, Verbose, TEXT("WebSocket message received"));
+    int32 Br = 0;
+    uint64 ReqId = MoqProtocol::DecodeVarint(Content, ContentLen, Br);
+    UE_LOG(LogTemp, Log, TEXT("ANNOUNCE_OK req=%llu"), ReqId);
+}
+
+void FPanaudiaConnectionManager::HandleSubscribeOk(
+    const uint8* Content, int32 ContentLen)
+{
+    int32 Br = 0;
+    uint64 ReqId = MoqProtocol::DecodeVarint(Content, ContentLen, Br);
+    UE_LOG(LogTemp, Log, TEXT("SUBSCRIBE_OK req=%llu"), ReqId);
+}
+
+void FPanaudiaConnectionManager::HandleIncomingSubscribe(
+    const uint8* Content, int32 ContentLen)
+{
+    // Parse: RequestID, TrackAlias, Namespace tuple, ...
+    int32 Pos = 0;
+    int32 Br = 0;
+
+    uint64 RequestId = MoqProtocol::DecodeVarint(Content + Pos, ContentLen - Pos, Br);
+    if (Br == 0) return;
+    Pos += Br;
+
+    uint64 TrackAlias = MoqProtocol::DecodeVarint(Content + Pos, ContentLen - Pos, Br);
+    if (Br == 0) return;
+    Pos += Br;
+
+    // Namespace tuple
+    uint64 NsCount = MoqProtocol::DecodeVarint(Content + Pos, ContentLen - Pos, Br);
+    if (Br == 0) return;
+    Pos += Br;
+
+    TArray<FString> Namespace;
+    for (uint64 i = 0; i < NsCount; ++i)
+    {
+        uint64 PartLen = MoqProtocol::DecodeVarint(Content + Pos, ContentLen - Pos, Br);
+        if (Br == 0) return;
+        Pos += Br;
+
+        if (Pos + (int32)PartLen > ContentLen) return;
+
+        FUTF8ToTCHAR Conv(
+            reinterpret_cast<const char*>(Content + Pos), (int32)PartLen);
+        Namespace.Add(FString(Conv.Length(), Conv.Get()));
+        Pos += (int32)PartLen;
+    }
+
+    FString NsPath = FString::Join(Namespace, TEXT("/"));
+    UE_LOG(LogTemp, Log,
+        TEXT("Incoming SUBSCRIBE: %s alias=%llu req=%llu"),
+        *NsPath, TrackAlias, RequestId);
+
+    // Send SUBSCRIBE_OK
+    TArray<uint8> OkMsg = MoqProtocol::BuildSubscribeOk(RequestId);
+    SendOnControlStream(OkMsg);
+
+    // Map track alias to our track type
+    if (NsPath.Contains(TEXT("in/audio")))
+    {
+        AudioInputTrackAlias = TrackAlias;
+        bAudioAliasAssigned = true;
+        UE_LOG(LogTemp, Log, TEXT("→ Audio input alias = %llu"), TrackAlias);
+    }
+    else if (NsPath.Contains(TEXT("state/")) && !NsPath.Contains(TEXT("out/state")))
+    {
+        StateTrackAlias = TrackAlias;
+        bStateAliasAssigned = true;
+        UE_LOG(LogTemp, Log, TEXT("→ State alias = %llu"), TrackAlias);
+    }
+    else if (NsPath.Contains(TEXT("in/control")))
+    {
+        ControlTrackAlias = TrackAlias;
+        bControlAliasAssigned = true;
+        UE_LOG(LogTemp, Log, TEXT("→ Control alias = %llu"), TrackAlias);
+    }
+
+    // Transition to DataConnected once we have the audio alias
+    if (bAudioAliasAssigned)
+    {
+        SetConnectionStatus(EPanaudiaConnectionStatus::DataConnected,
+            TEXT("MOQ data channels ready"));
+
+        if (bIsReconnecting)
+        {
+            UE_LOG(LogTemp, Log, TEXT("Reconnection successful"));
+            ResetReconnectionState();
+        }
+    }
+}
+
+// ============================================================================
+// Datagram Sending
+// ============================================================================
+
+void FPanaudiaConnectionManager::SendDatagram(const TArray<uint8>& Data)
+{
+    if (!MsQuic || !QuicConnection)
+    {
+        return;
+    }
+
+    struct DatagramSendContext {
+        uint8_t* DataBuf;
+        QUIC_BUFFER* QuicBuf;
+    };
+
+    size_t DataLen = (size_t)Data.Num();
+    size_t AllocSize = DataLen + 256; // padding for diagnostics
+    uint8* SendBuf = static_cast<uint8*>(calloc(1, AllocSize));
+    if (!SendBuf) return;
+    memcpy(SendBuf, Data.GetData(), DataLen);
+
+    QUIC_BUFFER* QuicBufPtr = static_cast<QUIC_BUFFER*>(calloc(1, sizeof(QUIC_BUFFER)));
+    if (!QuicBufPtr) { free(SendBuf); return; }
+    QuicBufPtr->Buffer = SendBuf;
+    QuicBufPtr->Length = (uint32_t)DataLen;
+
+    DatagramSendContext* Ctx = static_cast<DatagramSendContext*>(calloc(1, sizeof(DatagramSendContext)));
+    if (!Ctx) { free(SendBuf); free(QuicBufPtr); return; }
+    Ctx->DataBuf = SendBuf;
+    Ctx->QuicBuf = QuicBufPtr;
+
+    QUIC_STATUS Status = MsQuic->DatagramSend(
+        QuicConnection,
+        QuicBufPtr, 1,
+        QUIC_SEND_FLAG_NONE,
+        Ctx);
+
+    if (QUIC_FAILED(Status))
+    {
+        free(SendBuf);
+        free(QuicBufPtr);
+        free(Ctx);
+    }
+}
+
+void FPanaudiaConnectionManager::SendStateUpdate(const FPanaudiaNodeState& State)
+{
+    if (!bStateAliasAssigned)
+    {
+        return;
+    }
+
+    // Build NodeInfo3 binary (48 bytes, little-endian, matching encoding.ts)
+    TArray<uint8> NodeInfo;
+    NodeInfo.SetNum(NODE_INFO3_SIZE);
+    uint8* Ptr = NodeInfo.GetData();
+
+    // UUID (bytes 0-15)
+    if (!UuidStringToBytes(NodeId, Ptr))
+    {
+        UE_LOG(LogTemp, Error, TEXT("Failed to encode NodeId as UUID bytes"));
+        return;
+    }
+    Ptr += 16;
+
+    // Position (bytes 16-27, float32 LE)
+    float PosX = State.X;
+    float PosY = State.Y;
+    float PosZ = State.Z;
+    FMemory::Memcpy(Ptr, &PosX, 4); Ptr += 4;
+    FMemory::Memcpy(Ptr, &PosY, 4); Ptr += 4;
+    FMemory::Memcpy(Ptr, &PosZ, 4); Ptr += 4;
+
+    // Rotation (bytes 28-39, float32 LE)
+    float RotYaw = State.Yaw;
+    float RotPitch = State.Pitch;
+    float RotRoll = State.Roll;
+    FMemory::Memcpy(Ptr, &RotYaw, 4); Ptr += 4;
+    FMemory::Memcpy(Ptr, &RotPitch, 4); Ptr += 4;
+    FMemory::Memcpy(Ptr, &RotRoll, 4); Ptr += 4;
+
+    // Volume (bytes 40-43)
+    float Volume = 1.0f;
+    FMemory::Memcpy(Ptr, &Volume, 4); Ptr += 4;
+
+    // Gone flag (bytes 44-47)
+    int32 Gone = 0;
+    FMemory::Memcpy(Ptr, &Gone, 4);
+
+    // Wrap as MOQ Object Datagram
+    TArray<uint8> Datagram = MoqProtocol::BuildObjectDatagram(
+        StateTrackAlias,
+        0,               // GroupID
+        StateObjectId++,
+        1,               // Priority (lower than audio)
+        NodeInfo.GetData(),
+        NodeInfo.Num());
+
+    SendDatagram(Datagram);
+}
+
+void FPanaudiaConnectionManager::SendControlMessage(
+    const FString& Type, const TSharedPtr<FJsonObject>& MessageData)
+{
+    if (!bControlAliasAssigned)
+    {
+        return;
+    }
+
+    TSharedPtr<FJsonObject> Json = MakeShared<FJsonObject>();
+    Json->SetStringField(TEXT("type"), Type);
+
+    if (MessageData.IsValid())
+    {
+        for (const auto& Pair : MessageData->Values)
+        {
+            Json->SetField(Pair.Key, Pair.Value);
+        }
+    }
+
+    FString JsonString;
+    TSharedRef<TJsonWriter<>> Writer = TJsonWriterFactory<>::Create(&JsonString);
+    FJsonSerializer::Serialize(Json.ToSharedRef(), Writer);
+
+    FTCHARToUTF8 UTF8(*JsonString);
+
+    TArray<uint8> Datagram = MoqProtocol::BuildObjectDatagram(
+        ControlTrackAlias,
+        0,
+        ControlObjectId++,
+        2, // Lower priority
+        reinterpret_cast<const uint8*>(UTF8.Get()),
+        UTF8.Length());
+
+    SendDatagram(Datagram);
+}
+
+// ============================================================================
+// Datagram Processing (called from Tick/game thread)
+// ============================================================================
+
+void FPanaudiaConnectionManager::ProcessPendingDatagrams()
+{
+    std::vector<uint8_t> RawDatagram;
+
+    for (;;)
+    {
+        {
+            std::lock_guard<std::mutex> Lock(DatagramMutex);
+            if (PendingDatagrams.empty()) break;
+            RawDatagram = std::move(PendingDatagrams.front());
+            PendingDatagrams.pop();
+        }
+
+        uint64 TrackAlias, GroupID, ObjectID;
+        uint8 Priority;
+        const uint8* Payload;
+        int32 PayloadLen;
+
+        if (!MoqProtocol::ParseObjectDatagram(
+                RawDatagram.data(), (int32)RawDatagram.size(),
+                TrackAlias, GroupID, ObjectID,
+                Priority, Payload, PayloadLen))
+        {
+            continue;
+        }
+
+        // Audio datagrams are decoded inline on msquic thread (never queued here)
+        if (TrackAlias == StateOutputTrackAlias)
+        {
+            OnStateDataReceived(Payload, PayloadLen);
+        }
+        else if (TrackAlias == AttributesTrackAlias)
+        {
+            OnAttributesDataReceived(Payload, PayloadLen);
+        }
+    }
+}
+
+void FPanaudiaConnectionManager::OnStateDataReceived(
+    const uint8* Payload, int32 PayloadLen)
+{
+    if (PayloadLen < NODE_INFO3_SIZE) return;
+
+    // Parse NodeInfo3 (skip UUID at bytes 0-15)
+    float X, Y, Z, Yaw, Pitch, Roll;
+    FMemory::Memcpy(&X,     Payload + 16, 4);
+    FMemory::Memcpy(&Y,     Payload + 20, 4);
+    FMemory::Memcpy(&Z,     Payload + 24, 4);
+    FMemory::Memcpy(&Yaw,   Payload + 28, 4);
+    FMemory::Memcpy(&Pitch, Payload + 32, 4);
+    FMemory::Memcpy(&Roll,  Payload + 36, 4);
+
+    FPanaudiaNodeState State;
+    State.X = X;
+    State.Y = Y;
+    State.Z = Z;
+    State.Yaw = Yaw;
+    State.Pitch = Pitch;
+    State.Roll = Roll;
+
+    OnNodeStateReceived.Broadcast(State);
+}
+
+void FPanaudiaConnectionManager::OnAttributesDataReceived(
+    const uint8* Payload, int32 PayloadLen)
+{
+    if (PayloadLen <= 0) return;
+
+    FUTF8ToTCHAR Conv(
+        reinterpret_cast<const char*>(Payload), PayloadLen);
+    FString JsonString(Conv.Length(), Conv.Get());
 
     TSharedPtr<FJsonObject> JsonObject;
-    TSharedRef<TJsonReader<>> Reader = TJsonReaderFactory<>::Create(Message);
-
-    if (!FJsonSerializer::Deserialize(Reader, JsonObject) || !JsonObject.IsValid())
-    {
-        UE_LOG(LogTemp, Warning, TEXT("Failed to parse WebSocket message"));
-        return;
-    }
-
-    FString Event = JsonObject->GetStringField(TEXT("event"));
-
-    UE_LOG(LogTemp, Warning, TEXT("*** Message event type: %s ***"), *Event);
-
-    if (Event == TEXT("offer"))
-    {
-        HandleOfferMessage(JsonObject->GetStringField(TEXT("data")));
-    }
-    else if (Event == TEXT("candidate"))
-    {
-        HandleCandidateMessage(JsonObject->GetStringField(TEXT("data")));
-    }
-    else if (Event == TEXT("error"))
-    {
-        HandleErrorMessage(JsonObject->GetStringField(TEXT("data")));
-    }
-    else
-    {
-        UE_LOG(LogTemp, Warning, TEXT("*** Unknown event type: %s ***"), *Event);
-    }
-}
-
-void FPanaudiaConnectionManager::HandleOfferMessage(const FString& OfferJson)
-{
-    UE_LOG(LogTemp, Log, TEXT("Received offer"));
-
-    TSharedPtr<FJsonObject> OfferObject;
-    TSharedRef<TJsonReader<>> Reader = TJsonReaderFactory<>::Create(OfferJson);
-
-    if (FJsonSerializer::Deserialize(Reader, OfferObject) && OfferObject.IsValid())
-    {
-        FString SDP = OfferObject->GetStringField(TEXT("sdp"));
-        CreateAnswer(SDP);
-    }
-}
-
-void FPanaudiaConnectionManager::HandleCandidateMessage(const FString& CandidateJson)
-{
-    UE_LOG(LogTemp, Warning, TEXT("*** HandleCandidateMessage called ***"));
-    UE_LOG(LogTemp, Log, TEXT("Candidate JSON: %s"), *CandidateJson);
-
-    TSharedPtr<FJsonObject> CandidateObject;
-    TSharedRef<TJsonReader<>> Reader = TJsonReaderFactory<>::Create(CandidateJson);
-
-    if (FJsonSerializer::Deserialize(Reader, CandidateObject) && CandidateObject.IsValid())
-    {
-        UE_LOG(LogTemp, Log, TEXT("*** Candidate JSON parsed successfully ***"));
-
-
-
-        try
-        {
-            FString Candidate = CandidateObject->GetStringField(TEXT("candidate"));
-            FString SdpMid = CandidateObject->GetStringField(TEXT("sdpMid"));
-
-            UE_LOG(LogTemp, Warning, TEXT("*** Adding remote candidate: %s (mid: %s) ***"), *Candidate, *SdpMid);
-
-            if (PeerConnection)
-            {
-                // Different libdatachannel versions have different Candidate constructors
-                // Try the simpler two-parameter version first
-                try
-                {    UE_LOG(LogTemp, Log, TEXT("addRemoteCandidate"));
-                    PeerConnection->addRemoteCandidate(rtc::Candidate(
-                        std::string(TCHAR_TO_UTF8(*Candidate)),
-                        std::string(TCHAR_TO_UTF8(*SdpMid))
-                    ));
-                    UE_LOG(LogTemp, Warning, TEXT("*** Remote candidate added successfully ***"));
-                }
-                catch (const std::exception& e)
-                {
-                    // If that fails, just use the candidate string
-                    // Some versions auto-parse the mid from the candidate string
-                    UE_LOG(LogTemp, Verbose, TEXT("Trying alternate candidate format"));
-                    PeerConnection->addRemoteCandidate(rtc::Candidate(
-                        std::string(TCHAR_TO_UTF8(*Candidate))
-                    ));
-                    UE_LOG(LogTemp, Warning, TEXT("*** Remote candidate added successfully (alternate format) ***"));
-                }
-            }
-            else
-            {
-                UE_LOG(LogTemp, Error, TEXT("*** PeerConnection is null, cannot add candidate ***"));
-            }
-        }
-        catch (const std::exception& e)
-        {
-            UE_LOG(LogTemp, Warning, TEXT("Failed to add ICE candidate: %s"), *FString(e.what()));
-        }
-    }
-}
-
-void FPanaudiaConnectionManager::HandleErrorMessage(const FString& ErrorJson)
-{
-    UE_LOG(LogTemp, Error, TEXT("Received error message: %s"), *ErrorJson);
-
-    TSharedPtr<FJsonObject> ErrorObject;
-    TSharedRef<TJsonReader<>> Reader = TJsonReaderFactory<>::Create(ErrorJson);
-
-    if (FJsonSerializer::Deserialize(Reader, ErrorObject) && ErrorObject.IsValid())
-    {
-        FString ErrorMessage = ErrorObject->GetStringField(TEXT("message"));
-        SetConnectionStatus(EPanaudiaConnectionStatus::Error, ErrorMessage);
-    }
-}
-
-// Data Channel Handlers
-
-// Also reset on successful data channel connection
-void FPanaudiaConnectionManager::OnStateChannelOpen()
-{
-    UE_LOG(LogTemp, Log, TEXT("State data channel opened"));
-    bIsDataChannelOpen = true;
-    SetConnectionStatus(EPanaudiaConnectionStatus::DataConnected, TEXT("Data channel connected"));
-
-    // Successfully connected, reset reconnection state
-    if (bIsReconnecting)
-    {
-        UE_LOG(LogTemp, Log, TEXT("Full reconnection successful - data channel established"));
-        ResetReconnectionState();
-    }
-}
-
-void FPanaudiaConnectionManager::OnStateChannelMessage(const std::vector<std::byte>& Data)
-{
-    // Convert STL vector to Unreal TArray immediately at the boundary
-    TArray<uint8> UnrealData;
-    UnrealData.SetNum(Data.size());
-    if (Data.size() > 0)
-    {
-        FMemory::Memcpy(UnrealData.GetData(), Data.data(), Data.size());
-    }
-
-    // Now process using Unreal containers
-    if (UnrealData.Num() >= 24)  // 6 floats * 4 bytes
-    {
-        FPanaudiaNodeState State = FPanaudiaNodeState::FromDataBuffer(UnrealData.GetData(), UnrealData.Num());
-
-        // Broadcast to game thread
-        if (OnNodeStateReceived.IsBound())
-        {
-            AsyncTask(ENamedThreads::GameThread, [this, State]()
-            {
-                OnNodeStateReceived.Broadcast(State);
-            });
-        }
-    }
-    else
-    {
-        UE_LOG(LogTemp, Warning, TEXT("Panaudia: Received malformed state message (size: %d)"), UnrealData.Num());
-    }
-}
-
-void FPanaudiaConnectionManager::OnControlChannelOpen()
-{
-    UE_LOG(LogTemp, Log, TEXT("Control data channel opened"));
-}
-
-void FPanaudiaConnectionManager::OnControlChannelMessage(const std::string& Message)
-{
-    // Convert std::string to FString immediately at the boundary
-    FString UnrealMessage = FString(UTF8_TO_TCHAR(Message.c_str()));
-
-    // Process using Unreal types
-    UE_LOG(LogTemp, Log, TEXT("Panaudia: Control message received: %s"), *UnrealMessage);
-
-    // Parse JSON using Unreal's JSON system
-    TSharedPtr<FJsonObject> JsonObject;
-    TSharedRef<TJsonReader<>> Reader = TJsonReaderFactory<>::Create(UnrealMessage);
+    TSharedRef<TJsonReader<>> Reader = TJsonReaderFactory<>::Create(JsonString);
 
     if (FJsonSerializer::Deserialize(Reader, JsonObject) && JsonObject.IsValid())
     {
-        FString MessageType = JsonObject->GetStringField(TEXT("type"));
-
-        // Handle different control message types
-        if (MessageType == TEXT("pong"))
-        {
-            // Handle pong response
-            UE_LOG(LogTemp, Verbose, TEXT("Panaudia: Pong received"));
-        }
-        else if (MessageType == TEXT("error"))
-        {
-            FString ErrorMessage = JsonObject->GetStringField(TEXT("message"));
-            UE_LOG(LogTemp, Error, TEXT("Panaudia: Server error: %s"), *ErrorMessage);
-        }
-        // Add other message type handlers as needed
-    }
-}
-
-void FPanaudiaConnectionManager::OnAttributesChannelOpen()
-{
-    UE_LOG(LogTemp, Log, TEXT("Attributes data channel opened"));
-}
-
-void FPanaudiaConnectionManager::OnAttributesChannelMessage(const std::string& Message)
-{
-    // Convert std::string to FString immediately at the boundary
-    FString UnrealMessage = FString(UTF8_TO_TCHAR(Message.c_str()));
-
-    UE_LOG(LogTemp, Log, TEXT("Panaudia: Attributes received: %s"), *UnrealMessage);
-
-    // Parse JSON using Unreal's JSON system
-    TSharedPtr<FJsonObject> JsonObject;
-    TSharedRef<TJsonReader<>> Reader = TJsonReaderFactory<>::Create(UnrealMessage);
-
-    if (FJsonSerializer::Deserialize(Reader, JsonObject) && JsonObject.IsValid())
-    {
-        // Extract attributes
         TMap<FString, FString> Attributes;
-
         for (const auto& Pair : JsonObject->Values)
         {
             if (Pair.Value->Type == EJson::String)
@@ -914,156 +1308,20 @@ void FPanaudiaConnectionManager::OnAttributesChannelMessage(const std::string& M
             }
         }
 
-        // Broadcast to game thread
-        if (OnAttributesReceived.IsBound())
-        {
-            AsyncTask(ENamedThreads::GameThread, [this, Attributes]()
-            {
-                OnAttributesReceived.Broadcast(Attributes);
-            });
-        }
+        OnAttributesReceived.Broadcast(Attributes);
     }
 }
 
-void FPanaudiaConnectionManager::OnAudioTrackOpen()
-{
-    UE_LOG(LogTemp, Log, TEXT("Audio track opened xx"));
-    SetConnectionStatus(EPanaudiaConnectionStatus::Connected, TEXT("Connected"));
-}
-
-void FPanaudiaConnectionManager::OnAudioTrackMessage(const std::vector<std::byte>& Data)
-{
-    // Convert STL vector to Unreal TArray immediately at the boundary
-    TArray<uint8> EncodedData;
-    EncodedData.SetNum(Data.size());
-    if (Data.size() > 0)
-    {
-        FMemory::Memcpy(EncodedData.GetData(), Data.data(), Data.size());
-    }
-
-    // Create packet structure using Unreal containers
-    FPanaudiaAudioPacket Packet;
-    Packet.Data = MoveTemp(EncodedData);  // Move to avoid copy
-    Packet.NumSamples = 0;  // Will be set after decoding
-    Packet.NumChannels = 0; // Will be set after decoding
-    Packet.Timestamp = FPlatformTime::Seconds();
-
-    // Queue for processing (TQueue is thread-safe)
-    IncomingPacketQueue.Enqueue(MoveTemp(Packet));
-}
-
-// Position Updates
-
-void FPanaudiaConnectionManager::UpdatePosition(const FVector& Position, const FRotator& Rotation)
-{
-    FPanaudiaNodeState State = FPanaudiaNodeState::FromUnrealCoordinates(Position, Rotation);
-    UpdateAmbisonicPosition(State);
-}
-
-void FPanaudiaConnectionManager::UpdateAmbisonicPosition(const FPanaudiaNodeState& State)
-{
-    SendStateUpdate(State);
-}
-
-void FPanaudiaConnectionManager::SendStateUpdate(const FPanaudiaNodeState& State)
-{
-    if (!StateChannel || !StateChannel->isOpen())
-    {
-        return;
-    }
-
-    // Convert Unreal TArray to std::vector at the boundary
-    TArray<uint8> UnrealData = State.ToDataBuffer();
-
-    std::vector<std::byte> StdData;
-    StdData.resize(UnrealData.Num());
-    if (UnrealData.Num() > 0)
-    {
-        FMemory::Memcpy(StdData.data(), UnrealData.GetData(), UnrealData.Num());
-    }
-
-    try
-    {
-        StateChannel->send(StdData);
-    }
-    catch (const std::exception& e)
-    {
-        FString ErrorMsg = FString(UTF8_TO_TCHAR(e.what()));
-        UE_LOG(LogTemp, Error, TEXT("Panaudia: Failed to send state: %s"), *ErrorMsg);
-    }
-}
-
-// Audio Control
-
-void FPanaudiaConnectionManager::Mute(const FString& NodeId)
-{
-    TSharedPtr<FJsonObject> MessageData = MakeShareable(new FJsonObject());
-    MessageData->SetStringField(TEXT("node"), NodeId);
-    SendControlMessage(TEXT("mute"), MessageData);
-}
-
-void FPanaudiaConnectionManager::Unmute(const FString& NodeId)
-{
-    TSharedPtr<FJsonObject> MessageData = MakeShareable(new FJsonObject());
-    MessageData->SetStringField(TEXT("node"), NodeId);
-    SendControlMessage(TEXT("unmute"), MessageData);
-}
-
-void FPanaudiaConnectionManager::SendControlMessage(const FString& Type, const TSharedPtr<FJsonObject>& MessageData)
-{
-    if (!ControlChannel || !ControlChannel->isOpen())
-    {
-        return;
-    }
-
-    // Build JSON using Unreal containers
-    TSharedPtr<FJsonObject> JsonMessage = MakeShared<FJsonObject>();
-    JsonMessage->SetStringField(TEXT("type"), Type);
-
-    if (MessageData.IsValid())
-    {
-        for (const auto& Pair : MessageData->Values)
-        {
-            JsonMessage->SetField(Pair.Key, Pair.Value);
-        }
-    }
-
-    // Serialize to FString
-    FString JsonString;
-    TSharedRef<TJsonWriter<>> Writer = TJsonWriterFactory<>::Create(&JsonString);
-    FJsonSerializer::Serialize(JsonMessage.ToSharedRef(), Writer);
-
-    // Convert FString to std::string at the boundary
-    std::string StdString(TCHAR_TO_UTF8(*JsonString));
-
-    try
-    {
-        ControlChannel->send(StdString);
-    }
-    catch (const std::exception& e)
-    {
-        FString ErrorMsg = FString(UTF8_TO_TCHAR(e.what()));
-        UE_LOG(LogTemp, Error, TEXT("Panaudia: Failed to send control message: %s"), *ErrorMsg);
-    }
-}
-
+// ============================================================================
 // Audio Data Handling
+// ============================================================================
 
-void FPanaudiaConnectionManager::SubmitAudioData(const float* AudioData, int32 NumSamples, int32 NumChannels, int32 SampleRate)
+void FPanaudiaConnectionManager::SubmitAudioData(
+    const float* AudioData, int32 NumSamples,
+    int32 NumChannels, int32 SampleRate)
 {
-    //UE_LOG(LogTemp, Log, TEXT("SubmitAudioData"));
-
-    if (!OpusEncoder || !OpusEncoder->IsInitialized())
-    {
-		UE_LOG(LogTemp, Log, TEXT("not sending audio data because OpusEncoder is not initialized"));
-        return;
-    }
-
-    if (!AudioTrack || !AudioTrack->isOpen())
-    {
-		UE_LOG(LogTemp, Log, TEXT("not sending audio data because AudioTrack is not open"));
-        return;
-    }
+    if (!OpusEncoder || !OpusEncoder->IsInitialized()) return;
+    if (!bAudioAliasAssigned) return;
 
     // Convert to mono if needed
     TArray<float> MonoBuffer;
@@ -1071,7 +1329,6 @@ void FPanaudiaConnectionManager::SubmitAudioData(const float* AudioData, int32 N
 
     if (NumChannels > 1)
     {
-        // Average channels to mono
         MonoBuffer.SetNum(NumSamples);
         for (int32 i = 0; i < NumSamples; ++i)
         {
@@ -1085,323 +1342,309 @@ void FPanaudiaConnectionManager::SubmitAudioData(const float* AudioData, int32 N
         ProcessData = MonoBuffer.GetData();
     }
 
-    // Accumulate samples until we have a full frame (960 samples for 20ms at 48kHz)
-    const int32 RequiredFrameSize = 960;
+    // Accumulate until full 20ms frame (960 samples at 48kHz)
+    const int32 FrameSize = 960;
 
     for (int32 i = 0; i < NumSamples; ++i)
     {
         PCMAccumulationBuffer.Add(ProcessData[i]);
         AccumulatedSamples++;
 
-        if (AccumulatedSamples >= RequiredFrameSize)
+        if (AccumulatedSamples >= FrameSize)
         {
-            // Encode frame
-            TArray<uint8> EncodedPacket;
+            TArray<uint8> Encoded;
             int32 EncodedBytes = OpusEncoder->Encode(
                 PCMAccumulationBuffer.GetData(),
-                RequiredFrameSize,
-                EncodedPacket
-            );
+                FrameSize,
+                Encoded);
 
             if (EncodedBytes > 0)
             {
-                // Send via WebRTC
-                try
-                {
-                    std::vector<std::byte> ByteVector;
-                    ByteVector.reserve(EncodedPacket.Num());
-                    for (uint8 Byte : EncodedPacket)
-                    {
-                        ByteVector.push_back(static_cast<std::byte>(Byte));
-                    }
+                TArray<uint8> Datagram = MoqProtocol::BuildObjectDatagram(
+                    AudioInputTrackAlias,
+                    0,               // GroupID
+                    AudioObjectId++,
+                    0,               // Highest priority
+                    Encoded.GetData(),
+                    Encoded.Num());
 
-                    AudioTrack->send(ByteVector);
-                }
-                catch (const std::exception& e)
-                {
-                    UE_LOG(LogTemp, Warning, TEXT("Failed to send audio: %s"), *FString(e.what()));
-                }
+                SendDatagram(Datagram);
             }
 
-            // Reset accumulation buffer
             PCMAccumulationBuffer.Empty();
             AccumulatedSamples = 0;
         }
     }
 }
 
-bool FPanaudiaConnectionManager::GetReceivedAudioData(float* OutAudioData, int32 NumSamples, int32 NumChannels)
+// GetReceivedAudioData and ProcessIncomingAudio removed —
+// audio is now decoded inline on the msquic thread and read directly
+// by UPanaudiaProceduralSound::OnGeneratePCMAudio on the audio render thread.
+
+// ============================================================================
+// Position Updates
+// ============================================================================
+
+void FPanaudiaConnectionManager::UpdatePosition(
+    const FVector& Position, const FRotator& Rotation, float WorldExtent)
 {
-    if (!OpusDecoder || !OpusDecoder->IsInitialized() || !JitterBuffer)
-    {
-        return false;
-    }
-
-    // Process any pending packets first
-    ProcessIncomingAudio();
-
-    // Get audio from jitter buffer
-    return JitterBuffer->GetAudio(OutAudioData, NumSamples, NumChannels);
+    FPanaudiaNodeState State = FPanaudiaNodeState::FromUnrealCoordinates(
+        Position, Rotation, WorldExtent);
+    UpdateAmbisonicPosition(State);
 }
 
-void FPanaudiaConnectionManager::SetJitterBufferEnabled(bool bEnabled)
+void FPanaudiaConnectionManager::UpdateAmbisonicPosition(
+    const FPanaudiaNodeState& State)
 {
-    if (JitterBuffer)
-    {
-        JitterBuffer->SetAdaptiveMode(bEnabled);
-    }
+    SendStateUpdate(State);
 }
 
-void FPanaudiaConnectionManager::SetJitterBufferRange(int32 MinMs, int32 MaxMs, int32 TargetMs)
+// ============================================================================
+// Audio Control (Mute/Unmute via control datagram)
+// ============================================================================
+
+void FPanaudiaConnectionManager::Mute(const FString& TargetNodeId)
 {
-    if (JitterBuffer)
-    {
-        JitterBuffer->Initialize(MinMs, MaxMs, TargetMs, 48000);
-    }
+    TSharedPtr<FJsonObject> Data = MakeShareable(new FJsonObject());
+    Data->SetStringField(TEXT("node"), TargetNodeId);
+    SendControlMessage(TEXT("mute"), Data);
 }
 
-FJitterBufferStats FPanaudiaConnectionManager::GetJitterBufferStats() const
+void FPanaudiaConnectionManager::Unmute(const FString& TargetNodeId)
 {
-    if (JitterBuffer)
-    {
-        return JitterBuffer->GetStats();
-    }
-    return FJitterBufferStats();
+    TSharedPtr<FJsonObject> Data = MakeShareable(new FJsonObject());
+    Data->SetStringField(TEXT("node"), TargetNodeId);
+    SendControlMessage(TEXT("unmute"), Data);
 }
 
-float FPanaudiaConnectionManager::GetCurrentAudioLatency() const
+// ============================================================================
+// Connection Helpers
+// ============================================================================
+
+void FPanaudiaConnectionManager::SetConnectionStatus(
+    EPanaudiaConnectionStatus NewStatus, const FString& Message)
 {
-    if (JitterBuffer)
-    {
-        return JitterBuffer->GetCurrentLatencyMs();
-    }
-    return 0.0f;
-}
-
-void FPanaudiaConnectionManager::ProcessIncomingAudio()
-{
-    if (!OpusDecoder || !OpusDecoder->IsInitialized() || !JitterBuffer)
-    {
-        return;
-    }
-
-    // Decode all pending packets and add to jitter buffer
-    FPanaudiaAudioPacket Packet;
-    while (IncomingPacketQueue.Dequeue(Packet))
-    {
-        const int32 MaxFrameSize = 960;
-        const int32 NumChannels = 2; // Stereo
-        TArray<float> DecodedPCM;
-        DecodedPCM.SetNum(MaxFrameSize * NumChannels);
-
-        int32 DecodedSamples = OpusDecoder->Decode(
-            Packet.Data.GetData(),
-            Packet.Data.Num(),
-            DecodedPCM.GetData(),
-            MaxFrameSize
-        );
-
-        if (DecodedSamples > 0)
-        {
-            DecodedPCM.SetNum(DecodedSamples * NumChannels);
-
-            // Add to jitter buffer instead of directly to queue
-            JitterBuffer->AddPacket(DecodedPCM, DecodedSamples, NumChannels);
-        }
-        else
-        {
-            // Packet loss - use PLC
-            TArray<float> PLCBuffer;
-            PLCBuffer.SetNum(MaxFrameSize * NumChannels);
-            int32 PLCSamples = OpusDecoder->DecodePLC(PLCBuffer.GetData(), MaxFrameSize);
-
-            if (PLCSamples > 0)
-            {
-                PLCBuffer.SetNum(PLCSamples * NumChannels);
-                JitterBuffer->AddPacket(PLCBuffer, PLCSamples, NumChannels);
-            }
-        }
-    }
-}
-
-void FPanaudiaConnectionManager::ProcessOutgoingAudio()
-{
-    // Audio is now encoded and sent immediately in SubmitAudioData
-    // This method can be used for additional processing if needed
-}
-
-// Helper Methods
-
-void FPanaudiaConnectionManager::SetConnectionStatus(EPanaudiaConnectionStatus NewStatus, const FString& Message)
-{
-    FScopeLock Lock(&StatusLock);
-
     if (CurrentStatus != NewStatus)
     {
         CurrentStatus = NewStatus;
         LastErrorMessage = Message;
 
-        // Queue delegate call on game thread
-        AsyncTask(ENamedThreads::GameThread, [this, NewStatus, Message]()
-        {
-            OnConnectionStatusChanged.Broadcast(NewStatus, Message);
-        });
+        OnConnectionStatusChanged.Broadcast(NewStatus, Message);
 
-        UE_LOG(LogTemp, Log, TEXT("Connection status: %d - %s"), (int)NewStatus, *Message);
+        UE_LOG(LogTemp, Log, TEXT("Status: %d - %s"), (int)NewStatus, *Message);
     }
 }
 
-FString FPanaudiaConnectionManager::BuildConnectionURL(const FPanaudiaConnectionConfig& Config, const FString& BaseURL)
+void FPanaudiaConnectionManager::HandleConnectionLost(const FString& Reason)
 {
-    FString URL = BaseURL;
+    if (bIsManualDisconnect) return;
 
-    // Add query parameters
-    TArray<FString> Params;
-
-    if (!Config.Ticket.IsEmpty())
+    if (!bAutoReconnectEnabled)
     {
-        Params.Add(FString::Printf(TEXT("ticket=%s"), *Config.Ticket));
+        SetConnectionStatus(EPanaudiaConnectionStatus::Error, Reason);
+        return;
     }
 
-    // Add position
-    FPanaudiaNodeState State = FPanaudiaNodeState::FromUnrealCoordinates(
-        Config.InitialPosition,
-        Config.InitialRotation
-    );
+    if (!bHasConnectionConfig) return;
 
-    Params.Add(FString::Printf(TEXT("x=%f"), State.X));
-    Params.Add(FString::Printf(TEXT("y=%f"), State.Y));
-    Params.Add(FString::Printf(TEXT("z=%f"), State.Z));
-    Params.Add(FString::Printf(TEXT("yaw=%f"), State.Yaw));
-    Params.Add(FString::Printf(TEXT("pitch=%f"), State.Pitch));
-    Params.Add(FString::Printf(TEXT("roll=%f"), State.Roll));
-
-    if (Config.bEnableDataChannel)
+    if (MaxReconnectAttempts > 0 && ReconnectAttemptCount >= MaxReconnectAttempts)
     {
-        Params.Add(TEXT("data=true"));
+        SetConnectionStatus(EPanaudiaConnectionStatus::Error,
+            FString::Printf(TEXT("Max reconnect attempts reached: %s"), *Reason));
+        ResetReconnectionState();
+        return;
     }
 
-    // Add custom attributes
-    for (const auto& Attr : Config.CustomAttributes)
-    {
-        Params.Add(FString::Printf(TEXT("%s=%s"), *Attr.Key, *Attr.Value));
-    }
+    bIsReconnecting = true;
+    CurrentReconnectDelay = CalculateReconnectDelay();
+    ReconnectTimer = CurrentReconnectDelay;
 
-    if (Params.Num() > 0)
-    {
-        URL += TEXT("?") + FString::Join(Params, TEXT("&"));
-    }
+    UE_LOG(LogTemp, Warning,
+        TEXT("Connection lost: %s. Reconnect #%d in %.1fs"),
+        *Reason, ReconnectAttemptCount + 1, CurrentReconnectDelay);
 
-    return URL;
+    SetConnectionStatus(EPanaudiaConnectionStatus::Error,
+        FString::Printf(TEXT("Reconnecting in %.1fs..."), CurrentReconnectDelay));
 }
 
-// Cleanup
-
-void FPanaudiaConnectionManager::CleanupWebRTC()
+void FPanaudiaConnectionManager::AttemptReconnect()
 {
-    try
-    {
-        // Close and reset data channels
-        if (StateChannel)
-        {
-            try
-            {
-                if (StateChannel->isOpen())
-                {
-                    StateChannel->close();
-                }
-            }
-            catch (const std::exception& e)
-            {
-                UE_LOG(LogTemp, Verbose, TEXT("StateChannel close exception (expected): %s"), *FString(e.what()));
-            }
-            StateChannel.reset();
-        }
+    if (!bIsReconnecting || !bHasConnectionConfig) return;
 
-        if (ControlChannel)
-        {
-            try
-            {
-                if (ControlChannel->isOpen())
-                {
-                    ControlChannel->close();
-                }
-            }
-            catch (const std::exception& e)
-            {
-                UE_LOG(LogTemp, Verbose, TEXT("ControlChannel close exception (expected): %s"), *FString(e.what()));
-            }
-            ControlChannel.reset();
-        }
+    ReconnectAttemptCount++;
+    UE_LOG(LogTemp, Log, TEXT("Reconnect attempt #%d"), ReconnectAttemptCount);
 
-        if (AttributesChannel)
-        {
-            try
-            {
-                if (AttributesChannel->isOpen())
-                {
-                    AttributesChannel->close();
-                }
-            }
-            catch (const std::exception& e)
-            {
-                UE_LOG(LogTemp, Verbose, TEXT("AttributesChannel close exception (expected): %s"), *FString(e.what()));
-            }
-            AttributesChannel.reset();
-        }
-
-        // Reset audio track
-        if (AudioTrack)
-        {
-            AudioTrack.reset();
-        }
-
-        // Close and reset peer connection
-        if (PeerConnection)
-        {
-            try
-            {
-                PeerConnection->close();
-            }
-            catch (const std::exception& e)
-            {
-                UE_LOG(LogTemp, Verbose, TEXT("PeerConnection close exception (expected): %s"), *FString(e.what()));
-            }
-            PeerConnection.reset();
-        }
-
-        bIsDataChannelOpen = false;
-    }
-    catch (const std::exception& e)
-    {
-        UE_LOG(LogTemp, Warning, TEXT("Error during WebRTC cleanup: %s"), *FString(e.what()));
-    }
+    CleanupQuic();
+    Connect(LastConnectionConfig);
 }
 
-void FPanaudiaConnectionManager::CleanupWebSocket()
+void FPanaudiaConnectionManager::ResetReconnectionState()
 {
-    if (WebSocket)
-    {
-        if (WebSocket->IsConnected())
-        {
-            WebSocket->Close();
-        }
-        WebSocket.Reset();
-    }
+    bIsReconnecting = false;
+    ReconnectAttemptCount = 0;
+    ReconnectTimer = 0.0f;
+    CurrentReconnectDelay = 0.0f;
 }
 
-// FTickableGameObject
+float FPanaudiaConnectionManager::CalculateReconnectDelay() const
+{
+    float Delay = ReconnectBaseDelay
+        * FMath::Pow(2.0f, FMath::Min(ReconnectAttemptCount, 5));
+    Delay = FMath::Min(Delay, 60.0f);
+    float Jitter = FMath::RandRange(-0.2f, 0.2f) * Delay;
+    return Delay + Jitter;
+}
+
+// ============================================================================
+// Auto-reconnect Settings
+// ============================================================================
+
+void FPanaudiaConnectionManager::SetAutoReconnectEnabled(bool bEnabled)
+{
+    bAutoReconnectEnabled = bEnabled;
+}
+
+void FPanaudiaConnectionManager::SetMaxReconnectAttempts(int32 MaxAttempts)
+{
+    MaxReconnectAttempts = FMath::Max(0, MaxAttempts);
+}
+
+void FPanaudiaConnectionManager::SetReconnectBaseDelay(float DelaySeconds)
+{
+    ReconnectBaseDelay = FMath::Max(0.5f, DelaySeconds);
+}
+
+// ============================================================================
+// Jitter Buffer Settings
+// ============================================================================
+
+void FPanaudiaConnectionManager::SetJitterBufferEnabled(bool bEnabled)
+{
+    if (JitterBuffer) JitterBuffer->SetAdaptiveMode(bEnabled);
+}
+
+void FPanaudiaConnectionManager::SetJitterBufferRange(
+    int32 MinMs, int32 MaxMs, int32 TargetMs)
+{
+    if (JitterBuffer) JitterBuffer->SetJitterBufferRange(MinMs, MaxMs, TargetMs);
+}
+
+FJitterBufferStats FPanaudiaConnectionManager::GetJitterBufferStats() const
+{
+    return JitterBuffer ? JitterBuffer->GetStats() : FJitterBufferStats();
+}
+
+float FPanaudiaConnectionManager::GetCurrentAudioLatency() const
+{
+    return JitterBuffer ? JitterBuffer->GetCurrentLatencyMs() : 0.0f;
+}
+
+// ============================================================================
+// FTickableGameObject — Game Thread
+//
+// This is where all queued msquic events are processed safely with UE APIs.
+// ============================================================================
 
 void FPanaudiaConnectionManager::Tick(float DeltaTime)
 {
-    // Process incoming audio packets
-    ProcessIncomingAudio();
+    // --- Process pending connection events from msquic callbacks ---
 
-    // Handle reconnection timer
+    if (bPendingConnected.exchange(false))
+    {
+        UE_LOG(LogTemp, Log, TEXT("QUIC connected"));
+        SetConnectionStatus(EPanaudiaConnectionStatus::Connected, TEXT("QUIC connected"));
+        StartMoqSession();
+    }
+
+    if (bPendingTransportShutdown.exchange(false))
+    {
+        UE_LOG(LogTemp, Warning, TEXT("QUIC transport shutdown"));
+        if (!bIsManualDisconnect)
+        {
+            HandleConnectionLost(TEXT("Transport shutdown"));
+        }
+    }
+
+    if (bPendingPeerShutdown.exchange(false))
+    {
+        UE_LOG(LogTemp, Warning, TEXT("QUIC peer shutdown"));
+        if (!bIsManualDisconnect)
+        {
+            HandleConnectionLost(TEXT("Peer shutdown"));
+        }
+    }
+
+    // --- Process incoming control stream data ---
+    {
+        std::vector<uint8_t> Chunk;
+        for (;;)
+        {
+            {
+                std::lock_guard<std::mutex> Lock(ControlDataMutex);
+                if (PendingControlData.empty()) break;
+                Chunk = std::move(PendingControlData.front());
+                PendingControlData.pop();
+            }
+
+            // Append to UE-side receive buffer
+            ControlStreamRecvBuffer.Append(Chunk.data(), (int32)Chunk.size());
+        }
+
+        // Parse complete messages
+        if (ControlStreamRecvBuffer.Num() > 0)
+        {
+            ProcessControlStreamData(
+                ControlStreamRecvBuffer.GetData(),
+                ControlStreamRecvBuffer.Num());
+        }
+    }
+
+    // --- Process incoming datagrams (state, attributes only — audio decoded on msquic thread) ---
+    ProcessPendingDatagrams();
+
+    // --- Flush queued outgoing datagrams ---
+    if (MsQuic && QuicConnection)
+    {
+        struct DatagramSendContext {
+            uint8_t* DataBuf;
+            QUIC_BUFFER* QuicBuf;
+        };
+
+        TArray<uint8> QueuedData;
+        while (OutgoingDatagramQueue.Dequeue(QueuedData))
+        {
+            size_t DataLen = (size_t)QueuedData.Num();
+            uint8* SendBuf = static_cast<uint8*>(calloc(1, DataLen + 256));
+            if (!SendBuf) continue;
+            memcpy(SendBuf, QueuedData.GetData(), DataLen);
+
+            QUIC_BUFFER* QuicBufPtr = static_cast<QUIC_BUFFER*>(calloc(1, sizeof(QUIC_BUFFER)));
+            if (!QuicBufPtr) { free(SendBuf); continue; }
+            QuicBufPtr->Buffer = SendBuf;
+            QuicBufPtr->Length = (uint32_t)DataLen;
+
+            DatagramSendContext* Ctx = static_cast<DatagramSendContext*>(calloc(1, sizeof(DatagramSendContext)));
+            if (!Ctx) { free(SendBuf); free(QuicBufPtr); continue; }
+            Ctx->DataBuf = SendBuf;
+            Ctx->QuicBuf = QuicBufPtr;
+
+            QUIC_STATUS Status = MsQuic->DatagramSend(
+                QuicConnection, QuicBufPtr, 1,
+                QUIC_SEND_FLAG_NONE, Ctx);
+
+            if (QUIC_FAILED(Status))
+            {
+                free(SendBuf);
+                free(QuicBufPtr);
+                free(Ctx);
+            }
+        }
+    }
+
+    // --- Reconnection timer ---
     if (bIsReconnecting && ReconnectTimer > 0.0f)
     {
         ReconnectTimer -= DeltaTime;
-
         if (ReconnectTimer <= 0.0f)
         {
             AttemptReconnect();

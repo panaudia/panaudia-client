@@ -1,7 +1,7 @@
 
 #include "PanaudiaOpusDecoder.h"
 
-#include "CoreMinimal.h"
+#include <cstdio>
 #include "opus.h"
 
 FPanaudiaOpusDecoder::FPanaudiaOpusDecoder()
@@ -36,13 +36,11 @@ bool FPanaudiaOpusDecoder::Initialize(int32 InSampleRate, int32 InNumChannels)
 
     if (Error != OPUS_OK || !Decoder)
     {
-        UE_LOG(LogTemp, Error, TEXT("Failed to create Opus decoder: %s"),
-            *FString(opus_strerror(Error)));
+        printf("[Panaudia] Failed to create Opus decoder: %s\n", opus_strerror(Error));
         return false;
     }
 
-    UE_LOG(LogTemp, Log, TEXT("Opus decoder initialized: %dHz, %d channels"),
-        SampleRate, NumChannels);
+    printf("[Panaudia] Opus decoder initialized: %dHz, %d channels\n", SampleRate, NumChannels);
 
     return true;
 }
@@ -51,13 +49,13 @@ int32 FPanaudiaOpusDecoder::Decode(const uint8* EncodedData, int32 EncodedSize, 
 {
     if (!Decoder)
     {
-        UE_LOG(LogTemp, Error, TEXT("Opus decoder not initialized"));
+        printf("[Panaudia] Opus decoder not initialized\n");
         return -1;
     }
 
     if (!EncodedData || EncodedSize <= 0)
     {
-        UE_LOG(LogTemp, Warning, TEXT("Invalid encoded data"));
+        printf("[Panaudia] Invalid encoded data\n");
         return -1;
     }
 
@@ -73,8 +71,7 @@ int32 FPanaudiaOpusDecoder::Decode(const uint8* EncodedData, int32 EncodedSize, 
 
     if (DecodedSamples < 0)
     {
-        UE_LOG(LogTemp, Error, TEXT("Opus decoding failed: %s"),
-            *FString(opus_strerror(DecodedSamples)));
+        printf("[Panaudia] Opus decoding failed: %s\n", opus_strerror(DecodedSamples));
         return DecodedSamples;
     }
 
@@ -85,7 +82,7 @@ int32 FPanaudiaOpusDecoder::DecodePLC(float* OutPCMData, int32 FrameSize)
 {
     if (!Decoder)
     {
-        UE_LOG(LogTemp, Error, TEXT("Opus decoder not initialized"));
+        printf("[Panaudia] Opus decoder not initialized\n");
         return -1;
     }
 
@@ -101,8 +98,7 @@ int32 FPanaudiaOpusDecoder::DecodePLC(float* OutPCMData, int32 FrameSize)
 
     if (DecodedSamples < 0)
     {
-        UE_LOG(LogTemp, Error, TEXT("Opus PLC failed: %s"),
-            *FString(opus_strerror(DecodedSamples)));
+        printf("[Panaudia] Opus PLC failed: %s\n", opus_strerror(DecodedSamples));
         return DecodedSamples;
     }
 

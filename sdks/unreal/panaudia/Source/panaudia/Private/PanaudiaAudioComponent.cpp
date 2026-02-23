@@ -4,12 +4,15 @@
 #include "CoreMinimal.h"
 #include "Engine/World.h"
 #include "GameFramework/Actor.h"
+#include "GameFramework/Pawn.h"
+#include "GameFramework/Controller.h"
 #include "Components/AudioComponent.h"
 #include "Sound/SoundWaveProcedural.h"
 #include "AudioDevice.h"
 #include "AudioCapture.h"
 #include "DSP/BufferVectorOperations.h"
 #include "PanaudiaConnectionManager.h"
+#include "PanaudiaProceduralSound.h"
 
 UPanaudiaAudioComponent::UPanaudiaAudioComponent()
 {
@@ -29,6 +32,8 @@ UPanaudiaAudioComponent::UPanaudiaAudioComponent()
 void UPanaudiaAudioComponent::BeginPlay()
 {
     Super::BeginPlay();
+
+    UE_LOG(LogTemp, Warning, TEXT("*** PANAUDIA AudioComponent::BeginPlay — BUILD 2026-02-23B (direct hardware thread audio, no game tick) ***"));
 
     // Create connection manager
     ConnectionManager = MakeShared<FPanaudiaConnectionManager>();
@@ -109,11 +114,7 @@ float UPanaudiaAudioComponent::GetCurrentAudioLatency() const
 
 float UPanaudiaAudioComponent::GetJitterBufferPacketLoss() const
 {
-    if (ConnectionManager.IsValid())
-    {
-        FJitterBufferStats Stats = ConnectionManager->GetJitterBufferStats();
-        return Stats.PacketLossRate * 100.0f;
-    }
+    // Packet loss is not tracked by the ring buffer — return 0
     return 0.0f;
 }
 
@@ -137,11 +138,27 @@ bool UPanaudiaAudioComponent::IsAutoReconnectEnabled() const
 
 void UPanaudiaAudioComponent::EndPlay(const EEndPlayReason::Type EndPlayReason)
 {
+    // Critical shutdown ordering:
+    // 1. Stop mic capture
     StopAudioCapture();
 
+    // 2. Stop audio render thread from calling OnGeneratePCMAudio
+    if (AudioComponent)
+    {
+        AudioComponent->Stop();
+    }
+
+    // 3. Detach jitter buffer from procedural sound (safety net for in-flight callbacks)
+    if (ProceduralSound)
+    {
+        ProceduralSound->SetJitterBuffer(nullptr);
+    }
+
+    // 4. Disconnect QUIC (synchronous, stops msquic callbacks that write to jitter buffer)
     if (ConnectionManager.IsValid())
     {
         ConnectionManager->Disconnect();
+        // 5. Destroy connection manager (and jitter buffer) — now safe, no readers or writers
         ConnectionManager.Reset();
     }
 
@@ -164,8 +181,8 @@ void UPanaudiaAudioComponent::TickComponent(float DeltaTime, ELevelTick TickType
         }
     }
 
-    // Process incoming audio
-    ProcessIncomingAudio();
+    // Audio is handled directly by UPanaudiaProceduralSound::OnGeneratePCMAudio
+    // on the audio render thread — no game-tick processing needed
 }
 
 void UPanaudiaAudioComponent::Connect(const FPanaudiaConnectionConfig& Config)
@@ -178,6 +195,13 @@ void UPanaudiaAudioComponent::Connect(const FPanaudiaConnectionConfig& Config)
 
     UE_LOG(LogTemp, Log, TEXT("Connecting to Panaudia..."));
     ConnectionManager->Connect(Config);
+
+    // Start audio playback immediately — OnGeneratePCMAudio produces silence until data arrives
+    if (AudioComponent && !AudioComponent->IsPlaying())
+    {
+        AudioComponent->Play();
+        UE_LOG(LogTemp, Log, TEXT("Started audio playback (silence until data arrives)"));
+    }
 
     // Start capturing microphone if enabled
     if (bCaptureMicrophone)
@@ -197,10 +221,16 @@ void UPanaudiaAudioComponent::ConnectDirect(const FString& DirectURL, FVector Po
     FPanaudiaConnectionConfig Config;
     Config.InitialPosition = Position;
     Config.InitialRotation = Rotation;
-    Config.bEnableDataChannel = true;
 
     UE_LOG(LogTemp, Log, TEXT("Connecting directly to: %s"), *DirectURL);
     ConnectionManager->ConnectDirect(DirectURL, Config);
+
+    // Start audio playback immediately — OnGeneratePCMAudio produces silence until data arrives
+    if (AudioComponent && !AudioComponent->IsPlaying())
+    {
+        AudioComponent->Play();
+        UE_LOG(LogTemp, Log, TEXT("Started audio playback (silence until data arrives)"));
+    }
 
     // Start capturing microphone if enabled
     if (bCaptureMicrophone)
@@ -228,7 +258,7 @@ void UPanaudiaAudioComponent::UpdatePosition(FVector Position, FRotator Rotation
 {
     if (ConnectionManager.IsValid())
     {
-        ConnectionManager->UpdatePosition(Position, Rotation);
+        ConnectionManager->UpdatePosition(Position, Rotation, WorldExtent);
     }
 }
 
@@ -355,57 +385,36 @@ void UPanaudiaAudioComponent::SetupAudioPlayback()
         return;
     }
 
-    // Create procedural sound wave
-    ProceduralSound = NewObject<USoundWaveProcedural>(this, TEXT("PanaudiaProceduralSound"));
+    // Create custom procedural sound wave (float PCM, reads directly from jitter buffer)
+    ProceduralSound = NewObject<UPanaudiaProceduralSound>(this, TEXT("PanaudiaProceduralSound"));
     ProceduralSound->SetSampleRate(48000);
     ProceduralSound->NumChannels = 2; // Stereo for binaural
     ProceduralSound->Duration = INDEFINITELY_LOOPING_DURATION;
     ProceduralSound->SoundGroup = SOUNDGROUP_Voice;
     ProceduralSound->bLooping = false;
 
-    // Create audio component
+    // Wire jitter buffer pointer (audio render thread reads from it directly)
+    if (ConnectionManager.IsValid())
+    {
+        ProceduralSound->SetJitterBuffer(ConnectionManager->GetJitterBuffer());
+    }
+
+    // Create audio component — play as 2D (non-spatialized) since server
+    // already does binaural processing. Without this, UE applies 3D distance
+    // attenuation which silences the output.
     AudioComponent = NewObject<UAudioComponent>(this, TEXT("PanaudiaAudioComponent"));
     AudioComponent->SetSound(ProceduralSound);
     AudioComponent->bAutoActivate = false;
     AudioComponent->bAlwaysPlay = true;
+    AudioComponent->bIsUISound = true;  // Bypass UE 3D spatialization
+    AudioComponent->SetVolumeMultiplier(1.0f);
     AudioComponent->RegisterComponent();
 
-    UE_LOG(LogTemp, Log, TEXT("Audio playback setup complete"));
+    UE_LOG(LogTemp, Log, TEXT("Audio playback setup complete (direct hardware thread reads)"));
 }
 
-void UPanaudiaAudioComponent::ProcessIncomingAudio()
-{
-    if (!ConnectionManager.IsValid() || !ProceduralSound || !AudioComponent)
-    {
-        return;
-    }
-
-    // Buffer for incoming audio (stereo, 1024 samples)
-    const int32 BufferSize = 1024 * 2; // Stereo
-    float AudioBuffer[BufferSize];
-
-    if (ConnectionManager->GetReceivedAudioData(AudioBuffer, 1024, 2))
-    {
-        // Apply output volume
-        if (FMath::Abs(OutputVolume - 1.0f) > SMALL_NUMBER)
-        {
-            for (int32 i = 0; i < BufferSize; ++i)
-            {
-                AudioBuffer[i] *= OutputVolume;
-            }
-        }
-
-        // Queue audio to procedural sound wave
-        ProceduralSound->QueueAudio(reinterpret_cast<const uint8*>(AudioBuffer), BufferSize * sizeof(float));
-
-        // Start playback if not already playing
-        if (!AudioComponent->IsPlaying())
-        {
-            AudioComponent->Play();
-            UE_LOG(LogTemp, Log, TEXT("Started audio playback"));
-        }
-    }
-}
+// ProcessIncomingAudio removed — audio is handled directly by
+// UPanaudiaProceduralSound::OnGeneratePCMAudio on the audio render thread
 
 void UPanaudiaAudioComponent::AutoUpdatePosition()
 {
@@ -416,7 +425,20 @@ void UPanaudiaAudioComponent::AutoUpdatePosition()
     }
 
     FVector Position = Owner->GetActorLocation();
-    FRotator Rotation = Owner->GetActorRotation();
+
+    // Use the control rotation (where the player is actually looking)
+    // rather than the actor rotation (which may only track yaw for characters).
+    // For non-pawn actors, fall back to actor rotation.
+    FRotator Rotation;
+    APawn* Pawn = Cast<APawn>(Owner);
+    if (Pawn && Pawn->GetController())
+    {
+        Rotation = Pawn->GetController()->GetControlRotation();
+    }
+    else
+    {
+        Rotation = Owner->GetActorRotation();
+    }
 
     UpdatePosition(Position, Rotation);
 }

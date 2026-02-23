@@ -2,5 +2,7 @@
 panaudia/Source/ThirdParty/libdatachannel
 panaudia/Source/ThirdParty/opus
 panaudia/Source/ThirdParty/openssl-1.1.1w
+panaudia/Source/ThirdParty/msquic
+panaudia/Source/ThirdParty/quictls
 panaudia/Intermediate
 panaudia/Binaries
