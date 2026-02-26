@@ -11,7 +11,7 @@
 
 void FPanaudiaModule::StartupModule()
 {
-    UE_LOG(LogTemp, Log, TEXT("Panaudia Module Starting (MOQ/QUIC)"));
+    UE_LOG(LogTemp, Log, TEXT("Panaudia Module Starting (MOQ/QUIC) v0.2.0-draft11-authfix"));
 
     UE_LOG(LogTemp, Log, TEXT("Panaudia Module Started"));
 }

@@ -67,16 +67,17 @@ namespace MoqProtocol
     TArray<uint8> BuildAnnounce(uint64 RequestId, const TArray<FString>& Namespace);
 
     // --- SUBSCRIBE ---
-    // SUBSCRIBE: [RequestID varint][TrackAlias varint][Namespace Tuple]
+    // SUBSCRIBE (draft-11): [RequestID varint][Namespace Tuple]
     //            [TrackName bytes][SubscriberPriority 1B][GroupOrder 1B]
-    //            [Forward 1B][FilterType varint]
+    //            [Forward 1B][FilterType varint][Parameters]
+    // NOTE: TrackAlias is NOT in SUBSCRIBE. The publisher assigns it in SUBSCRIBE_OK.
     TArray<uint8> BuildSubscribe(
-        uint64 RequestId, uint64 TrackAlias,
+        uint64 RequestId,
         const TArray<FString>& Namespace, const FString& TrackName,
         uint8 Priority = 128, const FString& Authorization = TEXT(""));
 
     // --- SUBSCRIBE_OK ---
-    // SUBSCRIBE_OK: [RequestID varint][Expires varint][GroupOrder 1B]
-    //               [ContentExists 1B][Parameters]
-    TArray<uint8> BuildSubscribeOk(uint64 RequestId);
+    // SUBSCRIBE_OK (draft-11): [RequestID varint][TrackAlias varint][Expires varint]
+    //               [GroupOrder 1B][ContentExists 1B][Parameters]
+    TArray<uint8> BuildSubscribeOk(uint64 RequestId, uint64 TrackAlias);
 }

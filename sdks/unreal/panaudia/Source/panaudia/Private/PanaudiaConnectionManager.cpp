@@ -710,11 +710,11 @@ void FPanaudiaConnectionManager::AnnounceAndSubscribe()
         uint64 ReqId = NextRequestId; NextRequestId += 2;
         TArray<FString> Ns = { TEXT("out"), TEXT("audio"), TEXT("opus-stereo"), NodeId };
         TArray<uint8> Msg = MoqProtocol::BuildSubscribe(
-            ReqId, AudioOutputTrackAlias, Ns, TEXT(""),
+            ReqId, Ns, TEXT(""),
             128, LastConnectionConfig.Ticket);
+        PendingSubscribeRequests.Add(ReqId, TEXT("audio_output"));
         SendOnControlStream(Msg);
-        UE_LOG(LogTemp, Log, TEXT("SUBSCRIBE audio output (req=%llu, alias=%llu)"),
-            ReqId, AudioOutputTrackAlias);
+        UE_LOG(LogTemp, Log, TEXT("SUBSCRIBE audio output (req=%llu)"), ReqId);
     }
 
     // --- Subscribe to state output ---
@@ -722,11 +722,11 @@ void FPanaudiaConnectionManager::AnnounceAndSubscribe()
         uint64 ReqId = NextRequestId; NextRequestId += 2;
         TArray<FString> Ns = { TEXT("out"), TEXT("state"), NodeId };
         TArray<uint8> Msg = MoqProtocol::BuildSubscribe(
-            ReqId, StateOutputTrackAlias, Ns, TEXT(""),
+            ReqId, Ns, TEXT(""),
             128, LastConnectionConfig.Ticket);
+        PendingSubscribeRequests.Add(ReqId, TEXT("state_output"));
         SendOnControlStream(Msg);
-        UE_LOG(LogTemp, Log, TEXT("SUBSCRIBE state output (req=%llu, alias=%llu)"),
-            ReqId, StateOutputTrackAlias);
+        UE_LOG(LogTemp, Log, TEXT("SUBSCRIBE state output (req=%llu)"), ReqId);
     }
 
     // --- Subscribe to attributes output ---
@@ -734,11 +734,11 @@ void FPanaudiaConnectionManager::AnnounceAndSubscribe()
         uint64 ReqId = NextRequestId; NextRequestId += 2;
         TArray<FString> Ns = { TEXT("out"), TEXT("attributes"), NodeId };
         TArray<uint8> Msg = MoqProtocol::BuildSubscribe(
-            ReqId, AttributesTrackAlias, Ns, TEXT(""),
+            ReqId, Ns, TEXT(""),
             128, LastConnectionConfig.Ticket);
+        PendingSubscribeRequests.Add(ReqId, TEXT("attributes_output"));
         SendOnControlStream(Msg);
-        UE_LOG(LogTemp, Log, TEXT("SUBSCRIBE attributes output (req=%llu, alias=%llu)"),
-            ReqId, AttributesTrackAlias);
+        UE_LOG(LogTemp, Log, TEXT("SUBSCRIBE attributes output (req=%llu)"), ReqId);
     }
 
     // --- Announce audio input ---
@@ -959,15 +959,46 @@ void FPanaudiaConnectionManager::HandleAnnounceOk(
 void FPanaudiaConnectionManager::HandleSubscribeOk(
     const uint8* Content, int32 ContentLen)
 {
+    int32 Pos = 0;
     int32 Br = 0;
-    uint64 ReqId = MoqProtocol::DecodeVarint(Content, ContentLen, Br);
-    UE_LOG(LogTemp, Log, TEXT("SUBSCRIBE_OK req=%llu"), ReqId);
+
+    uint64 ReqId = MoqProtocol::DecodeVarint(Content + Pos, ContentLen - Pos, Br);
+    if (Br == 0) return;
+    Pos += Br;
+
+    // TrackAlias assigned by the publisher (server) — draft-11
+    uint64 TrackAlias = MoqProtocol::DecodeVarint(Content + Pos, ContentLen - Pos, Br);
+    if (Br == 0) return;
+    Pos += Br;
+
+    UE_LOG(LogTemp, Log, TEXT("SUBSCRIBE_OK req=%llu trackAlias=%llu"), ReqId, TrackAlias);
+
+    // Store the server-assigned alias for the correct track
+    if (FString* TrackType = PendingSubscribeRequests.Find(ReqId))
+    {
+        if (*TrackType == TEXT("audio_output"))
+        {
+            AudioOutputTrackAlias = TrackAlias;
+            UE_LOG(LogTemp, Log, TEXT("→ Audio output alias = %llu"), TrackAlias);
+        }
+        else if (*TrackType == TEXT("state_output"))
+        {
+            StateOutputTrackAlias = TrackAlias;
+            UE_LOG(LogTemp, Log, TEXT("→ State output alias = %llu"), TrackAlias);
+        }
+        else if (*TrackType == TEXT("attributes_output"))
+        {
+            AttributesTrackAlias = TrackAlias;
+            UE_LOG(LogTemp, Log, TEXT("→ Attributes output alias = %llu"), TrackAlias);
+        }
+        PendingSubscribeRequests.Remove(ReqId);
+    }
 }
 
 void FPanaudiaConnectionManager::HandleIncomingSubscribe(
     const uint8* Content, int32 ContentLen)
 {
-    // Parse: RequestID, TrackAlias, Namespace tuple, ...
+    // Parse: RequestID, Namespace tuple, ... (NO TrackAlias in SUBSCRIBE per draft-11)
     int32 Pos = 0;
     int32 Br = 0;
 
@@ -975,9 +1006,8 @@ void FPanaudiaConnectionManager::HandleIncomingSubscribe(
     if (Br == 0) return;
     Pos += Br;
 
-    uint64 TrackAlias = MoqProtocol::DecodeVarint(Content + Pos, ContentLen - Pos, Br);
-    if (Br == 0) return;
-    Pos += Br;
+    // Assign a local TrackAlias (we are the publisher for these tracks)
+    uint64 TrackAlias = NextTrackAlias++;
 
     // Namespace tuple
     uint64 NsCount = MoqProtocol::DecodeVarint(Content + Pos, ContentLen - Pos, Br);
@@ -1004,8 +1034,8 @@ void FPanaudiaConnectionManager::HandleIncomingSubscribe(
         TEXT("Incoming SUBSCRIBE: %s alias=%llu req=%llu"),
         *NsPath, TrackAlias, RequestId);
 
-    // Send SUBSCRIBE_OK
-    TArray<uint8> OkMsg = MoqProtocol::BuildSubscribeOk(RequestId);
+    // Send SUBSCRIBE_OK with our assigned TrackAlias
+    TArray<uint8> OkMsg = MoqProtocol::BuildSubscribeOk(RequestId, TrackAlias);
     SendOnControlStream(OkMsg);
 
     // Map track alias to our track type

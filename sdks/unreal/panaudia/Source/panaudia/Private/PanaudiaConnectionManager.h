@@ -104,8 +104,9 @@ private:
 
     // --- MOQ state ---
     uint64 NextRequestId = 0;          // Client uses even IDs (0, 2, 4...)
+    uint64 NextTrackAlias = 1;         // Counter for assigning aliases to incoming subscriptions
 
-    // Track aliases assigned by server (via incoming SUBSCRIBE)
+    // Track aliases we assign to incoming subscriptions (server subscribes to our tracks)
     uint64 AudioInputTrackAlias = 0;
     uint64 StateTrackAlias = 0;
     uint64 ControlTrackAlias = 0;
@@ -113,10 +114,13 @@ private:
     bool bStateAliasAssigned = false;
     bool bControlAliasAssigned = false;
 
-    // Track aliases we assign (for our subscriptions)
-    uint64 AudioOutputTrackAlias = 100;
-    uint64 StateOutputTrackAlias = 101;
-    uint64 AttributesTrackAlias = 102;
+    // Track aliases assigned by server (via SUBSCRIBE_OK for our subscriptions)
+    uint64 AudioOutputTrackAlias = 0;
+    uint64 StateOutputTrackAlias = 0;
+    uint64 AttributesTrackAlias = 0;
+
+    // Map RequestID → track type so HandleSubscribeOk can store the server-assigned alias
+    TMap<uint64, FString> PendingSubscribeRequests;
 
     // Object IDs for outgoing datagrams
     uint64 AudioObjectId = 0;

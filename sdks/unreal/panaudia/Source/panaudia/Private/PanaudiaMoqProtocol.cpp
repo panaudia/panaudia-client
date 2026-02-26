@@ -261,13 +261,14 @@ TArray<uint8> BuildAnnounce(uint64 RequestId, const TArray<FString>& Namespace)
 // --- SUBSCRIBE ---
 
 TArray<uint8> BuildSubscribe(
-    uint64 RequestId, uint64 TrackAlias,
+    uint64 RequestId,
     const TArray<FString>& Namespace, const FString& TrackName,
     uint8 Priority, const FString& Authorization)
 {
     TArray<uint8> Content;
     AppendVarint(Content, RequestId);
-    AppendVarint(Content, TrackAlias);
+    // NOTE: TrackAlias is NOT in SUBSCRIBE per draft-11 / moqtransport v0.5.1.
+    // The publisher assigns a TrackAlias and returns it in SUBSCRIBE_OK.
     Content.Append(EncodeNamespaceTuple(Namespace));
     AppendStringBytes(Content, TrackName);
 
@@ -284,8 +285,8 @@ TArray<uint8> BuildSubscribe(
     if (Authorization.Len() > 0)
     {
         AppendVarint(Content, 1); // 1 parameter
-        // Authorization: key=0x01 (AuthorizationTokenParameterKey in subscribe context)
-        AppendVarint(Content, 0x01);
+        // Authorization: key=0x03 (AuthorizationTokenParameterKey per moqtransport v0.5.1)
+        AppendVarint(Content, 0x03);
         AppendStringBytes(Content, Authorization);
     }
     else
@@ -298,10 +299,11 @@ TArray<uint8> BuildSubscribe(
 
 // --- SUBSCRIBE_OK ---
 
-TArray<uint8> BuildSubscribeOk(uint64 RequestId)
+TArray<uint8> BuildSubscribeOk(uint64 RequestId, uint64 TrackAlias)
 {
     TArray<uint8> Content;
     AppendVarint(Content, RequestId);
+    AppendVarint(Content, TrackAlias); // Track alias assigned by us (the publisher)
     AppendVarint(Content, 0); // Expires: 0 = never
     Content.Add(0x00); // GroupOrder: 0 = default
     Content.Add(0x00); // ContentExists: 0 = no
