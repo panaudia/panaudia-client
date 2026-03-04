@@ -7,18 +7,20 @@
 #include "Interfaces/IPluginManager.h"
 #include "Misc/Paths.h"
 
+DEFINE_LOG_CATEGORY(LogPanaudia);
+
 #define LOCTEXT_NAMESPACE "FPanaudiaModule"
 
 void FPanaudiaModule::StartupModule()
 {
-    UE_LOG(LogTemp, Log, TEXT("Panaudia Module Starting (MOQ/QUIC) v0.2.0-draft11-authfix"));
+    UE_LOG(LogPanaudia, Log, TEXT("Panaudia Module Starting (MOQ/QUIC) v0.3.0-core"));
 
-    UE_LOG(LogTemp, Log, TEXT("Panaudia Module Started"));
+    UE_LOG(LogPanaudia, Log, TEXT("Panaudia Module Started"));
 }
 
 void FPanaudiaModule::ShutdownModule()
 {
-    UE_LOG(LogTemp, Log, TEXT("Panaudia Module Shutdown"));
+    UE_LOG(LogPanaudia, Log, TEXT("Panaudia Module Shutdown"));
 }
 
 #undef LOCTEXT_NAMESPACE

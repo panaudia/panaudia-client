@@ -83,15 +83,8 @@ struct FPanaudiaConnectionConfig
     bool bSkipCertValidation = true;
 };
 
-// Typedef to avoid comma issues with macros
-typedef TMap<FString, FString> FAttributesMap;
-
-// C++ delegates (support lambdas) - used internally by FPanaudiaConnectionManager
-DECLARE_MULTICAST_DELEGATE_TwoParams(FOnConnectionStatusChangedNative, EPanaudiaConnectionStatus, const FString&);
-DECLARE_MULTICAST_DELEGATE_OneParam(FOnNodeStateReceivedNative, const FPanaudiaNodeState&);
-DECLARE_MULTICAST_DELEGATE_OneParam(FOnAttributesReceivedNative, const FAttributesMap&);
-
-// Blueprint-compatible dynamic delegates - used by UPanaudiaAudioComponent
+// Blueprint-compatible dynamic delegates
 DECLARE_DYNAMIC_MULTICAST_DELEGATE_TwoParams(FOnConnectionStatusChanged, EPanaudiaConnectionStatus, Status, const FString&, Message);
 DECLARE_DYNAMIC_MULTICAST_DELEGATE_OneParam(FOnNodeStateReceived, const FPanaudiaNodeState&, State);
 DECLARE_DYNAMIC_MULTICAST_DELEGATE_OneParam(FOnAttributesReceived, const FString&, JsonData);
+DECLARE_DYNAMIC_MULTICAST_DELEGATE_TwoParams(FOnDataTrackReceived, const FString&, TrackName, const TArray<uint8>&, Data);

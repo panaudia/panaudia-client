@@ -1,15 +1,17 @@
 
 #include "PanaudiaProceduralSound.h"
-#include "PanaudiaJitterBuffer.h"
+#include <panaudia/core.h>
 
 UPanaudiaProceduralSound::UPanaudiaProceduralSound(const FObjectInitializer& ObjectInitializer)
     : Super(ObjectInitializer)
 {
 }
 
-void UPanaudiaProceduralSound::SetJitterBuffer(FPanaudiaJitterBuffer* InJitterBuffer)
+void UPanaudiaProceduralSound::SetCore(panaudia::PanaudiaCore* InCore, panaudia::TrackHandle* InTrack)
 {
-    JitterBufferPtr.store(InJitterBuffer, std::memory_order_release);
+    // Store track first, then core (acquire reads core first, then track)
+    TrackPtr.store(InTrack, std::memory_order_release);
+    CorePtr.store(InCore, std::memory_order_release);
 }
 
 Audio::EAudioMixerStreamDataFormat::Type UPanaudiaProceduralSound::GetGeneratedPCMDataFormat() const
@@ -20,38 +22,37 @@ Audio::EAudioMixerStreamDataFormat::Type UPanaudiaProceduralSound::GetGeneratedP
 int32 UPanaudiaProceduralSound::OnGeneratePCMAudio(TArray<uint8>& OutAudio, int32 NumSamples)
 {
     // NumSamples = total interleaved samples (all channels), not per-channel
-    // OutAudio must be sized for NumSamples * sizeof(float)
     const int32 BytesNeeded = NumSamples * sizeof(float);
     OutAudio.SetNumZeroed(BytesNeeded); // Pre-zero: silence on underrun
 
-    // Debug: log first few calls and then periodically
     static int GenCount = 0;
     GenCount++;
 
-    FPanaudiaJitterBuffer* JB = JitterBufferPtr.load(std::memory_order_acquire);
+    panaudia::PanaudiaCore* C = CorePtr.load(std::memory_order_acquire);
+    panaudia::TrackHandle* T = TrackPtr.load(std::memory_order_acquire);
+
     if (GenCount <= 3 || GenCount % 500 == 0)
     {
-        printf("[Panaudia] OnGeneratePCMAudio #%d: NumSamples=%d NumChannels=%d JB=%p\n",
-            GenCount, NumSamples, NumChannels, (void*)JB);
+        printf("[Panaudia] OnGeneratePCMAudio #%d: NumSamples=%d NumChannels=%d Core=%p Track=%p\n",
+            GenCount, NumSamples, NumChannels, (void*)C, (void*)T);
     }
 
-    if (JB)
+    if (C && T)
     {
         float* OutPtr = reinterpret_cast<float*>(OutAudio.GetData());
         int32 PerChannelSamples = NumSamples / NumChannels;
-        bool GotAudio = JB->GetAudio(OutPtr, PerChannelSamples, NumChannels);
+        uint32_t FramesRead = C->read_audio(T, OutPtr, PerChannelSamples, 0);
 
         if (GenCount <= 5 || GenCount % 500 == 0)
         {
-            // Check peak amplitude
             float Peak = 0.0f;
             for (int32 i = 0; i < NumSamples; ++i)
             {
                 float Abs = OutPtr[i] > 0 ? OutPtr[i] : -OutPtr[i];
                 if (Abs > Peak) Peak = Abs;
             }
-            printf("[Panaudia] OnGeneratePCMAudio: got=%d perCh=%d peak=%.6f outBytes=%d\n",
-                GotAudio ? 1 : 0, PerChannelSamples, Peak, OutAudio.Num());
+            printf("[Panaudia] OnGeneratePCMAudio: framesRead=%u perCh=%d peak=%.6f outBytes=%d\n",
+                FramesRead, PerChannelSamples, Peak, OutAudio.Num());
         }
     }
 

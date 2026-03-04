@@ -6,14 +6,14 @@
 
 #include "PanaudiaProceduralSound.generated.h"
 
-class FPanaudiaJitterBuffer;
+namespace panaudia { class PanaudiaCore; struct TrackHandle; }
 
 /**
- * Custom procedural sound that reads directly from the jitter buffer
+ * Custom procedural sound that reads decoded audio from PanaudiaCore
  * on the audio render thread. No game-tick involvement in the audio path.
  *
  * - Returns float PCM (no int16 conversion)
- * - Uses std::atomic for the jitter buffer pointer (no mutex on audio thread for pointer check)
+ * - Uses std::atomic for the Core/Track pointers (no mutex on audio thread)
  * - Pre-zeros output buffer so underruns produce silence
  */
 UCLASS()
@@ -24,13 +24,14 @@ class PANAUDIA_API UPanaudiaProceduralSound : public USoundWaveProcedural
 public:
     UPanaudiaProceduralSound(const FObjectInitializer& ObjectInitializer);
 
-    /** Set the jitter buffer pointer. Call from game thread only. Set to nullptr before destroying the buffer. */
-    void SetJitterBuffer(FPanaudiaJitterBuffer* InJitterBuffer);
+    /** Set the Core and Track pointers. Call from game thread only. Set both to nullptr before destroying Core. */
+    void SetCore(panaudia::PanaudiaCore* InCore, panaudia::TrackHandle* InTrack);
 
     // USoundWaveProcedural overrides
     virtual Audio::EAudioMixerStreamDataFormat::Type GetGeneratedPCMDataFormat() const override;
     virtual int32 OnGeneratePCMAudio(TArray<uint8>& OutAudio, int32 NumSamples) override;
 
 private:
-    std::atomic<FPanaudiaJitterBuffer*> JitterBufferPtr{nullptr};
+    std::atomic<panaudia::PanaudiaCore*> CorePtr{nullptr};
+    std::atomic<panaudia::TrackHandle*> TrackPtr{nullptr};
 };

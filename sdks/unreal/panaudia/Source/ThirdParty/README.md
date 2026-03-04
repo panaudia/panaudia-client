@@ -1,38 +1,22 @@
 # Third Party Libraries
 
-This directory contains build scripts for external dependencies.
+All transport, codec, and buffering dependencies are provided by **libpanaudia-core**.
 
-## Building Libraries
-
-### libdatachannel
+## Building
 
 ```bash
-# macOS/Linux
-./build_libdatachannel.sh
-
-# Windows
-build_libdatachannel.bat
+./build_panaudia_core.sh
 ```
 
-### libopus``` bash
-# macOS/Linux
-./build_libopus.sh
+This clones (or updates) `libpanaudia-core` from GitHub, builds it, and copies the artifacts into `panaudia-core/`:
 
-# Windows
-build_libopus.bat
+```
+panaudia-core/
+├── include/panaudia/*.h          (public headers)
+└── lib/Mac/
+    ├── libpanaudia-core.a        (static — MOQ/QUIC session, jitter buffer)
+    ├── libopus.a                 (static — audio codec)
+    └── libmsquic.a               (static — QUIC transport)
 ```
 
-
-ThirdParty/
-├── libdatachannel/
-│   ├── include/
-│   └── build/
-│       ├── Mac/Release/libdatachannel.a
-│       ├── Win64/Release/datachannel.lib
-│       └── Linux/Release/libdatachannel.a
-└── opus/
-    ├── include/
-    └── build/
-        ├── Mac/Release/libopus.a
-        ├── Win64/Release/Release/opus.lib
-        └── Linux/Release/libopus.a
+The UE plugin's `panaudia.Build.cs` links all three libraries from this directory.

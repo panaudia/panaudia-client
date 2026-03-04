@@ -1,26 +1,16 @@
 #pragma once
 
 #include "Components/ActorComponent.h"
-#include "Components/AudioComponent.h"
-#include "Sound/SoundWaveProcedural.h"
-
-#include "AudioDevice.h"
-#include "AudioCapture.h"
-
-#include "Containers/Array.h"
-#include "Templates/SharedPointer.h"
-#include "HAL/Platform.h"
-
 #include "PanaudiaTypes.h"
 
 #include "PanaudiaAudioComponent.generated.h"
 
-class FPanaudiaConnectionManager;
-class UPanaudiaProceduralSound;
+struct FPanaudiaAudioComponentPrivate;
 
 /**
- * Actor component that handles audio capture, MOQ/QUIC connection, and binaural playback
- * This component should be attached to the player pawn/character
+ * Actor component that handles audio capture, MOQ/QUIC connection, and binaural playback.
+ * Uses libpanaudia-core for all transport, codec, and buffering.
+ * This component should be attached to the player pawn/character.
  */
 UCLASS(ClassGroup=(Audio), meta=(BlueprintSpawnableComponent))
 class PANAUDIA_API UPanaudiaAudioComponent : public UActorComponent
@@ -29,6 +19,7 @@ class PANAUDIA_API UPanaudiaAudioComponent : public UActorComponent
 
 public:
     UPanaudiaAudioComponent();
+    ~UPanaudiaAudioComponent();
 
     // Connection methods
     UFUNCTION(BlueprintCallable, Category = "Panaudia")
@@ -72,6 +63,11 @@ public:
 
     UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Panaudia")
     float OutputVolume = 1.0f;
+
+    /** When true, subscribes to state_output and attributes_output tracks from the server.
+     *  Set automatically by PanaudiaPresenceComponent; leave false if presence visualisation is not needed. */
+    UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Panaudia")
+    bool bEnablePresenceTracks = false;
 
     // Half-width of the UE world in cm that maps to the Panaudia 0-1 range.
     // UE origin maps to Panaudia center (0.5, 0.5, 0.5).
@@ -127,7 +123,11 @@ public:
     FOnConnectionStatusChanged OnConnectionStatusChanged;
 
     UPROPERTY(BlueprintAssignable, Category = "Panaudia")
-    FOnNodeStateReceived OnRemoteStateReceived;
+    FOnDataTrackReceived OnDataTrackReceived;
+
+    // Opaque pimpl — keeps audio capture and core.h out of this header.
+    // Struct defined in PanaudiaAudioComponent.cpp only.
+    FPanaudiaAudioComponentPrivate* P;
 
 protected:
     virtual void BeginPlay() override;
@@ -135,25 +135,18 @@ protected:
     virtual void TickComponent(float DeltaTime, ELevelTick TickType, FActorComponentTickFunction* ThisTickFunction) override;
 
 private:
-    // Connection manager
-    TSharedPtr<FPanaudiaConnectionManager> ConnectionManager;
-
-    // Audio capture
-    Audio::FAudioCapture AudioCapture;
-    bool bIsCapturing;
-    static constexpr int32 MaxCaptureFrames = 1024;
-    static constexpr int32 MaxCaptureChannels = 8;
-    float CaptureBuffer[MaxCaptureFrames * MaxCaptureChannels];
-
-    // Audio playback
+    // Audio playback (UObject pointers must be declared here for UPROPERTY)
     UPROPERTY()
-    UPanaudiaProceduralSound* ProceduralSound;
+    class UPanaudiaProceduralSound* ProceduralSound;
 
     UPROPERTY()
-    UAudioComponent* AudioComponent;
+    class UAudioComponent* AudioComp;
 
     // Timing
     float TimeSinceLastPositionUpdate;
+
+    // Node ID extracted from JWT (needed for state encoding)
+    FString NodeId;
 
     // Audio processing
     void StartAudioCapture();
@@ -162,11 +155,9 @@ private:
 
     void SetupAudioPlayback();
 
+    // Core configuration
+    void ConfigureCore(const FString& ServerURL, const FString& Ticket);
+
     // Position tracking
     void AutoUpdatePosition();
-
-    // Connection callbacks
-    void HandleConnectionStatusChanged(EPanaudiaConnectionStatus Status, const FString& Message);
-    void HandleNodeStateReceived(const FPanaudiaNodeState& State);
-    void HandleAttributesReceived(const FString& JsonData);
 };

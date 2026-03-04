@@ -29,9 +29,7 @@ public class Panaudia : ModuleRules
             "AudioCapture",
             "AudioCaptureCore",
             "Json",
-            "JsonUtilities",
-            "Sockets",
-            "Networking"
+            "JsonUtilities"
         });
 
         if (Target.bBuildEditor == true)
@@ -43,18 +41,12 @@ public class Panaudia : ModuleRules
 
         if (Target.Platform == UnrealTargetPlatform.Mac)
         {
-            // msquic (QUIC transport — shared library with quictls/OpenSSL bundled inside)
-            string MsQuicPath = Path.Combine(ThirdPartyPath, "msquic");
-            PublicIncludePaths.Add(Path.Combine(MsQuicPath, "include"));
-            string MsQuicDylib = Path.Combine(MsQuicPath, "build/Mac/Release/libmsquic.dylib");
-            PublicAdditionalLibraries.Add(MsQuicDylib);
-            PublicDelayLoadDLLs.Add(MsQuicDylib);
-            RuntimeDependencies.Add("$(BinaryOutputDir)/libmsquic.dylib", MsQuicDylib);
-
-            // libopus (audio codec — unchanged)
-            string LibOpusPath = Path.Combine(ThirdPartyPath, "opus");
-            PublicIncludePaths.Add(Path.Combine(LibOpusPath, "include"));
-            PublicAdditionalLibraries.Add(Path.Combine(LibOpusPath, "build/Mac/Release/libopus.a"));
+            // libpanaudia-core + dependencies (all static)
+            string CorePath = Path.Combine(ThirdPartyPath, "panaudia-core");
+            PublicIncludePaths.Add(Path.Combine(CorePath, "include"));
+            PublicAdditionalLibraries.Add(Path.Combine(CorePath, "lib/Mac/libpanaudia-core.a"));
+            PublicAdditionalLibraries.Add(Path.Combine(CorePath, "lib/Mac/libopus.a"));
+            PublicAdditionalLibraries.Add(Path.Combine(CorePath, "lib/Mac/libmsquic.a"));
 
             // macOS frameworks
             PublicFrameworks.AddRange(new string[]
@@ -62,8 +54,7 @@ public class Panaudia : ModuleRules
                 "CoreAudio",
                 "AudioToolbox",
                 "AudioUnit",
-                "Security",
-                "SystemConfiguration"
+                "Security"
             });
         }
         else if (Target.Platform == UnrealTargetPlatform.Win64)
