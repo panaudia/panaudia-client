@@ -57,7 +57,7 @@
     <button id="connect" onclick="(() => {
             const inner_colour = document.getElementById('inner-picker').value.slice(1);
             const outer_colour = document.getElementById('outer-picker').value.slice(1);
-            window.connectToSquareDirect('ws://localhost:8080/join', inner_colour,
+            window.connectToSquareDirect('wss://dev.panaudia.com:4433/join', inner_colour,
             outer_colour);
             })()">
         Enter

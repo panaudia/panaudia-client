@@ -1,1 +1,9 @@
 .DS_Store
+
+panaudia/Source/ThirdParty/libdatachannel/
+./Source/ThirdParty/opus/
+./Source/ThirdParty/openssl-1.1.1w/
+Intermediate
+
+# libpanaudia-core clone (created by build_panaudia_core.sh)
+panaudia/Source/ThirdParty/panaudia-core-src/

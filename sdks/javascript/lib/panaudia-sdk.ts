@@ -7,6 +7,8 @@ import {
     _moveAmbisonic,
     _mute,
     _unmute,
+    _muteMic,
+    _unmuteMic,
     _disconnect,
     _connect,
     _connectDirect,
@@ -91,6 +93,14 @@ export function mute(nodeId: String): void {
 
 export function unmute(nodeId: String): void {
     _unmute(nodeId)
+}
+
+export function muteMic(): void {
+    _muteMic()
+}
+
+export function unmuteMic(): void {
+    _unmuteMic()
 }
 
 export function moveAmbisonic(coordinates: AmbisonicCoordinates): void {
