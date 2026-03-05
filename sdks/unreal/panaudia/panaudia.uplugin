@@ -4,7 +4,7 @@
   "Version": 1,
   "VersionName": "1.0.0",
   "FriendlyName": "Panaudia Spatial Audio",
-  "Description": "WebRTC-based spatial audio plugin for real-time voice communication with binaural playback",
+  "Description": "Spatial audio plugin for real-time voice communication with binaural playback over MOQ/QUIC",
   "Category": "Audio",
   "CreatedBy": "Paul Harter",
   "CreatedByURL": "https://panaudia.com",
