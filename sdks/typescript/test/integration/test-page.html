@@ -1,0 +1,18 @@
+<!DOCTYPE html>
+<html>
+<head>
+  <title>Panaudia Integration Test</title>
+</head>
+<body>
+  <h1>Integration Test Page</h1>
+  <div id="status">loading</div>
+  <script type="module">
+    import { PanaudiaMoqClient } from '/dist/moq/index.js';
+
+    // Expose to Playwright's page.evaluate()
+    window.PanaudiaMoqClient = PanaudiaMoqClient;
+    window.__ready = true;
+    document.getElementById('status').textContent = 'ready';
+  </script>
+</body>
+</html>

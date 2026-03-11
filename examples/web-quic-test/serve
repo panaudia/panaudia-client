@@ -1,6 +1,0 @@
-#! /bin/sh
-
-BASEDIR="$( dirname "$0" )"
-cd "$BASEDIR"
-
-python3 server.py
