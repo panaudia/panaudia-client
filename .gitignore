@@ -7,3 +7,5 @@ Intermediate
 
 # libpanaudia-core clone (created by build_panaudia_core.sh)
 panaudia/Source/ThirdParty/panaudia-core-src/
+
+sdks/typescript/node_modules/
