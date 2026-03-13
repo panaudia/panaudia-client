@@ -165,7 +165,7 @@ class PanaudiaClient {
    * Accepts a PanaudiaPose — the same type returned by the coordinate converter functions.
    *
    * @example
-   * client.setPose(threejsToPanaudia({ position, rotation }));
+   * client.setPose(threejsToPanaudia(position, rotation));
    */
   setPose(pose) {
     const { x, y, z } = pose.position;

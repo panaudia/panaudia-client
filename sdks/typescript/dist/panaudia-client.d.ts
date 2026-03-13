@@ -77,7 +77,7 @@ export declare class PanaudiaClient {
      * Accepts a PanaudiaPose — the same type returned by the coordinate converter functions.
      *
      * @example
-     * client.setPose(threejsToPanaudia({ position, rotation }));
+     * client.setPose(threejsToPanaudia(position, rotation));
      */
     setPose(pose: PanaudiaPose): void;
     mute(entityId: string): Promise<void>;
