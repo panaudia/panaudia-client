@@ -71,7 +71,8 @@ export type ClientEventType =
   | 'error'
   | 'statechange'
   | 'entityState'
-  | 'attributes';
+  | 'attributes'
+  | 'attributesRemoved';
 
 /**
  * Client event handler

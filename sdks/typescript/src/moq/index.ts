@@ -202,7 +202,13 @@ export type { ControlMessage } from '../types.js';
 
 // Attributes subscription
 export { AttributesSubscriber } from './attributes-subscriber.js';
-export type { EntityAttributes, AttributesHandler } from './attributes-subscriber.js';
+export type { EntityAttributes, AttributesHandler, AttributesRemovedHandler } from './attributes-subscriber.js';
+
+// Cache (shared)
+export { CacheMap } from '../shared/cache-map.js';
+export type { CacheEntry, MergeResult, CacheChangeHandler } from '../shared/cache-map.js';
+export { isCacheEnvelope, decodeCacheOp, encodeCacheOp } from '../shared/cache-wire.js';
+export type { CacheOp } from '../shared/cache-wire.js';
 
 // State subscription and entity tracking
 export { StateSubscriber } from './state-subscriber.js';
