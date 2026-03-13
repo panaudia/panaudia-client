@@ -223,7 +223,6 @@ void UPanaudiaPresenceComponent::HandleStateData(const TArray<uint8>& Data)
     UEPos.Z = (PanZ - 0.5f) * 2.0f * WorldExtent;
 
     // Reverse rotation: negate yaw (Panaudia anti-clockwise -> UE clockwise), swap pitch/roll
-//    FRotator UERot(PanRoll, -PanYaw, PanPitch);
     FRotator UERot(PanPitch, -PanYaw, PanRoll);
 
 
@@ -232,7 +231,7 @@ void UPanaudiaPresenceComponent::HandleStateData(const TArray<uint8>& Data)
     if (!P)
     {
         // New participant — check if we already have attributes cached
-        FParticipantAttributes* CachedAttrs = PendingAttributes.Find(Uuid);
+        FString* CachedAttrs = PendingAttributes.Find(Uuid);
         if (CachedAttrs)
         {
             // We have both state and attributes — spawn now
@@ -280,7 +279,7 @@ void UPanaudiaPresenceComponent::HandleStateData(const TArray<uint8>& Data)
 // Spawn — called once we have both state and attributes
 // ============================================================================
 
-void UPanaudiaPresenceComponent::SpawnParticipant(const FString& Uuid, const FVector& Location, const FRotator& Rotation, float Volume, const FParticipantAttributes& Attributes)
+void UPanaudiaPresenceComponent::SpawnParticipant(const FString& Uuid, const FVector& Location, const FRotator& Rotation, float Volume, const FString& AttributesJson)
 {
     FRemoteParticipant NewP;
     NewP.Uuid = Uuid;
@@ -289,13 +288,13 @@ void UPanaudiaPresenceComponent::SpawnParticipant(const FString& Uuid, const FVe
     NewP.TargetLocation = Location;
     NewP.TargetRotation = Rotation;
     NewP.Volume = Volume;
-    NewP.Attributes = Attributes;
+    NewP.AttributesJson = AttributesJson;
 
     FParticipantSpawnInfo Info;
     Info.Uuid = Uuid;
     Info.Location = Location;
     Info.Rotation = Rotation;
-    Info.Attributes = Attributes;
+    Info.AttributesJson = AttributesJson;
 
     if (SpawnParticipantDelegate.IsBound())
     {
@@ -328,74 +327,17 @@ void UPanaudiaPresenceComponent::SpawnParticipant(const FString& Uuid, const FVe
     Participants.Add(Uuid, MoveTemp(NewP));
 
     OnParticipantJoined.Broadcast(Uuid, SpawnedActor);
-    UE_LOG(LogPanaudiaPresence, Log, TEXT("PanaudiaPresence: Spawned participant %s '%s' at (%.0f, %.0f, %.0f) colour=%s actor=%s"),
-        *Uuid, *Attributes.DisplayName,
+    UE_LOG(LogPanaudiaPresence, Log, TEXT("PanaudiaPresence: Spawned participant %s at (%.0f, %.0f, %.0f) actor=%s"),
+        *Uuid,
         Location.X, Location.Y, Location.Z,
-        *Attributes.Colour,
         SpawnedActor ? *SpawnedActor->GetName() : TEXT("NULL"));
 
     OnParticipantStateChanged.Broadcast(Uuid, Location, Rotation, Volume);
 }
 
 // ============================================================================
-// Attributes Parsing (JSON)
+// Attributes Handling (JSON — passed through as opaque string)
 // ============================================================================
-
-FParticipantAttributes UPanaudiaPresenceComponent::ParseAttributesFromJson(const TSharedPtr<FJsonObject>& JsonObject)
-{
-    FParticipantAttributes Attrs;
-
-    // Name is at top level
-    Attrs.DisplayName = JsonObject->GetStringField(TEXT("name"));
-
-    // Colours are in connection or ticket sub-object (connection takes priority).
-    // Matches the JS logic: try connection first, fall back to ticket if
-    // connection is missing or connection.colour is missing.
-    const TSharedPtr<FJsonObject>* SubObj = nullptr;
-    const TSharedPtr<FJsonObject>* ConnObj = nullptr;
-    const TSharedPtr<FJsonObject>* TicketObj = nullptr;
-
-    JsonObject->TryGetObjectField(TEXT("connection"), ConnObj);
-    JsonObject->TryGetObjectField(TEXT("ticket"), TicketObj);
-
-    if (ConnObj && (*ConnObj)->HasField(TEXT("colour")))
-    {
-        SubObj = ConnObj;
-    }
-    else if (TicketObj)
-    {
-        SubObj = TicketObj;
-    }
-
-    if (SubObj)
-    {
-        Attrs.Colour = (*SubObj)->GetStringField(TEXT("colour"));
-
-        FString OuterColour;
-        if ((*SubObj)->TryGetStringField(TEXT("outer_colour"), OuterColour))
-        {
-            Attrs.OuterColour = OuterColour;
-        }
-        else
-        {
-            Attrs.OuterColour = Attrs.Colour;  // default outer = inner
-        }
-
-        FString Mask;
-        if ((*SubObj)->TryGetStringField(TEXT("mask"), Mask))
-        {
-            Attrs.bWithMask = true;
-        }
-    }
-    else
-    {
-        // Default colours (matches JS: 0x2f56ee / 0x00bbff)
-        Attrs.Colour = TEXT("2f56ee");
-        Attrs.OuterColour = TEXT("00bbff");
-    }
-
-    return Attrs;
-}
 
 void UPanaudiaPresenceComponent::HandleAttributesData(const TArray<uint8>& Data)
 {
@@ -405,6 +347,7 @@ void UPanaudiaPresenceComponent::HandleAttributesData(const TArray<uint8>& Data)
     FUTF8ToTCHAR Conv(reinterpret_cast<const char*>(Data.GetData()), Data.Num());
     FString JsonString(Conv.Length(), Conv.Get());
 
+    // Extract UUID — the only field the plugin needs
     TSharedPtr<FJsonObject> JsonObject;
     TSharedRef<TJsonReader<>> Reader = TJsonReaderFactory<>::Create(JsonString);
     if (!FJsonSerializer::Deserialize(Reader, JsonObject) || !JsonObject.IsValid())
@@ -421,16 +364,13 @@ void UPanaudiaPresenceComponent::HandleAttributesData(const TArray<uint8>& Data)
         return;
     }
 
-    FParticipantAttributes Attrs = ParseAttributesFromJson(JsonObject);
-
-    UE_LOG(LogPanaudiaPresence, Log, TEXT("PanaudiaPresence: Attributes for %s: name='%s' colour=%s outer=%s mask=%d"),
-        *Uuid, *Attrs.DisplayName, *Attrs.Colour, *Attrs.OuterColour, Attrs.bWithMask ? 1 : 0);
+    UE_LOG(LogPanaudiaPresence, Log, TEXT("PanaudiaPresence: Attributes received for %s"), *Uuid);
 
     FRemoteParticipant* P = Participants.Find(Uuid);
     if (P)
     {
         // Update existing participant's attributes
-        P->Attributes = Attrs;
+        P->AttributesJson = JsonString;
     }
     else
     {
@@ -439,13 +379,13 @@ void UPanaudiaPresenceComponent::HandleAttributesData(const TArray<uint8>& Data)
         if (CachedState)
         {
             // We have both state and attributes — spawn now
-            SpawnParticipant(Uuid, CachedState->Location, CachedState->Rotation, CachedState->Volume, Attrs);
+            SpawnParticipant(Uuid, CachedState->Location, CachedState->Rotation, CachedState->Volume, JsonString);
             PendingState.Remove(Uuid);
         }
         else
         {
             // No state yet — cache attributes and wait
-            PendingAttributes.Add(Uuid, Attrs);
+            PendingAttributes.Add(Uuid, JsonString);
             UE_LOG(LogPanaudiaPresence, Log, TEXT("PanaudiaPresence: Attributes cached for %s (waiting for state)"), *Uuid);
         }
     }

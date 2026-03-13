@@ -5,22 +5,13 @@
 
 class UPanaudiaAudioComponent;
 
-// Attributes parsed from the attributes JSON for a participant
-struct FParticipantAttributes
-{
-    FString DisplayName;
-    FString Colour;        // 6-char hex (e.g. "00b3ff"), may be empty
-    FString OuterColour;   // 6-char hex, may be empty
-    bool bWithMask = false;
-};
-
 // Spawn info passed to the spawn delegate
 struct FParticipantSpawnInfo
 {
     FString Uuid;
     FVector Location;
     FRotator Rotation;
-    FParticipantAttributes Attributes;
+    FString AttributesJson;  // Raw JSON string — game code parses application-specific fields
 };
 
 // Spawn delegate — host returns the actor to use for a new participant
@@ -114,14 +105,14 @@ private:
         FVector TargetLocation;   // latest received position
         FRotator TargetRotation;  // latest received rotation
         float Volume = 1.0f;
-        FParticipantAttributes Attributes;
+        FString AttributesJson;
         AActor* Actor = nullptr;
     };
 
     TMap<FString, FRemoteParticipant> Participants;
 
-    // Attributes received before the first state update (pre-spawn cache)
-    TMap<FString, FParticipantAttributes> PendingAttributes;
+    // Attributes JSON received before the first state update (pre-spawn cache)
+    TMap<FString, FString> PendingAttributes;
 
     // State received before the first attributes update (pre-spawn cache)
     struct FPendingStateData
@@ -139,10 +130,7 @@ private:
     void HandleAttributesData(const TArray<uint8>& Data);
 
     // Spawn a participant once we have both state and attributes
-    void SpawnParticipant(const FString& Uuid, const FVector& Location, const FRotator& Rotation, float Volume, const FParticipantAttributes& Attributes);
-
-    // Parse colour/outer_colour from a JSON sub-object (connection or ticket)
-    static FParticipantAttributes ParseAttributesFromJson(const TSharedPtr<FJsonObject>& JsonObject);
+    void SpawnParticipant(const FString& Uuid, const FVector& Location, const FRotator& Rotation, float Volume, const FString& AttributesJson);
 
     AActor* SpawnDefaultActor(const FVector& Location);
 

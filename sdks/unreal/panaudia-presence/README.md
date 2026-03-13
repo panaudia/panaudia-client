@@ -8,7 +8,7 @@ Companion plugin for **Panaudia** that visualises remote participants in the Unr
 The Panaudia audio plugin handles transport and audio. It deliberately knows nothing about participant semantics — that's game logic. PanaudiaPresence bridges the gap:
 
 - Parses **NodeInfo3** binary state messages (UUID, position, rotation, volume, gone flag)
-- Parses **attributes** JSON (name, colours, subspaces)
+- Passes **attributes** JSON through as an opaque string — game code parses application-specific fields
 - Waits for both state and attributes before spawning (no half-initialised actors)
 - Smooth interpolation of participant movement
 - Destroys actors when participants leave (gone flag)
@@ -71,8 +71,17 @@ Bind `SpawnParticipantDelegate` to control what actor is created:
 PanaudiaPresence->SpawnParticipantDelegate.BindLambda(
     [this](const FParticipantSpawnInfo& Info) -> AActor*
     {
-        // Info.Uuid, Info.Location, Info.Rotation, Info.Attributes
-        // Info.Attributes.DisplayName, .Colour, .OuterColour, .bWithMask
+        // Info.Uuid, Info.Location, Info.Rotation
+        // Info.AttributesJson — raw JSON string, parse as needed for your app
+
+        // Example: parse colours from the JSON
+        TSharedPtr<FJsonObject> Json;
+        TSharedRef<TJsonReader<>> Reader = TJsonReaderFactory<>::Create(Info.AttributesJson);
+        if (FJsonSerializer::Deserialize(Reader, Json) && Json.IsValid())
+        {
+            FString Name = Json->GetStringField(TEXT("name"));
+            // Colours may be in "connection" or "ticket" sub-objects
+        }
 
         AActor* Actor = GetWorld()->SpawnActor<AActor>(...);
         // Set up meshes, materials, etc.
@@ -123,17 +132,17 @@ All delegates fire on the game thread.
 
 ### Attributes JSON
 
+The plugin extracts only the `uuid` field from the attributes JSON (for participant identification and the two-stage spawn logic). The full JSON string is passed through to game code via `FParticipantSpawnInfo::AttributesJson`. Application-specific fields (name, colours, masks, etc.) are the game's responsibility to parse.
+
+Example attributes JSON:
 ```json
 {
   "uuid": "550e8400-e29b-41d4-...",
   "name": "Player1",
-  "ticket": { "colour": "2f56ee", "outer_colour": "00bbff", "mask": "face" },
-  "connection": { "colour": "ff0000" },
-  "subspaces": ["uuid1", "uuid2"]
+  "ticket": { "inner_colour": "2f56ee", "outer_colour": "00bbff", "mask": "face" },
+  "connection": { "inner_colour": "ff0000" }
 }
 ```
-
-Colours are parsed from either the `connection` or `ticket` sub-object (connection takes priority). If a `mask` field is present, `bWithMask` is set to true.
 
 ## Log Category
 

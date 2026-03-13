@@ -1,6 +1,6 @@
 {
   "name": "@panaudia/client",
-  "version": "1.0.0",
+  "version": "1.0.1",
   "description": "Panaudia client for spatial audio streaming — MOQ and WebRTC transports",
   "publishConfig": { "access": "public" },
   "type": "module",
