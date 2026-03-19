@@ -69,6 +69,47 @@ const client = new PanaudiaClient({
 });
 ```
 
+### Microphone Selection
+
+Bluetooth microphones force stereo audio to collapse to mono (the HFP/SCO profile replaces A2DP). The client detects this and refuses to connect with a Bluetooth default mic — instead throwing a `BluetoothMicDefaultError` that includes the full device list so you can show a mic picker.
+
+```typescript
+import { PanaudiaClient, BluetoothMicDefaultError } from '@panaudia/client';
+
+const client = new PanaudiaClient({ serverUrl, ticket });
+
+try {
+  await client.connect();
+} catch (err) {
+  if (err instanceof BluetoothMicDefaultError) {
+    // Default mic is Bluetooth — show a picker with the available devices
+    console.log('Please select a microphone:', err.availableDevices);
+    // err.availableDevices → [{ deviceId, label, type: 'bluetooth'|'usb'|'builtin'|'unknown' }, ...]
+
+    // After the user picks one, reconnect with their choice:
+    const client2 = new PanaudiaClient({ serverUrl, ticket, microphoneId: chosenDeviceId });
+    await client2.connect();
+  }
+}
+
+// If the user explicitly chooses a Bluetooth mic, it connects but emits a warning
+client.on('warning', (w) => {
+  if (w.code === 'BLUETOOTH_MIC') {
+    showWarningBanner(w.message);
+  }
+});
+```
+
+You can also proactively show a mic picker before connecting:
+
+```typescript
+// List all mics with type classification
+const mics = await PanaudiaClient.listMicrophones();
+
+// Or get the recommended non-Bluetooth mic for pre-selection
+const recommended = await PanaudiaClient.getRecommendedMicrophone();
+```
+
 ### Local Development (no gateway)
 
 ```typescript

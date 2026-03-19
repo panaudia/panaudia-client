@@ -7,6 +7,7 @@
 
 import { MoqClientError } from './errors.js';
 import { AudioCaptureEncoder, isWebCodecsOpusSupported, type OpusFrame } from './opus-encoder.js';
+import type { MicrophoneType } from '../shared/microphone-selection.js';
 
 /**
  * Audio publisher configuration
@@ -92,6 +93,28 @@ export class AudioNotSupportedError extends MoqClientError {
   constructor(message: string) {
     super(message, 'AUDIO_NOT_SUPPORTED');
     this.name = 'AudioNotSupportedError';
+  }
+}
+
+/**
+ * Error thrown when the default microphone is Bluetooth and no explicit device was chosen.
+ * The `availableDevices` field contains all mics with their classification so the app
+ * can immediately show a mic picker.
+ */
+export class BluetoothMicDefaultError extends MoqClientError {
+  public readonly availableDevices: Array<{ deviceId: string; label: string; type: MicrophoneType }>;
+
+  constructor(
+    defaultLabel: string,
+    availableDevices: Array<{ deviceId: string; label: string; type: MicrophoneType }>,
+  ) {
+    super(
+      `Default microphone is Bluetooth (${defaultLabel}). Please select a non-Bluetooth microphone to preserve stereo audio.`,
+      'BLUETOOTH_MIC_DEFAULT',
+      { defaultLabel, availableDevices },
+    );
+    this.name = 'BluetoothMicDefaultError';
+    this.availableDevices = availableDevices;
   }
 }
 
@@ -239,6 +262,11 @@ export class AudioPublisher {
     this.setState(AudioPublisherState.REQUESTING_PERMISSION);
 
     try {
+      const deviceId = this.config.deviceId;
+
+      // Bluetooth mic check is handled by PanaudiaClient.connect() before
+      // transport setup, so both MOQ and WebRTC behave identically.
+
       // Request microphone access
       this.mediaStream = await navigator.mediaDevices.getUserMedia({
         audio: {
@@ -248,7 +276,7 @@ export class AudioPublisher {
           noiseSuppression: this.config.noiseSuppression,
           autoGainControl: this.config.autoGainControl,
           latency: { ideal: 0.005 },
-          ...(this.config.deviceId ? { deviceId: { exact: this.config.deviceId } } : {}),
+          ...(deviceId ? { deviceId: { exact: deviceId } } : {}),
         } as MediaTrackConstraints,
         video: false,
       });

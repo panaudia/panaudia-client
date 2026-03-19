@@ -1,4 +1,4 @@
-import { ConnectionState, EntityInfo3, ControlMessage, EntityState, EntityAttributes, Position, Rotation } from './types.js';
+import { ConnectionState, EntityInfo3, ControlMessage, EntityState, EntityAttributes, WarningEvent, Position, Rotation } from './types.js';
 /**
  * Configuration passed to a Transport when connecting.
  */
@@ -74,5 +74,7 @@ export interface Transport {
     onConnectionStateChange(handler: (state: ConnectionState) => void): void;
     /** Register handler for errors. */
     onError(handler: (error: Error) => void): void;
+    /** Register handler for warnings (non-fatal issues like Bluetooth mic detected). */
+    onWarning(handler: (warning: WarningEvent) => void): void;
 }
 //# sourceMappingURL=transport.d.ts.map

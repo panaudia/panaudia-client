@@ -1,4 +1,5 @@
 import { MoqClientError } from './errors.js';
+import { MicrophoneType } from '../shared/microphone-selection.js';
 /**
  * Audio publisher configuration
  */
@@ -59,6 +60,23 @@ export declare class AudioEncodingError extends MoqClientError {
 }
 export declare class AudioNotSupportedError extends MoqClientError {
     constructor(message: string);
+}
+/**
+ * Error thrown when the default microphone is Bluetooth and no explicit device was chosen.
+ * The `availableDevices` field contains all mics with their classification so the app
+ * can immediately show a mic picker.
+ */
+export declare class BluetoothMicDefaultError extends MoqClientError {
+    readonly availableDevices: Array<{
+        deviceId: string;
+        label: string;
+        type: MicrophoneType;
+    }>;
+    constructor(defaultLabel: string, availableDevices: Array<{
+        deviceId: string;
+        label: string;
+        type: MicrophoneType;
+    }>);
 }
 /**
  * Check if Opus encoding is supported via MediaRecorder

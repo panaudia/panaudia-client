@@ -27,6 +27,7 @@ class WebRtcTransport {
     __publicField(this, "attributesHandlers", []);
     __publicField(this, "connectionStateHandlers", []);
     __publicField(this, "errorHandlers", []);
+    __publicField(this, "warningHandlers", []);
   }
   async connect(config) {
     this.entityId = config.entityId ?? extractEntityIdFromJwt(config.ticket);
@@ -165,6 +166,9 @@ class WebRtcTransport {
   }
   onError(handler) {
     this.errorHandlers.push(handler);
+  }
+  onWarning(handler) {
+    this.warningHandlers.push(handler);
   }
   // ── Internal ──────────────────────────────────────────────────────────
   setState(state) {

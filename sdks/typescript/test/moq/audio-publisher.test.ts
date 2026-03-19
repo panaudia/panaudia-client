@@ -78,13 +78,18 @@ function setupStandardMocks() {
   vi.stubGlobal('MediaRecorder', MockMediaRecorder);
 
   const mockGetUserMedia = vi.fn().mockResolvedValue(new MockMediaStream());
+  const mockEnumerateDevices = vi.fn().mockResolvedValue([
+    { kind: 'audioinput', deviceId: 'default', label: 'Default', groupId: '1' },
+    { kind: 'audioinput', deviceId: 'builtin-1', label: 'Built-in Microphone', groupId: '2' },
+  ]);
   vi.stubGlobal('navigator', {
     mediaDevices: {
       getUserMedia: mockGetUserMedia,
+      enumerateDevices: mockEnumerateDevices,
     },
   });
 
-  return { MockMediaRecorder, mockGetUserMedia };
+  return { MockMediaRecorder, mockGetUserMedia, mockEnumerateDevices };
 }
 
 describe('Audio Publisher', () => {
@@ -231,7 +236,12 @@ describe('Audio Publisher', () => {
         const error = new DOMException('Permission denied', 'NotAllowedError');
         const mockGetUserMedia = vi.fn().mockRejectedValue(error);
         vi.stubGlobal('navigator', {
-          mediaDevices: { getUserMedia: mockGetUserMedia },
+          mediaDevices: {
+            getUserMedia: mockGetUserMedia,
+            enumerateDevices: vi.fn().mockResolvedValue([
+              { kind: 'audioinput', deviceId: 'default', label: 'Default', groupId: '1' },
+            ]),
+          },
         });
 
         const publisher = new AudioPublisher();
@@ -244,7 +254,12 @@ describe('Audio Publisher', () => {
         const error = new DOMException('No microphone', 'NotFoundError');
         const mockGetUserMedia = vi.fn().mockRejectedValue(error);
         vi.stubGlobal('navigator', {
-          mediaDevices: { getUserMedia: mockGetUserMedia },
+          mediaDevices: {
+            getUserMedia: mockGetUserMedia,
+            enumerateDevices: vi.fn().mockResolvedValue([
+              { kind: 'audioinput', deviceId: 'default', label: 'Default', groupId: '1' },
+            ]),
+          },
         });
 
         const publisher = new AudioPublisher();
@@ -256,7 +271,12 @@ describe('Audio Publisher', () => {
         const error = new DOMException('Device in use', 'NotReadableError');
         const mockGetUserMedia = vi.fn().mockRejectedValue(error);
         vi.stubGlobal('navigator', {
-          mediaDevices: { getUserMedia: mockGetUserMedia },
+          mediaDevices: {
+            getUserMedia: mockGetUserMedia,
+            enumerateDevices: vi.fn().mockResolvedValue([
+              { kind: 'audioinput', deviceId: 'default', label: 'Default', groupId: '1' },
+            ]),
+          },
         });
 
         const publisher = new AudioPublisher();
@@ -395,7 +415,12 @@ describe('Audio Publisher', () => {
         const mockStream = new MockMediaStream();
         const mockGetUserMedia = vi.fn().mockResolvedValue(mockStream);
         vi.stubGlobal('navigator', {
-          mediaDevices: { getUserMedia: mockGetUserMedia },
+          mediaDevices: {
+            getUserMedia: mockGetUserMedia,
+            enumerateDevices: vi.fn().mockResolvedValue([
+              { kind: 'audioinput', deviceId: 'default', label: 'Default', groupId: '1' },
+            ]),
+          },
         });
 
         const publisher = new AudioPublisher();

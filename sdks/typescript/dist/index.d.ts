@@ -20,11 +20,14 @@
  *
  * @packageDocumentation
  */
-export type { Vec3, Position, Rotation, EntityInfo3, ClientEventType, ClientEventHandler, ErrorEvent, StateChangeEvent, EntityState, EntityAttributes, ControlMessage, } from './types.js';
+export type { Vec3, Position, Rotation, EntityInfo3, ClientEventType, ClientEventHandler, ErrorEvent, WarningEvent, StateChangeEvent, EntityState, EntityAttributes, ControlMessage, } from './types.js';
 export { ConnectionState } from './types.js';
 export { threejsToPanaudia, panaudiaToThreejs, babylonToPanaudia, panaudiaToBabylon, aframeToPanaudia, panaudiaToAframe, playcanvasToPanaudia, panaudiaToPlaycanvas, unityToPanaudia, panaudiaToUnity, unrealToPanaudia, panaudiaToUnreal, pixiToPanaudia, panaudiaToPixi, webglToAmbisonicPosition, ambisonicToWebglPosition, webglToAmbisonicRotation, ambisonicToWebglRotation, } from './shared/coordinates.js';
 export type { PanaudiaPose, Vec3Pose, FRotator, UnrealPose, Vec2, PixiPose, } from './shared/coordinates.js';
 export { ENTITY_INFO3_SIZE, uuidToBytes, bytesToUuid, entityInfo3ToBytes, entityInfo3FromBytes, createEntityInfo3, isValidUuid, } from './shared/encoding.js';
+export { selectBestMicrophone, classifyByLabel } from './shared/microphone-selection.js';
+export type { MicrophoneType, ClassifiedMicrophone, MicrophoneSelectionResult, } from './shared/microphone-selection.js';
+export { BluetoothMicDefaultError } from './moq/audio-publisher.js';
 export { isWebTransportSupported, getWebTransportSupport } from './moq/connection.js';
 export { resolveServer } from './gateway.js';
 export type { ResolveServerOptions } from './gateway.js';

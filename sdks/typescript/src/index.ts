@@ -30,6 +30,7 @@ export type {
   ClientEventType,
   ClientEventHandler,
   ErrorEvent,
+  WarningEvent,
   StateChangeEvent,
   EntityState,
   EntityAttributes,
@@ -80,6 +81,15 @@ export {
   createEntityInfo3,
   isValidUuid,
 } from './shared/encoding.js';
+
+// Microphone selection
+export { selectBestMicrophone, classifyByLabel } from './shared/microphone-selection.js';
+export type {
+  MicrophoneType,
+  ClassifiedMicrophone,
+  MicrophoneSelectionResult,
+} from './shared/microphone-selection.js';
+export { BluetoothMicDefaultError } from './moq/audio-publisher.js';
 
 // Transport support detection
 export { isWebTransportSupported, getWebTransportSupport } from './moq/connection.js';
