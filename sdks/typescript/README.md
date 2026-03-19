@@ -23,7 +23,8 @@ const client = new PanaudiaClient({ serverUrl, ticket });
 await client.connect();
 
 // Set spatial pose (Panaudia coordinates: position 0-1, rotation in degrees)
-client.setPose({ position: { x: 0.5, y: 0.5, z: 0.5 }, rotation: { yaw: 90, pitch: 0, roll: 0 } });
+client.setPose({ position: { x: 0.5, y: 0.5, z: 0.5 },
+    rotation: { yaw: 90, pitch: 0, roll: 0 } });
 
 // Listen for other entities
 client.on('entityState', (state) => {
