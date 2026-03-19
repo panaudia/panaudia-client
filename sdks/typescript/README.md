@@ -13,18 +13,20 @@ npm install @panaudia/client
 ### Production (with gateway)
 
 ```typescript
-import { PanaudiaClient, resolveServer } from '@panaudia/client';
+import {PanaudiaClient, resolveServer} from '@panaudia/client';
 
 // Resolve server URL via gateway
 const serverUrl = await resolveServer(ticket);
 
 // Create and connect (audio starts automatically)
-const client = new PanaudiaClient({ serverUrl, ticket });
+const client = new PanaudiaClient({serverUrl, ticket});
 await client.connect();
 
 // Set spatial pose (Panaudia coordinates: position 0-1, rotation in degrees)
-client.setPose({ position: { x: 0.5, y: 0.5, z: 0.5 },
-    rotation: { yaw: 90, pitch: 0, roll: 0 } });
+client.setPose({
+    position: {x: 0.5, y: 0.5, z: 0.5},
+    rotation: {yaw: 90, pitch: 0, roll: 0}
+});
 
 // Listen for other entities
 client.on('entityState', (state) => {
