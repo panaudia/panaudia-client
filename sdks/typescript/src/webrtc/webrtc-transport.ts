@@ -14,7 +14,8 @@ type EventHandler<T> = (event: T) => void;
 function extractEntityIdFromJwt(token: string): string {
   const parts = token.split('.');
   if (parts.length !== 3) throw new Error('Invalid JWT format');
-  const payload = JSON.parse(atob(parts[1]!));
+  const b64 = parts[1]!.replace(/-/g, '+').replace(/_/g, '/');
+  const payload = JSON.parse(atob(b64));
   if (!payload.jti) throw new Error('JWT missing jti (entity ID)');
   return payload.jti;
 }
