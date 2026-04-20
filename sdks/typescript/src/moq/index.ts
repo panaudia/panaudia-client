@@ -70,6 +70,7 @@ export type {
   ClientEventType,
   ClientEventHandler,
   ErrorEvent,
+  WarningEvent,
   StateChangeEvent,
 } from '../types.js';
 
@@ -165,6 +166,7 @@ export {
   AudioPermissionError,
   AudioEncodingError,
   AudioNotSupportedError,
+  BluetoothMicDefaultError,
 } from './audio-publisher.js';
 
 export type {

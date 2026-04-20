@@ -25,14 +25,14 @@ export { MoqConnection, isWebTransportSupported, getWebTransportSupport } from '
 export type { DatagramHandler } from './connection.js';
 export { threejsToPanaudia, panaudiaToThreejs, babylonToPanaudia, panaudiaToBabylon, aframeToPanaudia, panaudiaToAframe, playcanvasToPanaudia, panaudiaToPlaycanvas, unityToPanaudia, panaudiaToUnity, unrealToPanaudia, panaudiaToUnreal, pixiToPanaudia, panaudiaToPixi, webglToAmbisonicPosition, ambisonicToWebglPosition, webglToAmbisonicRotation, ambisonicToWebglRotation, } from '../shared/coordinates.js';
 export type { Vec3, PanaudiaPose, Vec3Pose, FRotator, UnrealPose, Vec2, PixiPose, } from '../shared/coordinates.js';
-export type { Position, Rotation, EntityInfo3, ClientEventType, ClientEventHandler, ErrorEvent, StateChangeEvent, } from '../types.js';
+export type { Position, Rotation, EntityInfo3, ClientEventType, ClientEventHandler, ErrorEvent, WarningEvent, StateChangeEvent, } from '../types.js';
 export { ConnectionState } from '../types.js';
 export type { PanaudiaConfig, WebTransportOptions, MoqTrack, MoqObject, MoqSubscription, MoqAnnouncement, } from './types.js';
 export { MoqMessageType, MoqRole, MoqFilterType, MoqForwardingPreference, MoqErrorCode, PanaudiaTrackType, generateTrackNamespace, } from './types.js';
 export { encodeVarint, decodeVarint, encodeString, decodeString, encodeBytes, decodeBytes, MessageBuilder, buildClientSetup, buildSubscribe, buildAnnounce, buildUnsubscribe, buildUnannounce, buildObjectDatagram, parseMessageType, parseServerSetup, parseSubscribeOk, parseSubscribeError, parseAnnounceOk, parseAnnounceError, parseObjectDatagram, MOQ_TRANSPORT_VERSION, } from './moq-transport.js';
 export type { ParsedServerSetup, ParsedSubscribeOk, ParsedSubscribeError, ParsedAnnounceOk, ParsedAnnounceError, ParsedObjectDatagram, } from './moq-transport.js';
 export { MoqClientError, WebTransportNotSupportedError, ConnectionError, AuthenticationError, JwtParseError, ProtocolError, SubscriptionError, AnnouncementError, InvalidStateError, TimeoutError, getMoqErrorMessage, wrapError, } from './errors.js';
-export { AudioPublisher, AudioPublisherState, isOpusSupported, getBestOpusMimeType, getAudioCapabilities, AudioPermissionError, AudioEncodingError, AudioNotSupportedError, } from './audio-publisher.js';
+export { AudioPublisher, AudioPublisherState, isOpusSupported, getBestOpusMimeType, getAudioCapabilities, AudioPermissionError, AudioEncodingError, AudioNotSupportedError, BluetoothMicDefaultError, } from './audio-publisher.js';
 export type { AudioPublisherConfig, AudioFrame, AudioFrameHandler, } from './audio-publisher.js';
 export { TrackPublisher, AudioTrackPublisher, StateTrackPublisher, } from './track-publisher.js';
 export type { TrackPublisherConfig, TrackPublisherStats, } from './track-publisher.js';

@@ -13,17 +13,20 @@ npm install @panaudia/client
 ### Production (with gateway)
 
 ```typescript
-import { PanaudiaClient, resolveServer } from '@panaudia/client';
+import {PanaudiaClient, resolveServer} from '@panaudia/client';
 
 // Resolve server URL via gateway
 const serverUrl = await resolveServer(ticket);
 
 // Create and connect (audio starts automatically)
-const client = new PanaudiaClient({ serverUrl, ticket });
+const client = new PanaudiaClient({serverUrl, ticket});
 await client.connect();
 
 // Set spatial pose (Panaudia coordinates: position 0-1, rotation in degrees)
-client.setPose({ position: { x: 0.5, y: 0.5, z: 0.5 }, rotation: { yaw: 90, pitch: 0, roll: 0 } });
+client.setPose({
+    position: {x: 0.5, y: 0.5, z: 0.5},
+    rotation: {yaw: 90, pitch: 0, roll: 0}
+});
 
 // Listen for other entities
 client.on('entityState', (state) => {
@@ -67,6 +70,47 @@ const client = new PanaudiaClient({
   ticket,
   worldBounds: { min: -100, max: 100 },
 });
+```
+
+### Microphone Selection
+
+Bluetooth microphones force stereo audio to collapse to mono (the HFP/SCO profile replaces A2DP). The client detects this and refuses to connect with a Bluetooth default mic — instead throwing a `BluetoothMicDefaultError` that includes the full device list so you can show a mic picker.
+
+```typescript
+import { PanaudiaClient, BluetoothMicDefaultError } from '@panaudia/client';
+
+const client = new PanaudiaClient({ serverUrl, ticket });
+
+try {
+  await client.connect();
+} catch (err) {
+  if (err instanceof BluetoothMicDefaultError) {
+    // Default mic is Bluetooth — show a picker with the available devices
+    console.log('Please select a microphone:', err.availableDevices);
+    // err.availableDevices → [{ deviceId, label, type: 'bluetooth'|'usb'|'builtin'|'unknown' }, ...]
+
+    // After the user picks one, reconnect with their choice:
+    const client2 = new PanaudiaClient({ serverUrl, ticket, microphoneId: chosenDeviceId });
+    await client2.connect();
+  }
+}
+
+// If the user explicitly chooses a Bluetooth mic, it connects but emits a warning
+client.on('warning', (w) => {
+  if (w.code === 'BLUETOOTH_MIC') {
+    showWarningBanner(w.message);
+  }
+});
+```
+
+You can also proactively show a mic picker before connecting:
+
+```typescript
+// List all mics with type classification
+const mics = await PanaudiaClient.listMicrophones();
+
+// Or get the recommended non-Bluetooth mic for pre-selection
+const recommended = await PanaudiaClient.getRecommendedMicrophone();
 ```
 
 ### Local Development (no gateway)

@@ -4,7 +4,7 @@
 
 import type { Transport, TransportConfig, AudioCaptureConfig, AudioPlaybackConfig } from '../transport.js';
 import { ConnectionState } from '../types.js';
-import type { EntityInfo3, ControlMessage, EntityState, EntityAttributes, ClientEventType } from '../types.js';
+import type { EntityInfo3, ControlMessage, EntityState, EntityAttributes, WarningEvent, ClientEventType } from '../types.js';
 import { PanaudiaMoqClient } from './client.js';
 import type { PanaudiaConfig } from './types.js';
 
@@ -166,6 +166,10 @@ export class MoqTransportAdapter implements Transport {
     this.registerHandler('error', (event: { code: string; message: string }) => {
       handler(new Error(event.message));
     });
+  }
+
+  onWarning(handler: (warning: WarningEvent) => void): void {
+    this.registerHandler('warning', handler);
   }
 
   // eslint-disable-next-line @typescript-eslint/no-explicit-any

@@ -27,6 +27,7 @@ const mockTransport: Transport = {
   onAttributes: vi.fn(),
   onConnectionStateChange: vi.fn(),
   onError: vi.fn(),
+  onWarning: vi.fn(),
   setVolume: vi.fn(),
   getVolume: vi.fn().mockReturnValue(1),
 };

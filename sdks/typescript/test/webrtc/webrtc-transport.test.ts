@@ -117,11 +117,16 @@ function installGlobalMocks() {
   // Mock navigator.mediaDevices.getUserMedia for mic capture during connect
   const mockTrack = { kind: 'audio', enabled: true, stop: vi.fn() };
   const mockStream = {
+    getTracks: () => [mockTrack],
     getAudioTracks: () => [mockTrack],
   };
   vi.stubGlobal('navigator', {
     mediaDevices: {
       getUserMedia: vi.fn().mockResolvedValue(mockStream),
+      enumerateDevices: vi.fn().mockResolvedValue([
+        { kind: 'audioinput', deviceId: 'default', label: 'Default', groupId: '1' },
+        { kind: 'audioinput', deviceId: 'builtin-1', label: 'Built-in Microphone', groupId: '2' },
+      ]),
     },
   });
 }
@@ -139,11 +144,18 @@ const testConfig: TransportConfig = {
   initialRotation: { yaw: 0, pitch: 0, roll: 0 },
 };
 
+// Flush microtasks — needed because mic selection does async work before WebSocket opens
+async function flushMicrotasks() {
+  for (let i = 0; i < 10; i++) {
+    await new Promise(r => setTimeout(r, 1));
+  }
+}
+
 // Helper: connect and complete the SDP handshake
 async function connectAndHandshake(transport: WebRtcTransport) {
   const connectPromise = transport.connect(testConfig);
-  // Wait for WebSocket to fire onopen
-  await new Promise(r => setTimeout(r, 10));
+  // Wait for mic selection + WebSocket to fire onopen
+  await flushMicrotasks();
   // Server sends offer
   lastWs._receive({ event: 'offer', data: JSON.stringify({ type: 'offer', sdp: 'v=0\r\n' }) });
   await connectPromise;
@@ -221,12 +233,16 @@ describe('WebRtcTransport', () => {
       // Simulate getUserMedia
       const mockTrack = { enabled: true, stop: vi.fn() } as unknown as MediaStreamTrack;
       const mockStream = {
+        getTracks: () => [mockTrack],
         getAudioTracks: () => [mockTrack],
       } as unknown as MediaStream;
 
       vi.stubGlobal('navigator', {
         mediaDevices: {
           getUserMedia: vi.fn().mockResolvedValue(mockStream),
+          enumerateDevices: vi.fn().mockResolvedValue([
+            { kind: 'audioinput', deviceId: 'default', label: 'Default', groupId: '1' },
+          ]),
         },
       });
 

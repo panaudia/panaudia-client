@@ -38,7 +38,8 @@ new PanaudiaClient({
 
 | Method | Description |
 |--------|-------------|
-| `PanaudiaClient.listMicrophones()` | List available microphone devices. Returns `MicrophoneInfo[]`. Labels may be empty until mic permission is granted. |
+| `PanaudiaClient.listMicrophones()` | List available microphone devices with type classification. Requests mic permission if not already granted. Returns `MicrophoneInfo[]`. |
+| `PanaudiaClient.getRecommendedMicrophone()` | Select the best non-Bluetooth microphone. Uses label heuristics and sample-rate probing. Returns `MicrophoneSelectionResult`. Use to pre-select a device in a mic picker UI. |
 
 ### Connection
 
@@ -53,6 +54,8 @@ new PanaudiaClient({
 ### Audio
 
 Audio capture and playback start automatically on `connect()`.
+
+**Bluetooth mic handling:** If no `microphoneId` is set and the system default mic is Bluetooth, `connect()` throws a `BluetoothMicDefaultError` (code `BLUETOOTH_MIC_DEFAULT`) instead of connecting with degraded audio. The error includes `availableDevices` — an array of all mics with their `type` classification — so the app can immediately show a mic picker. If a Bluetooth mic is explicitly chosen via `microphoneId`, the client connects normally but emits a `BLUETOOTH_MIC` warning event.
 
 | Method | Description |
 |--------|-------------|
@@ -93,9 +96,16 @@ client.on('connected', () => { ... });
 client.on('disconnected', () => { ... });
 client.on('authenticated', () => { ... });
 client.on('error', (event: ErrorEvent) => { ... });
-client.on('entityState', (state: EntityState) => { ... });   // Panaudia coordinates
+client.on('warning', (event: WarningEvent) => { ... });       // Non-fatal issues (e.g. Bluetooth mic)
+client.on('entityState', (state: EntityState) => { ... });     // Panaudia coordinates
 client.on('attributes', (attrs: EntityAttributes) => { ... });
 ```
+
+#### Warning Codes
+
+| Code | Meaning |
+|------|---------|
+| `BLUETOOTH_MIC` | A Bluetooth microphone is in use. Stereo audio may be reduced to mono. The `details` field contains `{ deviceId, label }`. |
 
 The `entityState` event provides state in Panaudia coordinates. If `worldBounds` is configured, positions are denormalized from 0-1 back to world space. Use framework converter functions to convert to your coordinate system:
 
@@ -217,7 +227,19 @@ interface EntityAttributes {
 interface MicrophoneInfo {
   deviceId: string;
   label: string;
+  type: MicrophoneType;  // 'bluetooth' | 'usb' | 'builtin' | 'unknown'
 }
+
+// Returned by PanaudiaClient.getRecommendedMicrophone()
+interface MicrophoneSelectionResult {
+  deviceId: string | undefined;       // undefined = use system default
+  label: string;
+  type: MicrophoneType;
+  allDevices: ClassifiedMicrophone[];  // All evaluated devices
+  switchedFromBluetooth: boolean;      // True if default was BT and we picked another
+}
+
+type MicrophoneType = 'bluetooth' | 'usb' | 'builtin' | 'unknown';
 
 enum ConnectionState {
   DISCONNECTED = 'disconnected',
@@ -228,6 +250,14 @@ enum ConnectionState {
 }
 
 interface ErrorEvent { code: string | number; message: string; details?: unknown; }
+interface WarningEvent { code: string; message: string; details?: unknown; }
+
+// Thrown when default mic is Bluetooth and no explicit microphoneId was set.
+// Includes the full device list so the app can show a mic picker.
+class BluetoothMicDefaultError extends MoqClientError {
+  availableDevices: Array<{ deviceId: string; label: string; type: MicrophoneType }>;
+  // code: 'BLUETOOTH_MIC_DEFAULT'
+}
 ```
 
 ## Direct MOQ Access
@@ -250,7 +280,7 @@ This provides access to MOQ protocol utilities, wire format encoders/decoders, a
 
 | Import Path | Contents |
 |-------------|----------|
-| `@panaudia/client` | `PanaudiaClient`, `resolveServer`, coordinate converters, shared types |
+| `@panaudia/client` | `PanaudiaClient`, `resolveServer`, coordinate converters, microphone selection (`selectBestMicrophone`, `classifyByLabel`), shared types |
 | `@panaudia/client/moq` | `PanaudiaMoqClient`, MOQ protocol internals, coordinate converters |
 | `@panaudia/client/webrtc` | `WebRtcTransport` |
 

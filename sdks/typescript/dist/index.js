@@ -3,9 +3,203 @@ var __defNormalProp = (obj, key, value) => key in obj ? __defProp(obj, key, { en
 var __publicField = (obj, key, value) => __defNormalProp(obj, typeof key !== "symbol" ? key + "" : key, value);
 import { C as ConnectionState, c as createEntityInfo3 } from "./encoding.js";
 import { E, b, e, a, i, u } from "./encoding.js";
-import { isWebTransportSupported, MoqTransportAdapter } from "./moq/index.js";
+import { isWebTransportSupported, MoqTransportAdapter, BluetoothMicDefaultError } from "./moq/index.js";
 import { aframeToPanaudia, ambisonicToWebglPosition, ambisonicToWebglRotation, babylonToPanaudia, getWebTransportSupport, panaudiaToAframe, panaudiaToBabylon, panaudiaToPixi, panaudiaToPlaycanvas, panaudiaToThreejs, panaudiaToUnity, panaudiaToUnreal, pixiToPanaudia, playcanvasToPanaudia, threejsToPanaudia, unityToPanaudia, unrealToPanaudia, webglToAmbisonicPosition, webglToAmbisonicRotation } from "./moq/index.js";
 import { WebRtcTransport } from "./webrtc/index.js";
+const BLUETOOTH_KEYWORDS = [
+  "bluetooth",
+  "bt ",
+  "bt-",
+  // HFP/SCO profile indicators (sometimes exposed in device labels)
+  "hands-free",
+  "handsfree",
+  "hfp",
+  "sco",
+  "a2dp"
+];
+const BLUETOOTH_BRANDS = [
+  "airpods",
+  "beats ",
+  "beats+",
+  "beatsx",
+  "powerbeats",
+  "jabra",
+  "galaxy buds",
+  "buds pro",
+  "buds live",
+  "buds2",
+  "buds fe",
+  "sony wh-",
+  "sony wf-",
+  "bose qc",
+  "bose quietcomfort",
+  "bose noise cancelling",
+  "bose soundsport",
+  "bose sport",
+  "jbl tune",
+  "jbl live",
+  "jbl reflect",
+  "jbl endurance",
+  "sennheiser momentum",
+  "sennheiser cx",
+  "marshall major",
+  "marshall minor",
+  "marshall motif",
+  "pixel buds",
+  "nothing ear",
+  "huawei freebuds",
+  "oppo enco",
+  "oneplus buds",
+  "anker soundcore",
+  "soundcore liberty",
+  "skullcandy",
+  "tozo",
+  "jlab"
+];
+const USB_KEYWORDS = [
+  "usb",
+  // Well-known USB mic brands
+  "blue yeti",
+  "blue snowball",
+  "rode nt-usb",
+  "rode podcaster",
+  "at2020",
+  "at2005",
+  "samson",
+  "focusrite",
+  "scarlett",
+  "behringer",
+  "presonus",
+  "elgato wave",
+  "hyperx quadcast",
+  "razer seiren",
+  "fifine",
+  "maono",
+  "audio-technica",
+  "shure mv"
+];
+const BUILTIN_KEYWORDS = [
+  "built-in",
+  "builtin",
+  "internal",
+  "macbook",
+  "imac",
+  "integrated",
+  "laptop",
+  "webcam",
+  "facetime"
+];
+function classifyByLabel(label) {
+  const lower = label.toLowerCase();
+  for (const keyword of BLUETOOTH_KEYWORDS) {
+    if (lower.includes(keyword)) return "bluetooth";
+  }
+  for (const brand of BLUETOOTH_BRANDS) {
+    if (lower.includes(brand)) return "bluetooth";
+  }
+  for (const keyword of USB_KEYWORDS) {
+    if (lower.includes(keyword)) return "usb";
+  }
+  for (const keyword of BUILTIN_KEYWORDS) {
+    if (lower.includes(keyword)) return "builtin";
+  }
+  return "unknown";
+}
+async function probeSampleRate(deviceId) {
+  let stream = null;
+  try {
+    stream = await navigator.mediaDevices.getUserMedia({
+      audio: { deviceId: { exact: deviceId } },
+      video: false
+    });
+    const track = stream.getAudioTracks()[0];
+    if (!track) return null;
+    const settings = track.getSettings();
+    return settings.sampleRate ?? null;
+  } catch {
+    return null;
+  } finally {
+    if (stream) {
+      for (const track of stream.getTracks()) {
+        track.stop();
+      }
+    }
+  }
+}
+const TYPE_PRIORITY = {
+  usb: 0,
+  builtin: 1,
+  unknown: 2,
+  bluetooth: 3
+};
+function compareMicrophones(a2, b2) {
+  return TYPE_PRIORITY[a2.type] - TYPE_PRIORITY[b2.type];
+}
+async function selectBestMicrophone(debug = false) {
+  const log = debug ? (...args) => console.log("[MicSelection]", ...args) : () => {
+  };
+  let permissionStream = null;
+  try {
+    permissionStream = await navigator.mediaDevices.getUserMedia({
+      audio: true,
+      video: false
+    });
+  } finally {
+    if (permissionStream) {
+      for (const track of permissionStream.getTracks()) {
+        track.stop();
+      }
+    }
+  }
+  const allDevices = await navigator.mediaDevices.enumerateDevices();
+  const mics = allDevices.filter((d) => d.kind === "audioinput").map((d) => ({
+    deviceId: d.deviceId,
+    label: d.label || "(unlabelled)",
+    type: classifyByLabel(d.label || "")
+  }));
+  log("Enumerated microphones:", mics.map((m) => `${m.label} [${m.type}]`));
+  if (mics.length === 0) {
+    log("No microphones found, using system default");
+    return {
+      deviceId: void 0,
+      label: "(none)",
+      type: "unknown",
+      allDevices: [],
+      switchedFromBluetooth: false
+    };
+  }
+  const unknowns = mics.filter((m) => m.type === "unknown");
+  for (const mic of unknowns) {
+    if (mic.deviceId === "default") continue;
+    log(`Probing sample rate for: ${mic.label}`);
+    const sampleRate = await probeSampleRate(mic.deviceId);
+    mic.sampleRate = sampleRate ?? void 0;
+    if (sampleRate !== null && sampleRate <= 16e3) {
+      log(`  → ${sampleRate} Hz — reclassifying as bluetooth`);
+      mic.type = "bluetooth";
+    } else if (sampleRate !== null) {
+      log(`  → ${sampleRate} Hz — not bluetooth`);
+    } else {
+      log(`  → probe failed, keeping as unknown`);
+    }
+  }
+  const defaultMic = mics[0];
+  const defaultIsBluetooth = defaultMic.type === "bluetooth";
+  const ranked = [...mics].sort(compareMicrophones);
+  const best = ranked[0];
+  log("Ranked microphones:", ranked.map((m) => `${m.label} [${m.type}]`));
+  log(`Selected: ${best.label} [${best.type}]`);
+  if (defaultIsBluetooth && best.type !== "bluetooth") {
+    log(`Switched away from Bluetooth default: ${defaultMic.label}`);
+  }
+  return {
+    deviceId: best.deviceId === "default" ? void 0 : best.deviceId,
+    label: best.label,
+    type: best.type,
+    allDevices: mics,
+    switchedFromBluetooth: defaultIsBluetooth && best.type !== "bluetooth"
+  };
+}
 const DEFAULT_GATEWAY_URL = "https://panaudia.com/gateway";
 async function resolveServer(ticket, options) {
   const gatewayUrl = (options == null ? void 0 : options.gatewayUrl) ?? DEFAULT_GATEWAY_URL;
@@ -100,14 +294,61 @@ class PanaudiaClient {
       };
       this.emit("error", event);
     });
+    this.transport.onWarning((warning) => {
+      this.emit("warning", warning);
+    });
   }
-  /** List available microphone devices. Labels may be empty until mic permission is granted. */
+  /**
+   * List available microphone devices with type classification.
+   * Requests mic permission if not already granted (one prompt, briefly opens default mic).
+   */
   static async listMicrophones() {
+    let stream = null;
+    try {
+      stream = await navigator.mediaDevices.getUserMedia({ audio: true, video: false });
+    } finally {
+      if (stream) {
+        for (const track of stream.getTracks()) {
+          track.stop();
+        }
+      }
+    }
     const devices = await navigator.mediaDevices.enumerateDevices();
-    return devices.filter((d) => d.kind === "audioinput").map((d) => ({ deviceId: d.deviceId, label: d.label }));
+    return devices.filter((d) => d.kind === "audioinput").map((d) => ({
+      deviceId: d.deviceId,
+      label: d.label,
+      type: classifyByLabel(d.label)
+    }));
   }
   // ── Connection lifecycle ─────────────────────────────────────────────
   async connect() {
+    var _a;
+    const microphoneId = this.config.microphoneId;
+    if ((_a = navigator.mediaDevices) == null ? void 0 : _a.getUserMedia) {
+      try {
+        const permStream = await navigator.mediaDevices.getUserMedia({ audio: true, video: false });
+        for (const track of permStream.getTracks()) track.stop();
+        const devices = await navigator.mediaDevices.enumerateDevices();
+        const mics = devices.filter((d) => d.kind === "audioinput").map((d) => ({ deviceId: d.deviceId, label: d.label, type: classifyByLabel(d.label) }));
+        if (microphoneId) {
+          const match = mics.find((m) => m.deviceId === microphoneId);
+          if (match && match.type === "bluetooth") {
+            this.emit("warning", {
+              code: "BLUETOOTH_MIC",
+              message: `Bluetooth microphone in use: ${match.label}. Stereo audio may be reduced to mono.`,
+              details: { deviceId: microphoneId, label: match.label }
+            });
+          }
+        } else {
+          const defaultMic = mics[0];
+          if (defaultMic && defaultMic.type === "bluetooth") {
+            throw new BluetoothMicDefaultError(defaultMic.label, mics);
+          }
+        }
+      } catch (e2) {
+        if (e2 instanceof BluetoothMicDefaultError) throw e2;
+      }
+    }
     await this.transport.connect({
       serverUrl: this.config.serverUrl,
       ticket: this.config.ticket,
@@ -165,7 +406,7 @@ class PanaudiaClient {
    * Accepts a PanaudiaPose — the same type returned by the coordinate converter functions.
    *
    * @example
-   * client.setPose(threejsToPanaudia({ position, rotation }));
+   * client.setPose(threejsToPanaudia(position, rotation));
    */
   setPose(pose) {
     const { x, y, z } = pose.position;
@@ -251,7 +492,14 @@ class PanaudiaClient {
     this.statePublishPending = false;
   }
 }
+/**
+ * Get the recommended non-Bluetooth microphone.
+ * Use this to pre-select a device in a mic picker UI.
+ * The user should confirm the selection before connecting.
+ */
+__publicField(PanaudiaClient, "getRecommendedMicrophone", selectBestMicrophone);
 export {
+  BluetoothMicDefaultError,
   ConnectionState,
   E as ENTITY_INFO3_SIZE,
   PanaudiaClient,
@@ -260,6 +508,7 @@ export {
   ambisonicToWebglRotation,
   babylonToPanaudia,
   b as bytesToUuid,
+  classifyByLabel,
   createEntityInfo3,
   e as entityInfo3FromBytes,
   a as entityInfo3ToBytes,
@@ -276,6 +525,7 @@ export {
   pixiToPanaudia,
   playcanvasToPanaudia,
   resolveServer,
+  selectBestMicrophone,
   threejsToPanaudia,
   unityToPanaudia,
   unrealToPanaudia,

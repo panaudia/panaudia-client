@@ -5,7 +5,7 @@
 
 import type { Transport, TransportConfig, AudioCaptureConfig, AudioPlaybackConfig } from '../transport.js';
 import { ConnectionState } from '../types.js';
-import type { EntityInfo3, ControlMessage, EntityState, EntityAttributes } from '../types.js';
+import type { EntityInfo3, ControlMessage, EntityState, EntityAttributes, WarningEvent } from '../types.js';
 import { entityInfo3ToBytes, entityInfo3FromBytes, ENTITY_INFO3_SIZE } from '../shared/encoding.js';
 
 type EventHandler<T> = (event: T) => void;
@@ -14,7 +14,8 @@ type EventHandler<T> = (event: T) => void;
 function extractEntityIdFromJwt(token: string): string {
   const parts = token.split('.');
   if (parts.length !== 3) throw new Error('Invalid JWT format');
-  const payload = JSON.parse(atob(parts[1]!));
+  const b64 = parts[1]!.replace(/-/g, '+').replace(/_/g, '/');
+  const payload = JSON.parse(atob(b64));
   if (!payload.jti) throw new Error('JWT missing jti (entity ID)');
   return payload.jti;
 }
@@ -38,6 +39,7 @@ export class WebRtcTransport implements Transport {
   private attributesHandlers: EventHandler<EntityAttributes>[] = [];
   private connectionStateHandlers: EventHandler<ConnectionState>[] = [];
   private errorHandlers: EventHandler<Error>[] = [];
+  private warningHandlers: EventHandler<WarningEvent>[] = [];
 
   async connect(config: TransportConfig): Promise<void> {
     this.entityId = config.entityId ?? extractEntityIdFromJwt(config.ticket);
@@ -57,6 +59,8 @@ export class WebRtcTransport implements Transport {
     this.setupPeerConnection();
 
     // Capture mic BEFORE signaling — tracks must be in the SDP offer/answer
+    // Bluetooth mic check is handled by PanaudiaClient.connect() before
+    // transport setup, so both MOQ and WebRTC behave identically.
     const constraints: MediaTrackConstraints = {
       autoGainControl: false,
       echoCancellation: false,
@@ -219,6 +223,10 @@ export class WebRtcTransport implements Transport {
 
   onError(handler: EventHandler<Error>): void {
     this.errorHandlers.push(handler);
+  }
+
+  onWarning(handler: EventHandler<WarningEvent>): void {
+    this.warningHandlers.push(handler);
   }
 
   // ── Internal ──────────────────────────────────────────────────────────

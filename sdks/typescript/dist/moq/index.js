@@ -320,6 +320,802 @@ function ambisonicToWebglRotation(rot) {
   const euler = quaternionToEuler(q, "XYZ");
   return { x: euler.x, y: euler.y, z: euler.z };
 }
+class MoqClientError extends Error {
+  constructor(message, code, details) {
+    super(message);
+    this.code = code;
+    this.details = details;
+    this.name = "MoqClientError";
+  }
+}
+class WebTransportNotSupportedError extends MoqClientError {
+  constructor() {
+    super(
+      "WebTransport is not supported in this browser. Try Chrome 97+, Edge 97+, or Safari 16.4+.",
+      "WEBTRANSPORT_NOT_SUPPORTED"
+    );
+    this.name = "WebTransportNotSupportedError";
+  }
+}
+class ConnectionError extends MoqClientError {
+  constructor(message, details) {
+    super(message, "CONNECTION_FAILED", details);
+    this.name = "ConnectionError";
+  }
+}
+class AuthenticationError extends MoqClientError {
+  constructor(message, moqErrorCode, details) {
+    super(message, "AUTHENTICATION_FAILED", details);
+    this.moqErrorCode = moqErrorCode;
+    this.name = "AuthenticationError";
+  }
+  /**
+   * Check if this is an invalid token error
+   */
+  isInvalidToken() {
+    return this.moqErrorCode === 2 || this.moqErrorCode === 1027;
+  }
+  /**
+   * Check if this is an expired token error
+   */
+  isExpiredToken() {
+    return this.message.toLowerCase().includes("expired");
+  }
+}
+class JwtParseError extends MoqClientError {
+  constructor(message, details) {
+    super(message, "JWT_PARSE_FAILED", details);
+    this.name = "JwtParseError";
+  }
+}
+class ProtocolError extends MoqClientError {
+  constructor(message, moqErrorCode, details) {
+    super(message, "PROTOCOL_ERROR", details);
+    this.moqErrorCode = moqErrorCode;
+    this.name = "ProtocolError";
+  }
+}
+class SubscriptionError extends MoqClientError {
+  constructor(message, moqErrorCode, trackNamespace, details) {
+    super(message, "SUBSCRIPTION_FAILED", details);
+    this.moqErrorCode = moqErrorCode;
+    this.trackNamespace = trackNamespace;
+    this.name = "SubscriptionError";
+  }
+}
+class AnnouncementError extends MoqClientError {
+  constructor(message, moqErrorCode, namespace, details) {
+    super(message, "ANNOUNCEMENT_FAILED", details);
+    this.moqErrorCode = moqErrorCode;
+    this.namespace = namespace;
+    this.name = "AnnouncementError";
+  }
+}
+class InvalidStateError extends MoqClientError {
+  constructor(expectedState, actualState) {
+    super(
+      `Invalid state: expected ${expectedState}, but was ${actualState}`,
+      "INVALID_STATE",
+      { expectedState, actualState }
+    );
+    this.name = "InvalidStateError";
+  }
+}
+class TimeoutError extends MoqClientError {
+  constructor(operation, timeoutMs) {
+    super(
+      `Operation '${operation}' timed out after ${timeoutMs}ms`,
+      "TIMEOUT",
+      { operation, timeoutMs }
+    );
+    this.name = "TimeoutError";
+  }
+}
+function getMoqErrorMessage(code) {
+  switch (code) {
+    case 0:
+      return "No error";
+    case 1:
+      return "Internal error";
+    case 2:
+      return "Unauthorized";
+    case 3:
+      return "Protocol violation";
+    case 4:
+      return "Duplicate track alias";
+    case 5:
+      return "Parameter length mismatch";
+    case 6:
+      return "Too many subscribes";
+    case 16:
+      return "GOAWAY timeout";
+    case 1027:
+      return "Invalid token (custom)";
+    default:
+      return `Unknown error (0x${code.toString(16)})`;
+  }
+}
+function wrapError(error, defaultCode = "UNKNOWN") {
+  if (error instanceof MoqClientError) {
+    return error;
+  }
+  if (error instanceof Error) {
+    return new MoqClientError(error.message, defaultCode, error);
+  }
+  return new MoqClientError(String(error), defaultCode);
+}
+function isWebCodecsOpusSupported() {
+  return typeof AudioEncoder !== "undefined";
+}
+class OpusEncoder {
+  constructor(config = {}) {
+    __publicField(this, "encoder", null);
+    __publicField(this, "config");
+    __publicField(this, "frameCallback", null);
+    __publicField(this, "isInitialized", false);
+    this.config = {
+      sampleRate: config.sampleRate ?? 48e3,
+      channels: config.channels ?? 1,
+      bitrate: config.bitrate ?? 64e3,
+      frameDurationMs: config.frameDurationMs ?? 5,
+      debug: config.debug ?? false
+    };
+  }
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  log(...args) {
+    if (this.config.debug) {
+      console.log("[OpusEncoder]", ...args);
+    }
+  }
+  /**
+   * Set callback for encoded frames
+   */
+  onFrame(callback) {
+    this.frameCallback = callback;
+  }
+  /**
+   * Initialize the encoder
+   */
+  async initialize() {
+    if (!isWebCodecsOpusSupported()) {
+      throw new MoqClientError(
+        "WebCodecs AudioEncoder is not supported in this browser",
+        "WEBCODECS_NOT_SUPPORTED"
+      );
+    }
+    const frameDurationUs = this.config.frameDurationMs * 1e3;
+    const encoderConfig = {
+      codec: "opus",
+      sampleRate: this.config.sampleRate,
+      numberOfChannels: this.config.channels,
+      bitrate: this.config.bitrate,
+      opus: { frameDuration: frameDurationUs }
+    };
+    const support = await AudioEncoder.isConfigSupported(encoderConfig);
+    if (!support.supported) {
+      throw new MoqClientError(
+        `Opus encoding not supported (frameDuration=${this.config.frameDurationMs}ms)`,
+        "OPUS_NOT_SUPPORTED"
+      );
+    }
+    this.encoder = new AudioEncoder({
+      output: (chunk, metadata) => {
+        this.handleEncodedChunk(chunk, metadata);
+      },
+      error: (error) => {
+        console.error("AudioEncoder error:", error);
+      }
+    });
+    this.encoder.configure(encoderConfig);
+    this.isInitialized = true;
+    this.log(`initialized: ${this.config.sampleRate}Hz, ${this.config.channels}ch, ${this.config.bitrate}bps, ${this.config.frameDurationMs}ms frames`);
+  }
+  /**
+   * Encode PCM audio data
+   *
+   * @param pcmData - Float32 PCM samples (interleaved if stereo)
+   * @param timestamp - Timestamp in microseconds
+   */
+  encode(pcmData, timestamp) {
+    if (!this.encoder || !this.isInitialized) {
+      throw new MoqClientError("Encoder not initialized", "NOT_INITIALIZED");
+    }
+    const audioData = new AudioData({
+      format: "f32",
+      sampleRate: this.config.sampleRate,
+      numberOfFrames: pcmData.length / this.config.channels,
+      numberOfChannels: this.config.channels,
+      timestamp,
+      data: pcmData.buffer
+    });
+    try {
+      this.encoder.encode(audioData);
+    } finally {
+      audioData.close();
+    }
+  }
+  /**
+   * Flush any pending frames
+   */
+  async flush() {
+    if (this.encoder && this.encoder.state === "configured") {
+      await this.encoder.flush();
+    }
+  }
+  /**
+   * Close the encoder and release resources
+   */
+  close() {
+    if (this.encoder) {
+      if (this.encoder.state !== "closed") {
+        this.encoder.close();
+      }
+      this.encoder = null;
+    }
+    this.isInitialized = false;
+  }
+  /**
+   * Handle encoded chunk from WebCodecs
+   */
+  handleEncodedChunk(chunk, _metadata) {
+    const data = new Uint8Array(chunk.byteLength);
+    chunk.copyTo(data);
+    const frameDurationUs = this.config.frameDurationMs * 1e3;
+    const frame = {
+      data,
+      timestamp: chunk.timestamp,
+      duration: chunk.duration ?? frameDurationUs
+    };
+    if (this.frameCallback) {
+      this.frameCallback(frame);
+    }
+  }
+  /**
+   * Get encoder state
+   */
+  getState() {
+    var _a;
+    return ((_a = this.encoder) == null ? void 0 : _a.state) ?? "closed";
+  }
+}
+const WORKLET_PROCESSOR_CODE = `
+class AudioCaptureProcessor extends AudioWorkletProcessor {
+  process(inputs, outputs, parameters) {
+    const input = inputs[0];
+    if (input && input[0] && input[0].length > 0) {
+      this.port.postMessage(new Float32Array(input[0]));
+    }
+    return true;
+  }
+}
+registerProcessor('audio-capture-processor', AudioCaptureProcessor);
+`;
+class AudioCaptureEncoder {
+  constructor(config = {}) {
+    __publicField(this, "audioContext", null);
+    __publicField(this, "sourceNode", null);
+    __publicField(this, "workletNode", null);
+    __publicField(this, "encoder");
+    __publicField(this, "config");
+    __publicField(this, "sampleBuffer", []);
+    __publicField(this, "bufferSize", 0);
+    __publicField(this, "samplesPerFrame");
+    __publicField(this, "frameDurationUs");
+    __publicField(this, "timestampUs", 0);
+    __publicField(this, "isRunning", false);
+    this.config = {
+      sampleRate: config.sampleRate ?? 48e3,
+      channels: config.channels ?? 1,
+      bitrate: config.bitrate ?? 64e3,
+      frameDurationMs: config.frameDurationMs ?? 5,
+      debug: config.debug ?? false
+    };
+    this.encoder = new OpusEncoder(this.config);
+    this.samplesPerFrame = Math.floor(this.config.sampleRate * this.config.frameDurationMs / 1e3);
+    this.frameDurationUs = this.config.frameDurationMs * 1e3;
+  }
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  log(...args) {
+    if (this.config.debug) {
+      console.log("[AudioCaptureEncoder]", ...args);
+    }
+  }
+  /**
+   * Set callback for encoded Opus frames
+   */
+  onFrame(callback) {
+    this.encoder.onFrame(callback);
+  }
+  /**
+   * Start capturing and encoding
+   */
+  async start(mediaStream) {
+    await this.encoder.initialize();
+    this.audioContext = new AudioContext({
+      sampleRate: this.config.sampleRate
+    });
+    const blob = new Blob([WORKLET_PROCESSOR_CODE], { type: "application/javascript" });
+    const url = URL.createObjectURL(blob);
+    await this.audioContext.audioWorklet.addModule(url);
+    URL.revokeObjectURL(url);
+    this.sourceNode = this.audioContext.createMediaStreamSource(mediaStream);
+    this.workletNode = new AudioWorkletNode(this.audioContext, "audio-capture-processor");
+    this.workletNode.port.onmessage = (event) => {
+      if (!this.isRunning) return;
+      this.addSamples(event.data);
+    };
+    this.sourceNode.connect(this.workletNode);
+    this.isRunning = true;
+    this.log(`started (AudioWorklet, ${this.config.frameDurationMs}ms frames, ${this.samplesPerFrame} samples/frame)`);
+  }
+  /**
+   * Add samples to buffer and encode when we have enough
+   */
+  addSamples(samples) {
+    this.sampleBuffer.push(samples);
+    this.bufferSize += samples.length;
+    while (this.bufferSize >= this.samplesPerFrame) {
+      const frameData = new Float32Array(this.samplesPerFrame);
+      let frameOffset = 0;
+      while (frameOffset < this.samplesPerFrame && this.sampleBuffer.length > 0) {
+        const chunk = this.sampleBuffer[0];
+        const needed = this.samplesPerFrame - frameOffset;
+        const available = chunk.length;
+        if (available <= needed) {
+          frameData.set(chunk, frameOffset);
+          frameOffset += available;
+          this.sampleBuffer.shift();
+          this.bufferSize -= available;
+        } else {
+          frameData.set(chunk.subarray(0, needed), frameOffset);
+          this.sampleBuffer[0] = chunk.subarray(needed);
+          this.bufferSize -= needed;
+          frameOffset += needed;
+        }
+      }
+      this.encoder.encode(frameData, this.timestampUs);
+      this.timestampUs += this.frameDurationUs;
+    }
+  }
+  /**
+   * Stop capturing and encoding
+   */
+  async stop() {
+    this.isRunning = false;
+    await this.encoder.flush();
+    if (this.workletNode) {
+      this.workletNode.disconnect();
+      this.workletNode = null;
+    }
+    if (this.sourceNode) {
+      this.sourceNode.disconnect();
+      this.sourceNode = null;
+    }
+    if (this.audioContext) {
+      await this.audioContext.close();
+      this.audioContext = null;
+    }
+    this.encoder.close();
+    this.sampleBuffer = [];
+    this.bufferSize = 0;
+    this.log("stopped");
+  }
+  /**
+   * Check if currently running
+   */
+  isActive() {
+    return this.isRunning;
+  }
+}
+var AudioPublisherState = /* @__PURE__ */ ((AudioPublisherState2) => {
+  AudioPublisherState2["IDLE"] = "idle";
+  AudioPublisherState2["REQUESTING_PERMISSION"] = "requesting_permission";
+  AudioPublisherState2["READY"] = "ready";
+  AudioPublisherState2["RECORDING"] = "recording";
+  AudioPublisherState2["PAUSED"] = "paused";
+  AudioPublisherState2["ERROR"] = "error";
+  return AudioPublisherState2;
+})(AudioPublisherState || {});
+class AudioPermissionError extends MoqClientError {
+  constructor(message, details) {
+    super(message, "AUDIO_PERMISSION_DENIED", details);
+    this.name = "AudioPermissionError";
+  }
+}
+class AudioEncodingError extends MoqClientError {
+  constructor(message, details) {
+    super(message, "AUDIO_ENCODING_FAILED", details);
+    this.name = "AudioEncodingError";
+  }
+}
+class AudioNotSupportedError extends MoqClientError {
+  constructor(message) {
+    super(message, "AUDIO_NOT_SUPPORTED");
+    this.name = "AudioNotSupportedError";
+  }
+}
+class BluetoothMicDefaultError extends MoqClientError {
+  constructor(defaultLabel, availableDevices) {
+    super(
+      `Default microphone is Bluetooth (${defaultLabel}). Please select a non-Bluetooth microphone to preserve stereo audio.`,
+      "BLUETOOTH_MIC_DEFAULT",
+      { defaultLabel, availableDevices }
+    );
+    __publicField(this, "availableDevices");
+    this.name = "BluetoothMicDefaultError";
+    this.availableDevices = availableDevices;
+  }
+}
+function isOpusSupported() {
+  if (typeof MediaRecorder === "undefined") {
+    return false;
+  }
+  const mimeTypes = [
+    "audio/webm;codecs=opus",
+    "audio/ogg;codecs=opus",
+    "audio/webm"
+  ];
+  for (const mimeType of mimeTypes) {
+    if (MediaRecorder.isTypeSupported(mimeType)) {
+      return true;
+    }
+  }
+  return false;
+}
+function getBestOpusMimeType() {
+  if (typeof MediaRecorder === "undefined") {
+    return null;
+  }
+  const mimeTypes = [
+    "audio/webm;codecs=opus",
+    "audio/ogg;codecs=opus",
+    "audio/webm"
+  ];
+  for (const mimeType of mimeTypes) {
+    if (MediaRecorder.isTypeSupported(mimeType)) {
+      return mimeType;
+    }
+  }
+  return null;
+}
+class AudioPublisher {
+  constructor(config = {}) {
+    __publicField(this, "config");
+    __publicField(this, "state", "idle");
+    __publicField(this, "mediaStream", null);
+    __publicField(this, "mediaRecorder", null);
+    __publicField(this, "frameHandler", null);
+    // WebCodecs encoder (preferred - produces raw Opus)
+    __publicField(this, "webCodecsEncoder", null);
+    __publicField(this, "useWebCodecs", false);
+    // Timing
+    __publicField(this, "startTime", 0);
+    __publicField(this, "frameSequence", 0);
+    this.config = {
+      sampleRate: config.sampleRate ?? 48e3,
+      channelCount: config.channelCount ?? 1,
+      bitrate: config.bitrate ?? 64e3,
+      frameDurationMs: config.frameDurationMs ?? 5,
+      echoCancellation: config.echoCancellation ?? false,
+      noiseSuppression: config.noiseSuppression ?? false,
+      autoGainControl: config.autoGainControl ?? false,
+      deviceId: config.deviceId,
+      debug: config.debug ?? false
+    };
+    this.useWebCodecs = isWebCodecsOpusSupported();
+    if (this.useWebCodecs) {
+      this.log("Using WebCodecs for raw Opus encoding");
+    } else {
+      this.log("WebCodecs not available, using MediaRecorder (WebM container)");
+    }
+  }
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  log(...args) {
+    if (this.config.debug) {
+      console.log("[AudioPublisher]", ...args);
+    }
+  }
+  /**
+   * Get current state
+   */
+  getState() {
+    return this.state;
+  }
+  /**
+   * Set handler for audio frames
+   */
+  onFrame(handler) {
+    this.frameHandler = handler;
+  }
+  /**
+   * Request microphone access and prepare for recording
+   */
+  async initialize() {
+    if (this.state !== "idle") {
+      throw new MoqClientError(
+        `Cannot initialize: already in state ${this.state}`,
+        "INVALID_STATE"
+      );
+    }
+    if (!navigator.mediaDevices || !navigator.mediaDevices.getUserMedia) {
+      throw new AudioNotSupportedError(
+        "getUserMedia is not supported in this browser"
+      );
+    }
+    if (!isOpusSupported()) {
+      throw new AudioNotSupportedError(
+        "Opus encoding is not supported in this browser. Try Chrome, Firefox, or Edge."
+      );
+    }
+    this.setState(
+      "requesting_permission"
+      /* REQUESTING_PERMISSION */
+    );
+    try {
+      const deviceId = this.config.deviceId;
+      this.mediaStream = await navigator.mediaDevices.getUserMedia({
+        audio: {
+          channelCount: this.config.channelCount,
+          sampleRate: this.config.sampleRate,
+          echoCancellation: this.config.echoCancellation,
+          noiseSuppression: this.config.noiseSuppression,
+          autoGainControl: this.config.autoGainControl,
+          latency: { ideal: 5e-3 },
+          ...deviceId ? { deviceId: { exact: deviceId } } : {}
+        },
+        video: false
+      });
+      this.setState(
+        "ready"
+        /* READY */
+      );
+      this.log("Microphone access granted");
+    } catch (error) {
+      this.setState(
+        "error"
+        /* ERROR */
+      );
+      if (error instanceof DOMException) {
+        if (error.name === "NotAllowedError" || error.name === "PermissionDeniedError") {
+          throw new AudioPermissionError(
+            "Microphone access denied. Please allow microphone access in your browser settings.",
+            error
+          );
+        } else if (error.name === "NotFoundError") {
+          throw new AudioPermissionError(
+            "No microphone found. Please connect a microphone and try again.",
+            error
+          );
+        } else if (error.name === "NotReadableError") {
+          throw new AudioPermissionError(
+            "Microphone is in use by another application.",
+            error
+          );
+        }
+      }
+      throw new AudioPermissionError(
+        `Failed to access microphone: ${error}`,
+        error
+      );
+    }
+  }
+  /**
+   * Start recording and encoding audio
+   */
+  start() {
+    if (this.state !== "ready" && this.state !== "paused") {
+      throw new MoqClientError(
+        `Cannot start: must be in READY or PAUSED state, currently ${this.state}`,
+        "INVALID_STATE"
+      );
+    }
+    if (!this.mediaStream) {
+      throw new MoqClientError("No media stream available", "INVALID_STATE");
+    }
+    if (this.useWebCodecs) {
+      this.startWebCodecs();
+      return;
+    }
+    this.startMediaRecorder();
+  }
+  /**
+   * Start encoding using WebCodecs AudioEncoder (preferred - raw Opus)
+   */
+  startWebCodecs() {
+    this.webCodecsEncoder = new AudioCaptureEncoder({
+      sampleRate: this.config.sampleRate,
+      channels: this.config.channelCount,
+      bitrate: this.config.bitrate,
+      frameDurationMs: this.config.frameDurationMs,
+      debug: this.config.debug
+    });
+    this.webCodecsEncoder.onFrame((opusFrame) => {
+      if (this.frameHandler) {
+        const frame = {
+          data: opusFrame.data,
+          timestamp: Math.floor(opusFrame.timestamp / 1e3),
+          // Convert us to ms
+          duration: Math.floor(opusFrame.duration / 1e3)
+        };
+        this.frameHandler(frame);
+      }
+    });
+    this.webCodecsEncoder.start(this.mediaStream).then(() => {
+      this.setState(
+        "recording"
+        /* RECORDING */
+      );
+      this.log(`Recording started with WebCodecs, ${this.config.bitrate} bps (raw Opus)`);
+    }).catch((error) => {
+      console.error("Failed to start WebCodecs encoder:", error);
+      this.setState(
+        "error"
+        /* ERROR */
+      );
+    });
+  }
+  /**
+   * Start encoding using MediaRecorder (fallback - WebM container)
+   */
+  startMediaRecorder() {
+    const mimeType = getBestOpusMimeType();
+    if (!mimeType) {
+      throw new AudioNotSupportedError("No supported Opus MIME type found");
+    }
+    this.mediaRecorder = new MediaRecorder(this.mediaStream, {
+      mimeType,
+      audioBitsPerSecond: this.config.bitrate
+    });
+    this.mediaRecorder.ondataavailable = (event) => {
+      if (event.data.size > 0) {
+        this.handleEncodedData(event.data);
+      }
+    };
+    this.mediaRecorder.onerror = (event) => {
+      console.error("MediaRecorder error:", event);
+      this.setState(
+        "error"
+        /* ERROR */
+      );
+    };
+    this.mediaRecorder.onstop = () => {
+      this.log("MediaRecorder stopped");
+    };
+    this.startTime = performance.now();
+    this.frameSequence = 0;
+    this.mediaRecorder.start(this.config.frameDurationMs);
+    this.setState(
+      "recording"
+      /* RECORDING */
+    );
+    this.log(`Recording started with ${mimeType}, ${this.config.bitrate} bps (WARNING: WebM container, server may not decode correctly)`);
+  }
+  /**
+   * Pause recording
+   */
+  pause() {
+    if (this.state !== "recording") {
+      return;
+    }
+    if (this.webCodecsEncoder) {
+      this.webCodecsEncoder.stop().catch(console.error);
+      this.setState(
+        "paused"
+        /* PAUSED */
+      );
+      return;
+    }
+    if (this.mediaRecorder && this.mediaRecorder.state === "recording") {
+      this.mediaRecorder.pause();
+      this.setState(
+        "paused"
+        /* PAUSED */
+      );
+    }
+  }
+  /**
+   * Resume recording
+   */
+  resume() {
+    if (this.state !== "paused") {
+      return;
+    }
+    if (this.useWebCodecs && this.mediaStream) {
+      this.startWebCodecs();
+      return;
+    }
+    if (this.mediaRecorder && this.mediaRecorder.state === "paused") {
+      this.mediaRecorder.resume();
+      this.setState(
+        "recording"
+        /* RECORDING */
+      );
+    }
+  }
+  /**
+   * Stop recording
+   */
+  stop() {
+    if (this.webCodecsEncoder) {
+      this.webCodecsEncoder.stop().catch((error) => {
+        console.error("Error stopping WebCodecs encoder:", error);
+      });
+      this.webCodecsEncoder = null;
+    }
+    if (this.mediaRecorder) {
+      if (this.mediaRecorder.state !== "inactive") {
+        this.mediaRecorder.stop();
+      }
+      this.mediaRecorder = null;
+    }
+    this.setState(
+      "ready"
+      /* READY */
+    );
+  }
+  /**
+   * Release all resources
+   */
+  dispose() {
+    this.stop();
+    if (this.mediaStream) {
+      for (const track of this.mediaStream.getTracks()) {
+        track.stop();
+      }
+      this.mediaStream = null;
+    }
+    this.frameHandler = null;
+    this.setState(
+      "idle"
+      /* IDLE */
+    );
+  }
+  /**
+   * Handle encoded audio data from MediaRecorder
+   */
+  async handleEncodedData(blob) {
+    try {
+      const arrayBuffer = await blob.arrayBuffer();
+      const data = new Uint8Array(arrayBuffer);
+      const timestamp = performance.now() - this.startTime;
+      const frame = {
+        data,
+        timestamp: Math.floor(timestamp),
+        duration: this.config.frameDurationMs
+      };
+      this.frameSequence++;
+      if (this.frameHandler) {
+        this.frameHandler(frame);
+      }
+    } catch (error) {
+      console.error("Error processing encoded audio:", error);
+    }
+  }
+  /**
+   * Update state
+   */
+  setState(state) {
+    this.state = state;
+  }
+}
+function getAudioCapabilities() {
+  const webCodecs = isWebCodecsOpusSupported();
+  const mediaRecorder = isOpusSupported();
+  let preferredEncoder = "none";
+  if (webCodecs) {
+    preferredEncoder = "webcodecs";
+  } else if (mediaRecorder) {
+    preferredEncoder = "mediarecorder";
+  }
+  return {
+    getUserMedia: !!(navigator.mediaDevices && navigator.mediaDevices.getUserMedia),
+    mediaRecorder: typeof MediaRecorder !== "undefined",
+    opusSupport: mediaRecorder,
+    bestMimeType: getBestOpusMimeType(),
+    webCodecs,
+    preferredEncoder
+  };
+}
 var MoqMessageType = /* @__PURE__ */ ((MoqMessageType2) => {
   MoqMessageType2[MoqMessageType2["CLIENT_SETUP"] = 32] = "CLIENT_SETUP";
   MoqMessageType2[MoqMessageType2["SERVER_SETUP"] = 33] = "SERVER_SETUP";
@@ -1032,789 +1828,6 @@ function getWebTransportSupport() {
     // These are typically supported if WebTransport is available
     datagrams: supported,
     serverCertificateHashes: supported
-  };
-}
-class MoqClientError extends Error {
-  constructor(message, code, details) {
-    super(message);
-    this.code = code;
-    this.details = details;
-    this.name = "MoqClientError";
-  }
-}
-class WebTransportNotSupportedError extends MoqClientError {
-  constructor() {
-    super(
-      "WebTransport is not supported in this browser. Try Chrome 97+, Edge 97+, or Safari 16.4+.",
-      "WEBTRANSPORT_NOT_SUPPORTED"
-    );
-    this.name = "WebTransportNotSupportedError";
-  }
-}
-class ConnectionError extends MoqClientError {
-  constructor(message, details) {
-    super(message, "CONNECTION_FAILED", details);
-    this.name = "ConnectionError";
-  }
-}
-class AuthenticationError extends MoqClientError {
-  constructor(message, moqErrorCode, details) {
-    super(message, "AUTHENTICATION_FAILED", details);
-    this.moqErrorCode = moqErrorCode;
-    this.name = "AuthenticationError";
-  }
-  /**
-   * Check if this is an invalid token error
-   */
-  isInvalidToken() {
-    return this.moqErrorCode === 2 || this.moqErrorCode === 1027;
-  }
-  /**
-   * Check if this is an expired token error
-   */
-  isExpiredToken() {
-    return this.message.toLowerCase().includes("expired");
-  }
-}
-class JwtParseError extends MoqClientError {
-  constructor(message, details) {
-    super(message, "JWT_PARSE_FAILED", details);
-    this.name = "JwtParseError";
-  }
-}
-class ProtocolError extends MoqClientError {
-  constructor(message, moqErrorCode, details) {
-    super(message, "PROTOCOL_ERROR", details);
-    this.moqErrorCode = moqErrorCode;
-    this.name = "ProtocolError";
-  }
-}
-class SubscriptionError extends MoqClientError {
-  constructor(message, moqErrorCode, trackNamespace, details) {
-    super(message, "SUBSCRIPTION_FAILED", details);
-    this.moqErrorCode = moqErrorCode;
-    this.trackNamespace = trackNamespace;
-    this.name = "SubscriptionError";
-  }
-}
-class AnnouncementError extends MoqClientError {
-  constructor(message, moqErrorCode, namespace, details) {
-    super(message, "ANNOUNCEMENT_FAILED", details);
-    this.moqErrorCode = moqErrorCode;
-    this.namespace = namespace;
-    this.name = "AnnouncementError";
-  }
-}
-class InvalidStateError extends MoqClientError {
-  constructor(expectedState, actualState) {
-    super(
-      `Invalid state: expected ${expectedState}, but was ${actualState}`,
-      "INVALID_STATE",
-      { expectedState, actualState }
-    );
-    this.name = "InvalidStateError";
-  }
-}
-class TimeoutError extends MoqClientError {
-  constructor(operation, timeoutMs) {
-    super(
-      `Operation '${operation}' timed out after ${timeoutMs}ms`,
-      "TIMEOUT",
-      { operation, timeoutMs }
-    );
-    this.name = "TimeoutError";
-  }
-}
-function getMoqErrorMessage(code) {
-  switch (code) {
-    case 0:
-      return "No error";
-    case 1:
-      return "Internal error";
-    case 2:
-      return "Unauthorized";
-    case 3:
-      return "Protocol violation";
-    case 4:
-      return "Duplicate track alias";
-    case 5:
-      return "Parameter length mismatch";
-    case 6:
-      return "Too many subscribes";
-    case 16:
-      return "GOAWAY timeout";
-    case 1027:
-      return "Invalid token (custom)";
-    default:
-      return `Unknown error (0x${code.toString(16)})`;
-  }
-}
-function wrapError(error, defaultCode = "UNKNOWN") {
-  if (error instanceof MoqClientError) {
-    return error;
-  }
-  if (error instanceof Error) {
-    return new MoqClientError(error.message, defaultCode, error);
-  }
-  return new MoqClientError(String(error), defaultCode);
-}
-function isWebCodecsOpusSupported() {
-  return typeof AudioEncoder !== "undefined";
-}
-class OpusEncoder {
-  constructor(config = {}) {
-    __publicField(this, "encoder", null);
-    __publicField(this, "config");
-    __publicField(this, "frameCallback", null);
-    __publicField(this, "isInitialized", false);
-    this.config = {
-      sampleRate: config.sampleRate ?? 48e3,
-      channels: config.channels ?? 1,
-      bitrate: config.bitrate ?? 64e3,
-      frameDurationMs: config.frameDurationMs ?? 5,
-      debug: config.debug ?? false
-    };
-  }
-  // eslint-disable-next-line @typescript-eslint/no-explicit-any
-  log(...args) {
-    if (this.config.debug) {
-      console.log("[OpusEncoder]", ...args);
-    }
-  }
-  /**
-   * Set callback for encoded frames
-   */
-  onFrame(callback) {
-    this.frameCallback = callback;
-  }
-  /**
-   * Initialize the encoder
-   */
-  async initialize() {
-    if (!isWebCodecsOpusSupported()) {
-      throw new MoqClientError(
-        "WebCodecs AudioEncoder is not supported in this browser",
-        "WEBCODECS_NOT_SUPPORTED"
-      );
-    }
-    const frameDurationUs = this.config.frameDurationMs * 1e3;
-    const encoderConfig = {
-      codec: "opus",
-      sampleRate: this.config.sampleRate,
-      numberOfChannels: this.config.channels,
-      bitrate: this.config.bitrate,
-      opus: { frameDuration: frameDurationUs }
-    };
-    const support = await AudioEncoder.isConfigSupported(encoderConfig);
-    if (!support.supported) {
-      throw new MoqClientError(
-        `Opus encoding not supported (frameDuration=${this.config.frameDurationMs}ms)`,
-        "OPUS_NOT_SUPPORTED"
-      );
-    }
-    this.encoder = new AudioEncoder({
-      output: (chunk, metadata) => {
-        this.handleEncodedChunk(chunk, metadata);
-      },
-      error: (error) => {
-        console.error("AudioEncoder error:", error);
-      }
-    });
-    this.encoder.configure(encoderConfig);
-    this.isInitialized = true;
-    this.log(`initialized: ${this.config.sampleRate}Hz, ${this.config.channels}ch, ${this.config.bitrate}bps, ${this.config.frameDurationMs}ms frames`);
-  }
-  /**
-   * Encode PCM audio data
-   *
-   * @param pcmData - Float32 PCM samples (interleaved if stereo)
-   * @param timestamp - Timestamp in microseconds
-   */
-  encode(pcmData, timestamp) {
-    if (!this.encoder || !this.isInitialized) {
-      throw new MoqClientError("Encoder not initialized", "NOT_INITIALIZED");
-    }
-    const audioData = new AudioData({
-      format: "f32",
-      sampleRate: this.config.sampleRate,
-      numberOfFrames: pcmData.length / this.config.channels,
-      numberOfChannels: this.config.channels,
-      timestamp,
-      data: pcmData.buffer
-    });
-    try {
-      this.encoder.encode(audioData);
-    } finally {
-      audioData.close();
-    }
-  }
-  /**
-   * Flush any pending frames
-   */
-  async flush() {
-    if (this.encoder && this.encoder.state === "configured") {
-      await this.encoder.flush();
-    }
-  }
-  /**
-   * Close the encoder and release resources
-   */
-  close() {
-    if (this.encoder) {
-      if (this.encoder.state !== "closed") {
-        this.encoder.close();
-      }
-      this.encoder = null;
-    }
-    this.isInitialized = false;
-  }
-  /**
-   * Handle encoded chunk from WebCodecs
-   */
-  handleEncodedChunk(chunk, _metadata) {
-    const data = new Uint8Array(chunk.byteLength);
-    chunk.copyTo(data);
-    const frameDurationUs = this.config.frameDurationMs * 1e3;
-    const frame = {
-      data,
-      timestamp: chunk.timestamp,
-      duration: chunk.duration ?? frameDurationUs
-    };
-    if (this.frameCallback) {
-      this.frameCallback(frame);
-    }
-  }
-  /**
-   * Get encoder state
-   */
-  getState() {
-    var _a;
-    return ((_a = this.encoder) == null ? void 0 : _a.state) ?? "closed";
-  }
-}
-const WORKLET_PROCESSOR_CODE = `
-class AudioCaptureProcessor extends AudioWorkletProcessor {
-  process(inputs, outputs, parameters) {
-    const input = inputs[0];
-    if (input && input[0] && input[0].length > 0) {
-      this.port.postMessage(new Float32Array(input[0]));
-    }
-    return true;
-  }
-}
-registerProcessor('audio-capture-processor', AudioCaptureProcessor);
-`;
-class AudioCaptureEncoder {
-  constructor(config = {}) {
-    __publicField(this, "audioContext", null);
-    __publicField(this, "sourceNode", null);
-    __publicField(this, "workletNode", null);
-    __publicField(this, "encoder");
-    __publicField(this, "config");
-    __publicField(this, "sampleBuffer", []);
-    __publicField(this, "bufferSize", 0);
-    __publicField(this, "samplesPerFrame");
-    __publicField(this, "frameDurationUs");
-    __publicField(this, "timestampUs", 0);
-    __publicField(this, "isRunning", false);
-    this.config = {
-      sampleRate: config.sampleRate ?? 48e3,
-      channels: config.channels ?? 1,
-      bitrate: config.bitrate ?? 64e3,
-      frameDurationMs: config.frameDurationMs ?? 5,
-      debug: config.debug ?? false
-    };
-    this.encoder = new OpusEncoder(this.config);
-    this.samplesPerFrame = Math.floor(this.config.sampleRate * this.config.frameDurationMs / 1e3);
-    this.frameDurationUs = this.config.frameDurationMs * 1e3;
-  }
-  // eslint-disable-next-line @typescript-eslint/no-explicit-any
-  log(...args) {
-    if (this.config.debug) {
-      console.log("[AudioCaptureEncoder]", ...args);
-    }
-  }
-  /**
-   * Set callback for encoded Opus frames
-   */
-  onFrame(callback) {
-    this.encoder.onFrame(callback);
-  }
-  /**
-   * Start capturing and encoding
-   */
-  async start(mediaStream) {
-    await this.encoder.initialize();
-    this.audioContext = new AudioContext({
-      sampleRate: this.config.sampleRate
-    });
-    const blob = new Blob([WORKLET_PROCESSOR_CODE], { type: "application/javascript" });
-    const url = URL.createObjectURL(blob);
-    await this.audioContext.audioWorklet.addModule(url);
-    URL.revokeObjectURL(url);
-    this.sourceNode = this.audioContext.createMediaStreamSource(mediaStream);
-    this.workletNode = new AudioWorkletNode(this.audioContext, "audio-capture-processor");
-    this.workletNode.port.onmessage = (event) => {
-      if (!this.isRunning) return;
-      this.addSamples(event.data);
-    };
-    this.sourceNode.connect(this.workletNode);
-    this.isRunning = true;
-    this.log(`started (AudioWorklet, ${this.config.frameDurationMs}ms frames, ${this.samplesPerFrame} samples/frame)`);
-  }
-  /**
-   * Add samples to buffer and encode when we have enough
-   */
-  addSamples(samples) {
-    this.sampleBuffer.push(samples);
-    this.bufferSize += samples.length;
-    while (this.bufferSize >= this.samplesPerFrame) {
-      const frameData = new Float32Array(this.samplesPerFrame);
-      let frameOffset = 0;
-      while (frameOffset < this.samplesPerFrame && this.sampleBuffer.length > 0) {
-        const chunk = this.sampleBuffer[0];
-        const needed = this.samplesPerFrame - frameOffset;
-        const available = chunk.length;
-        if (available <= needed) {
-          frameData.set(chunk, frameOffset);
-          frameOffset += available;
-          this.sampleBuffer.shift();
-          this.bufferSize -= available;
-        } else {
-          frameData.set(chunk.subarray(0, needed), frameOffset);
-          this.sampleBuffer[0] = chunk.subarray(needed);
-          this.bufferSize -= needed;
-          frameOffset += needed;
-        }
-      }
-      this.encoder.encode(frameData, this.timestampUs);
-      this.timestampUs += this.frameDurationUs;
-    }
-  }
-  /**
-   * Stop capturing and encoding
-   */
-  async stop() {
-    this.isRunning = false;
-    await this.encoder.flush();
-    if (this.workletNode) {
-      this.workletNode.disconnect();
-      this.workletNode = null;
-    }
-    if (this.sourceNode) {
-      this.sourceNode.disconnect();
-      this.sourceNode = null;
-    }
-    if (this.audioContext) {
-      await this.audioContext.close();
-      this.audioContext = null;
-    }
-    this.encoder.close();
-    this.sampleBuffer = [];
-    this.bufferSize = 0;
-    this.log("stopped");
-  }
-  /**
-   * Check if currently running
-   */
-  isActive() {
-    return this.isRunning;
-  }
-}
-var AudioPublisherState = /* @__PURE__ */ ((AudioPublisherState2) => {
-  AudioPublisherState2["IDLE"] = "idle";
-  AudioPublisherState2["REQUESTING_PERMISSION"] = "requesting_permission";
-  AudioPublisherState2["READY"] = "ready";
-  AudioPublisherState2["RECORDING"] = "recording";
-  AudioPublisherState2["PAUSED"] = "paused";
-  AudioPublisherState2["ERROR"] = "error";
-  return AudioPublisherState2;
-})(AudioPublisherState || {});
-class AudioPermissionError extends MoqClientError {
-  constructor(message, details) {
-    super(message, "AUDIO_PERMISSION_DENIED", details);
-    this.name = "AudioPermissionError";
-  }
-}
-class AudioEncodingError extends MoqClientError {
-  constructor(message, details) {
-    super(message, "AUDIO_ENCODING_FAILED", details);
-    this.name = "AudioEncodingError";
-  }
-}
-class AudioNotSupportedError extends MoqClientError {
-  constructor(message) {
-    super(message, "AUDIO_NOT_SUPPORTED");
-    this.name = "AudioNotSupportedError";
-  }
-}
-function isOpusSupported() {
-  if (typeof MediaRecorder === "undefined") {
-    return false;
-  }
-  const mimeTypes = [
-    "audio/webm;codecs=opus",
-    "audio/ogg;codecs=opus",
-    "audio/webm"
-  ];
-  for (const mimeType of mimeTypes) {
-    if (MediaRecorder.isTypeSupported(mimeType)) {
-      return true;
-    }
-  }
-  return false;
-}
-function getBestOpusMimeType() {
-  if (typeof MediaRecorder === "undefined") {
-    return null;
-  }
-  const mimeTypes = [
-    "audio/webm;codecs=opus",
-    "audio/ogg;codecs=opus",
-    "audio/webm"
-  ];
-  for (const mimeType of mimeTypes) {
-    if (MediaRecorder.isTypeSupported(mimeType)) {
-      return mimeType;
-    }
-  }
-  return null;
-}
-class AudioPublisher {
-  constructor(config = {}) {
-    __publicField(this, "config");
-    __publicField(this, "state", "idle");
-    __publicField(this, "mediaStream", null);
-    __publicField(this, "mediaRecorder", null);
-    __publicField(this, "frameHandler", null);
-    // WebCodecs encoder (preferred - produces raw Opus)
-    __publicField(this, "webCodecsEncoder", null);
-    __publicField(this, "useWebCodecs", false);
-    // Timing
-    __publicField(this, "startTime", 0);
-    __publicField(this, "frameSequence", 0);
-    this.config = {
-      sampleRate: config.sampleRate ?? 48e3,
-      channelCount: config.channelCount ?? 1,
-      bitrate: config.bitrate ?? 64e3,
-      frameDurationMs: config.frameDurationMs ?? 5,
-      echoCancellation: config.echoCancellation ?? false,
-      noiseSuppression: config.noiseSuppression ?? false,
-      autoGainControl: config.autoGainControl ?? false,
-      deviceId: config.deviceId,
-      debug: config.debug ?? false
-    };
-    this.useWebCodecs = isWebCodecsOpusSupported();
-    if (this.useWebCodecs) {
-      this.log("Using WebCodecs for raw Opus encoding");
-    } else {
-      this.log("WebCodecs not available, using MediaRecorder (WebM container)");
-    }
-  }
-  // eslint-disable-next-line @typescript-eslint/no-explicit-any
-  log(...args) {
-    if (this.config.debug) {
-      console.log("[AudioPublisher]", ...args);
-    }
-  }
-  /**
-   * Get current state
-   */
-  getState() {
-    return this.state;
-  }
-  /**
-   * Set handler for audio frames
-   */
-  onFrame(handler) {
-    this.frameHandler = handler;
-  }
-  /**
-   * Request microphone access and prepare for recording
-   */
-  async initialize() {
-    if (this.state !== "idle") {
-      throw new MoqClientError(
-        `Cannot initialize: already in state ${this.state}`,
-        "INVALID_STATE"
-      );
-    }
-    if (!navigator.mediaDevices || !navigator.mediaDevices.getUserMedia) {
-      throw new AudioNotSupportedError(
-        "getUserMedia is not supported in this browser"
-      );
-    }
-    if (!isOpusSupported()) {
-      throw new AudioNotSupportedError(
-        "Opus encoding is not supported in this browser. Try Chrome, Firefox, or Edge."
-      );
-    }
-    this.setState(
-      "requesting_permission"
-      /* REQUESTING_PERMISSION */
-    );
-    try {
-      this.mediaStream = await navigator.mediaDevices.getUserMedia({
-        audio: {
-          channelCount: this.config.channelCount,
-          sampleRate: this.config.sampleRate,
-          echoCancellation: this.config.echoCancellation,
-          noiseSuppression: this.config.noiseSuppression,
-          autoGainControl: this.config.autoGainControl,
-          latency: { ideal: 5e-3 },
-          ...this.config.deviceId ? { deviceId: { exact: this.config.deviceId } } : {}
-        },
-        video: false
-      });
-      this.setState(
-        "ready"
-        /* READY */
-      );
-      this.log("Microphone access granted");
-    } catch (error) {
-      this.setState(
-        "error"
-        /* ERROR */
-      );
-      if (error instanceof DOMException) {
-        if (error.name === "NotAllowedError" || error.name === "PermissionDeniedError") {
-          throw new AudioPermissionError(
-            "Microphone access denied. Please allow microphone access in your browser settings.",
-            error
-          );
-        } else if (error.name === "NotFoundError") {
-          throw new AudioPermissionError(
-            "No microphone found. Please connect a microphone and try again.",
-            error
-          );
-        } else if (error.name === "NotReadableError") {
-          throw new AudioPermissionError(
-            "Microphone is in use by another application.",
-            error
-          );
-        }
-      }
-      throw new AudioPermissionError(
-        `Failed to access microphone: ${error}`,
-        error
-      );
-    }
-  }
-  /**
-   * Start recording and encoding audio
-   */
-  start() {
-    if (this.state !== "ready" && this.state !== "paused") {
-      throw new MoqClientError(
-        `Cannot start: must be in READY or PAUSED state, currently ${this.state}`,
-        "INVALID_STATE"
-      );
-    }
-    if (!this.mediaStream) {
-      throw new MoqClientError("No media stream available", "INVALID_STATE");
-    }
-    if (this.useWebCodecs) {
-      this.startWebCodecs();
-      return;
-    }
-    this.startMediaRecorder();
-  }
-  /**
-   * Start encoding using WebCodecs AudioEncoder (preferred - raw Opus)
-   */
-  startWebCodecs() {
-    this.webCodecsEncoder = new AudioCaptureEncoder({
-      sampleRate: this.config.sampleRate,
-      channels: this.config.channelCount,
-      bitrate: this.config.bitrate,
-      frameDurationMs: this.config.frameDurationMs,
-      debug: this.config.debug
-    });
-    this.webCodecsEncoder.onFrame((opusFrame) => {
-      if (this.frameHandler) {
-        const frame = {
-          data: opusFrame.data,
-          timestamp: Math.floor(opusFrame.timestamp / 1e3),
-          // Convert us to ms
-          duration: Math.floor(opusFrame.duration / 1e3)
-        };
-        this.frameHandler(frame);
-      }
-    });
-    this.webCodecsEncoder.start(this.mediaStream).then(() => {
-      this.setState(
-        "recording"
-        /* RECORDING */
-      );
-      this.log(`Recording started with WebCodecs, ${this.config.bitrate} bps (raw Opus)`);
-    }).catch((error) => {
-      console.error("Failed to start WebCodecs encoder:", error);
-      this.setState(
-        "error"
-        /* ERROR */
-      );
-    });
-  }
-  /**
-   * Start encoding using MediaRecorder (fallback - WebM container)
-   */
-  startMediaRecorder() {
-    const mimeType = getBestOpusMimeType();
-    if (!mimeType) {
-      throw new AudioNotSupportedError("No supported Opus MIME type found");
-    }
-    this.mediaRecorder = new MediaRecorder(this.mediaStream, {
-      mimeType,
-      audioBitsPerSecond: this.config.bitrate
-    });
-    this.mediaRecorder.ondataavailable = (event) => {
-      if (event.data.size > 0) {
-        this.handleEncodedData(event.data);
-      }
-    };
-    this.mediaRecorder.onerror = (event) => {
-      console.error("MediaRecorder error:", event);
-      this.setState(
-        "error"
-        /* ERROR */
-      );
-    };
-    this.mediaRecorder.onstop = () => {
-      this.log("MediaRecorder stopped");
-    };
-    this.startTime = performance.now();
-    this.frameSequence = 0;
-    this.mediaRecorder.start(this.config.frameDurationMs);
-    this.setState(
-      "recording"
-      /* RECORDING */
-    );
-    this.log(`Recording started with ${mimeType}, ${this.config.bitrate} bps (WARNING: WebM container, server may not decode correctly)`);
-  }
-  /**
-   * Pause recording
-   */
-  pause() {
-    if (this.state !== "recording") {
-      return;
-    }
-    if (this.webCodecsEncoder) {
-      this.webCodecsEncoder.stop().catch(console.error);
-      this.setState(
-        "paused"
-        /* PAUSED */
-      );
-      return;
-    }
-    if (this.mediaRecorder && this.mediaRecorder.state === "recording") {
-      this.mediaRecorder.pause();
-      this.setState(
-        "paused"
-        /* PAUSED */
-      );
-    }
-  }
-  /**
-   * Resume recording
-   */
-  resume() {
-    if (this.state !== "paused") {
-      return;
-    }
-    if (this.useWebCodecs && this.mediaStream) {
-      this.startWebCodecs();
-      return;
-    }
-    if (this.mediaRecorder && this.mediaRecorder.state === "paused") {
-      this.mediaRecorder.resume();
-      this.setState(
-        "recording"
-        /* RECORDING */
-      );
-    }
-  }
-  /**
-   * Stop recording
-   */
-  stop() {
-    if (this.webCodecsEncoder) {
-      this.webCodecsEncoder.stop().catch((error) => {
-        console.error("Error stopping WebCodecs encoder:", error);
-      });
-      this.webCodecsEncoder = null;
-    }
-    if (this.mediaRecorder) {
-      if (this.mediaRecorder.state !== "inactive") {
-        this.mediaRecorder.stop();
-      }
-      this.mediaRecorder = null;
-    }
-    this.setState(
-      "ready"
-      /* READY */
-    );
-  }
-  /**
-   * Release all resources
-   */
-  dispose() {
-    this.stop();
-    if (this.mediaStream) {
-      for (const track of this.mediaStream.getTracks()) {
-        track.stop();
-      }
-      this.mediaStream = null;
-    }
-    this.frameHandler = null;
-    this.setState(
-      "idle"
-      /* IDLE */
-    );
-  }
-  /**
-   * Handle encoded audio data from MediaRecorder
-   */
-  async handleEncodedData(blob) {
-    try {
-      const arrayBuffer = await blob.arrayBuffer();
-      const data = new Uint8Array(arrayBuffer);
-      const timestamp = performance.now() - this.startTime;
-      const frame = {
-        data,
-        timestamp: Math.floor(timestamp),
-        duration: this.config.frameDurationMs
-      };
-      this.frameSequence++;
-      if (this.frameHandler) {
-        this.frameHandler(frame);
-      }
-    } catch (error) {
-      console.error("Error processing encoded audio:", error);
-    }
-  }
-  /**
-   * Update state
-   */
-  setState(state) {
-    this.state = state;
-  }
-}
-function getAudioCapabilities() {
-  const webCodecs = isWebCodecsOpusSupported();
-  const mediaRecorder = isOpusSupported();
-  let preferredEncoder = "none";
-  if (webCodecs) {
-    preferredEncoder = "webcodecs";
-  } else if (mediaRecorder) {
-    preferredEncoder = "mediarecorder";
-  }
-  return {
-    getUserMedia: !!(navigator.mediaDevices && navigator.mediaDevices.getUserMedia),
-    mediaRecorder: typeof MediaRecorder !== "undefined",
-    opusSupport: mediaRecorder,
-    bestMimeType: getBestOpusMimeType(),
-    webCodecs,
-    preferredEncoder
   };
 }
 class TrackPublisher {
@@ -3870,6 +3883,9 @@ class MoqTransportAdapter {
       handler(new Error(event.message));
     });
   }
+  onWarning(handler) {
+    this.registerHandler("warning", handler);
+  }
   // eslint-disable-next-line @typescript-eslint/no-explicit-any
   registerHandler(event, handler) {
     if (this.client) {
@@ -3898,6 +3914,7 @@ export {
   AudioSubscriberState,
   AudioTrackPublisher,
   AuthenticationError,
+  BluetoothMicDefaultError,
   ConnectionError,
   ConnectionState,
   ControlTrackPublisher,

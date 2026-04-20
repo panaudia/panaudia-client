@@ -49,7 +49,7 @@ fi
 
 echo "Destination: $DEST"
 
-# Build in the source directory
+# Build in the source directory — static build (for editor / dylib consumers)
 cd "$CORE_SRC"
 cmake -B build -DCMAKE_BUILD_TYPE=Release -DCMAKE_OSX_ARCHITECTURES=arm64
 cmake --build build -j$(sysctl -n hw.ncpu)
@@ -68,8 +68,35 @@ cp "$CORE_SRC/build/libpanaudia-core.a" "$DEST/lib/Mac/"
 # Copy libopus (static — transitive dep not embedded in .a)
 cp "$CORE_SRC/build/_deps/opus-build/libopus.a" "$DEST/lib/Mac/"
 
-# Copy libmsquic (static — QUIC transport)
-cp "$CORE_SRC/build/_deps/msquic-build/bin/Release/libmsquic.a" "$DEST/lib/Mac/"
+# Copy libmsquic (static — QUIC transport) with OpenSSL symbols hidden.
+# msquic bundles OpenSSL 3.x which conflicts with UE's OpenSSL 1.1.x in
+# monolithic (packaged) builds. Merging into a single .o and re-exporting
+# only msquic's public API makes the OpenSSL symbols local/private.
+MSQUIC_RAW="$CORE_SRC/build/_deps/msquic-build/bin/Release/libmsquic.a"
+
+# Hide all symbols inside libmsquic.a except the two that libpanaudia-core
+# needs (_MsQuicOpenVersion, _MsQuicClose). This prevents msquic's bundled
+# OpenSSL 3.x from conflicting with UE's OpenSSL 1.1.x in monolithic builds.
+# Using nmedit -s (keep-list) ensures ALL internal references — including
+# msquic→OpenSSL calls — stay resolved to the bundled copies.
+KEEP_SYMBOLS=$(mktemp)
+cat > "$KEEP_SYMBOLS" << 'SYMBOLS'
+_MsQuicOpenVersion
+_MsQuicClose
+SYMBOLS
+
+echo "Hiding all symbols in libmsquic.a except MsQuicOpenVersion and MsQuicClose"
+
+# Merge all .o files into a single relocatable object (resolves internal refs)
+ld -r -arch arm64 -all_load "$MSQUIC_RAW" -o "$DEST/lib/Mac/libmsquic_merged.o"
+
+# Keep only the two API symbols global, everything else becomes static/local
+nmedit -s "$KEEP_SYMBOLS" "$DEST/lib/Mac/libmsquic_merged.o"
+
+# Re-wrap as static archive
+ar rcs "$DEST/lib/Mac/libmsquic.a" "$DEST/lib/Mac/libmsquic_merged.o"
+rm "$DEST/lib/Mac/libmsquic_merged.o"
+rm "$KEEP_SYMBOLS"
 
 echo ""
 echo "=== Artifacts ==="

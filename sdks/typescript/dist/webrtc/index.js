@@ -5,7 +5,8 @@ import { C as ConnectionState, a as entityInfo3ToBytes, E as ENTITY_INFO3_SIZE, 
 function extractEntityIdFromJwt(token) {
   const parts = token.split(".");
   if (parts.length !== 3) throw new Error("Invalid JWT format");
-  const payload = JSON.parse(atob(parts[1]));
+  const b64 = parts[1].replace(/-/g, "+").replace(/_/g, "/");
+  const payload = JSON.parse(atob(b64));
   if (!payload.jti) throw new Error("JWT missing jti (entity ID)");
   return payload.jti;
 }
@@ -27,6 +28,7 @@ class WebRtcTransport {
     __publicField(this, "attributesHandlers", []);
     __publicField(this, "connectionStateHandlers", []);
     __publicField(this, "errorHandlers", []);
+    __publicField(this, "warningHandlers", []);
   }
   async connect(config) {
     this.entityId = config.entityId ?? extractEntityIdFromJwt(config.ticket);
@@ -165,6 +167,9 @@ class WebRtcTransport {
   }
   onError(handler) {
     this.errorHandlers.push(handler);
+  }
+  onWarning(handler) {
+    this.warningHandlers.push(handler);
   }
   // ── Internal ──────────────────────────────────────────────────────────
   setState(state) {

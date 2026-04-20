@@ -69,6 +69,7 @@ export type ClientEventType =
   | 'disconnected'
   | 'authenticated'
   | 'error'
+  | 'warning'
   | 'statechange'
   | 'entityState'
   | 'attributes'
@@ -84,6 +85,15 @@ export type ClientEventHandler<T = unknown> = (event: T) => void;
  */
 export interface ErrorEvent {
   code: string | number;
+  message: string;
+  details?: unknown;
+}
+
+/**
+ * Warning event payload — non-fatal issues the application may want to surface to users.
+ */
+export interface WarningEvent {
+  code: string;
   message: string;
   details?: unknown;
 }

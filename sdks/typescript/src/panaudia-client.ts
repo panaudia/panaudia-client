@@ -12,6 +12,7 @@ import {
   type EntityInfo3,
   type EntityAttributes,
   type ErrorEvent,
+  type WarningEvent,
   type EntityState,
 } from './types.js';
 import type { PanaudiaPose } from './shared/coordinates.js';
@@ -19,6 +20,12 @@ import { createEntityInfo3 } from './shared/encoding.js';
 import { MoqTransportAdapter } from './moq/moq-transport-adapter.js';
 import { isWebTransportSupported } from './moq/connection.js';
 import { WebRtcTransport } from './webrtc/webrtc-transport.js';
+import {
+  selectBestMicrophone,
+  classifyByLabel,
+  type MicrophoneType,
+} from './shared/microphone-selection.js';
+import { BluetoothMicDefaultError } from './moq/audio-publisher.js';
 
 export type TransportType = 'moq' | 'webrtc';
 
@@ -52,6 +59,7 @@ type EventHandlerMap = {
   disconnected: () => void;
   authenticated: () => void;
   error: (event: ErrorEvent) => void;
+  warning: (event: WarningEvent) => void;
   entityState: (state: EntityState) => void;
   attributes: (attrs: EntityAttributes) => void;
 };
@@ -59,17 +67,44 @@ type EventHandlerMap = {
 export interface MicrophoneInfo {
   deviceId: string;
   label: string;
+  type: MicrophoneType;
 }
 
 export class PanaudiaClient {
 
-  /** List available microphone devices. Labels may be empty until mic permission is granted. */
+  /**
+   * List available microphone devices with type classification.
+   * Requests mic permission if not already granted (one prompt, briefly opens default mic).
+   */
   static async listMicrophones(): Promise<MicrophoneInfo[]> {
+    // Ensure mic permission is granted so device labels are populated.
+    let stream: MediaStream | null = null;
+    try {
+      stream = await navigator.mediaDevices.getUserMedia({ audio: true, video: false });
+    } finally {
+      if (stream) {
+        for (const track of stream.getTracks()) {
+          track.stop();
+        }
+      }
+    }
+
     const devices = await navigator.mediaDevices.enumerateDevices();
     return devices
       .filter((d) => d.kind === 'audioinput')
-      .map((d) => ({ deviceId: d.deviceId, label: d.label }));
+      .map((d) => ({
+        deviceId: d.deviceId,
+        label: d.label,
+        type: classifyByLabel(d.label),
+      }));
   }
+
+  /**
+   * Get the recommended non-Bluetooth microphone.
+   * Use this to pre-select a device in a mic picker UI.
+   * The user should confirm the selection before connecting.
+   */
+  static getRecommendedMicrophone = selectBestMicrophone;
   private transport: Transport;
   private transportType: TransportType;
   private config: PanaudiaClientConfig;
@@ -137,11 +172,51 @@ export class PanaudiaClient {
       };
       this.emit('error', event);
     });
+    this.transport.onWarning((warning) => {
+      this.emit('warning', warning);
+    });
   }
 
   // ── Connection lifecycle ─────────────────────────────────────────────
 
   async connect(): Promise<void> {
+    // Check Bluetooth mic status before any transport setup.
+    // This ensures both MOQ and WebRTC fail identically (clean, nothing connected).
+    const microphoneId = this.config.microphoneId;
+    if (navigator.mediaDevices?.getUserMedia) {
+      try {
+        // Brief getUserMedia to populate device labels, then stop immediately
+        const permStream = await navigator.mediaDevices.getUserMedia({ audio: true, video: false });
+        for (const track of permStream.getTracks()) track.stop();
+
+        const devices = await navigator.mediaDevices.enumerateDevices();
+        const mics = devices
+          .filter((d) => d.kind === 'audioinput')
+          .map((d) => ({ deviceId: d.deviceId, label: d.label, type: classifyByLabel(d.label) }));
+
+        if (microphoneId) {
+          // Explicit device — warn if Bluetooth
+          const match = mics.find((m) => m.deviceId === microphoneId);
+          if (match && match.type === 'bluetooth') {
+            this.emit('warning', {
+              code: 'BLUETOOTH_MIC',
+              message: `Bluetooth microphone in use: ${match.label}. Stereo audio may be reduced to mono.`,
+              details: { deviceId: microphoneId, label: match.label },
+            });
+          }
+        } else {
+          // No explicit device — refuse if default is Bluetooth
+          const defaultMic = mics[0];
+          if (defaultMic && defaultMic.type === 'bluetooth') {
+            throw new BluetoothMicDefaultError(defaultMic.label, mics);
+          }
+        }
+      } catch (e) {
+        // Re-throw our own errors, swallow enumeration failures
+        if (e instanceof BluetoothMicDefaultError) throw e;
+      }
+    }
+
     await this.transport.connect({
       serverUrl: this.config.serverUrl,
       ticket: this.config.ticket,

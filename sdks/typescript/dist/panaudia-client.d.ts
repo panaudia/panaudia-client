@@ -1,5 +1,6 @@
-import { ConnectionState, Position, Rotation, EntityAttributes, ErrorEvent, EntityState } from './types.js';
+import { ConnectionState, Position, Rotation, EntityAttributes, ErrorEvent, WarningEvent, EntityState } from './types.js';
 import { PanaudiaPose } from './shared/coordinates.js';
+import { selectBestMicrophone, MicrophoneType } from './shared/microphone-selection.js';
 export type TransportType = 'moq' | 'webrtc';
 export interface PanaudiaClientConfig {
     /** Server URL (from resolveServer() or hardcoded for dev). */
@@ -33,16 +34,27 @@ type EventHandlerMap = {
     disconnected: () => void;
     authenticated: () => void;
     error: (event: ErrorEvent) => void;
+    warning: (event: WarningEvent) => void;
     entityState: (state: EntityState) => void;
     attributes: (attrs: EntityAttributes) => void;
 };
 export interface MicrophoneInfo {
     deviceId: string;
     label: string;
+    type: MicrophoneType;
 }
 export declare class PanaudiaClient {
-    /** List available microphone devices. Labels may be empty until mic permission is granted. */
+    /**
+     * List available microphone devices with type classification.
+     * Requests mic permission if not already granted (one prompt, briefly opens default mic).
+     */
     static listMicrophones(): Promise<MicrophoneInfo[]>;
+    /**
+     * Get the recommended non-Bluetooth microphone.
+     * Use this to pre-select a device in a mic picker UI.
+     * The user should confirm the selection before connecting.
+     */
+    static getRecommendedMicrophone: typeof selectBestMicrophone;
     private transport;
     private transportType;
     private config;
@@ -77,7 +89,7 @@ export declare class PanaudiaClient {
      * Accepts a PanaudiaPose — the same type returned by the coordinate converter functions.
      *
      * @example
-     * client.setPose(threejsToPanaudia({ position, rotation }));
+     * client.setPose(threejsToPanaudia(position, rotation));
      */
     setPose(pose: PanaudiaPose): void;
     mute(entityId: string): Promise<void>;

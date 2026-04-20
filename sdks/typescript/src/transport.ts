@@ -8,6 +8,7 @@ import type {
   ControlMessage,
   EntityState,
   EntityAttributes,
+  WarningEvent,
   Position,
   Rotation,
 } from './types.js';
@@ -107,4 +108,7 @@ export interface Transport {
 
   /** Register handler for errors. */
   onError(handler: (error: Error) => void): void;
+
+  /** Register handler for warnings (non-fatal issues like Bluetooth mic detected). */
+  onWarning(handler: (warning: WarningEvent) => void): void;
 }
