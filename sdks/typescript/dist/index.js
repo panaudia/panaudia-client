@@ -1,8 +1,8 @@
 var __defProp = Object.defineProperty;
 var __defNormalProp = (obj, key, value) => key in obj ? __defProp(obj, key, { enumerable: true, configurable: true, writable: true, value }) : obj[key] = value;
 var __publicField = (obj, key, value) => __defNormalProp(obj, typeof key !== "symbol" ? key + "" : key, value);
-import { C as ConnectionState, c as createEntityInfo3 } from "./encoding.js";
-import { E, b, e, a, i, u } from "./encoding.js";
+import { C as ConnectionState, c as createEntityInfo3 } from "./json-ops.js";
+import { E, b, e, a, i, u } from "./json-ops.js";
 import { isWebTransportSupported, MoqTransportAdapter, BluetoothMicDefaultError } from "./moq/index.js";
 import { aframeToPanaudia, ambisonicToWebglPosition, ambisonicToWebglRotation, babylonToPanaudia, getWebTransportSupport, panaudiaToAframe, panaudiaToBabylon, panaudiaToPixi, panaudiaToPlaycanvas, panaudiaToThreejs, panaudiaToUnity, panaudiaToUnreal, pixiToPanaudia, playcanvasToPanaudia, threejsToPanaudia, unityToPanaudia, unrealToPanaudia, webglToAmbisonicPosition, webglToAmbisonicRotation } from "./moq/index.js";
 import { WebRtcTransport } from "./webrtc/index.js";
@@ -235,6 +235,127 @@ async function resolveServer(ticket, options) {
   }
   return body.url;
 }
+class AttributeTree {
+  constructor() {
+    __publicField(this, "participants", /* @__PURE__ */ new Map());
+  }
+  /**
+   * Apply a batch of attribute values from one envelope.
+   * Existing uuids are mutated in place; new uuids are built fully then
+   * inserted atomically. Returns the set of uuids whose subtree changed.
+   */
+  applyValues(values) {
+    const affected = /* @__PURE__ */ new Set();
+    const fresh = /* @__PURE__ */ new Map();
+    for (const { key, value } of values) {
+      const parts = key.split(".");
+      const uuid = parts[0];
+      if (!uuid) continue;
+      let target = fresh.get(uuid) ?? this.participants.get(uuid);
+      if (target === void 0) {
+        target = {};
+        fresh.set(uuid, target);
+      }
+      affected.add(uuid);
+      if (parts.length === 1) {
+        continue;
+      }
+      let parsed;
+      try {
+        parsed = JSON.parse(value);
+      } catch {
+        continue;
+      }
+      let node = target;
+      for (let i2 = 1; i2 < parts.length - 1; i2++) {
+        const seg = parts[i2];
+        const child = node[seg];
+        if (typeof child !== "object" || child === null || Array.isArray(child)) {
+          node[seg] = {};
+        }
+        node = node[seg];
+      }
+      node[parts[parts.length - 1]] = parsed;
+    }
+    for (const [uuid, attrs] of fresh) {
+      this.participants.set(uuid, attrs);
+    }
+    return affected;
+  }
+  /**
+   * Apply a batch of tombstones from one envelope.
+   * Walks the dotted path for each key and removes the leaf, cleaning up
+   * empty intermediate objects. Returns the set of uuids that still have
+   * data (`updated`) and uuids whose last attribute was removed (`removed`).
+   */
+  applyRemoved(keys) {
+    const touched = /* @__PURE__ */ new Set();
+    for (const key of keys) {
+      const parts = key.split(".");
+      const uuid = parts[0];
+      if (!uuid) continue;
+      const target = this.participants.get(uuid);
+      if (target === void 0) continue;
+      touched.add(uuid);
+      if (parts.length === 1) {
+        this.participants.delete(uuid);
+        continue;
+      }
+      this.deletePath(target, parts, 1);
+      if (Object.keys(target).length === 0) {
+        this.participants.delete(uuid);
+      }
+    }
+    const updated = /* @__PURE__ */ new Set();
+    const removed = /* @__PURE__ */ new Set();
+    for (const uuid of touched) {
+      if (this.participants.has(uuid)) {
+        updated.add(uuid);
+      } else {
+        removed.add(uuid);
+      }
+    }
+    return { updated, removed };
+  }
+  /**
+   * Get the attribute object for a single participant.
+   */
+  get(uuid) {
+    return this.participants.get(uuid);
+  }
+  /**
+   * Get the full tree as a read-only map of `uuid -> attributes`.
+   */
+  getAll() {
+    return this.participants;
+  }
+  /**
+   * Number of participants in the tree.
+   */
+  get size() {
+    return this.participants.size;
+  }
+  /**
+   * Drop all participants.
+   */
+  clear() {
+    this.participants.clear();
+  }
+  deletePath(node, parts, index) {
+    const seg = parts[index];
+    if (index === parts.length - 1) {
+      delete node[seg];
+      return;
+    }
+    const child = node[seg];
+    if (typeof child === "object" && child !== null && !Array.isArray(child)) {
+      this.deletePath(child, parts, index + 1);
+      if (Object.keys(child).length === 0) {
+        delete node[seg];
+      }
+    }
+  }
+}
 class PanaudiaClient {
   constructor(config) {
     __publicField(this, "transport");
@@ -249,6 +370,9 @@ class PanaudiaClient {
     __publicField(this, "muted", false);
     // Event emitter
     __publicField(this, "handlers", /* @__PURE__ */ new Map());
+    // Structured per-participant view of attribute state, kept in sync with
+    // the flat values/removed events from the transport.
+    __publicField(this, "attributeTree", new AttributeTree());
     this.config = config;
     this.position = config.initialPosition ?? { x: 0.5, y: 0.5, z: 0.5 };
     this.rotation = config.initialRotation ?? { yaw: 0, pitch: 0, roll: 0 };
@@ -280,7 +404,25 @@ class PanaudiaClient {
         this.emit("entityState", state);
       }
     });
-    this.transport.onAttributes((attrs) => this.emit("attributes", attrs));
+    this.transport.onAttributeValues((values) => {
+      this.emit("attributes", values);
+      const affected = this.attributeTree.applyValues(values);
+      for (const uuid of affected) {
+        const attrs = this.attributeTree.get(uuid);
+        if (attrs) this.emit("attributeTreeChange", uuid, attrs);
+      }
+    });
+    this.transport.onAttributeRemoved((keys) => {
+      this.emit("attributesRemoved", keys);
+      const { updated, removed } = this.attributeTree.applyRemoved(keys);
+      for (const uuid of updated) {
+        const attrs = this.attributeTree.get(uuid);
+        if (attrs) this.emit("attributeTreeChange", uuid, attrs);
+      }
+      for (const uuid of removed) {
+        this.emit("attributeTreeRemove", uuid);
+      }
+    });
     this.transport.onConnectionStateChange((state) => {
       if (state === ConnectionState.CONNECTED) this.emit("connected", void 0);
       if (state === ConnectionState.AUTHENTICATED) this.emit("authenticated", void 0);
@@ -447,13 +589,26 @@ class PanaudiaClient {
       set.delete(handler);
     }
   }
+  /**
+   * Get the structured per-participant attribute tree, keyed by uuid.
+   * Maintained automatically from incoming attribute values and tombstones.
+   */
+  getAttributeTree() {
+    return this.attributeTree.getAll();
+  }
+  /**
+   * Get a single participant's attributes, or undefined if unknown.
+   */
+  getAttributes(uuid) {
+    return this.attributeTree.get(uuid);
+  }
   // ── Internal ─────────────────────────────────────────────────────────
-  emit(event, data) {
+  emit(event, ...args) {
     const set = this.handlers.get(event);
     if (set) {
       for (const handler of set) {
         try {
-          handler(data);
+          handler(...args);
         } catch (err) {
           console.error(`Error in ${event} handler:`, err);
         }
@@ -499,6 +654,7 @@ class PanaudiaClient {
  */
 __publicField(PanaudiaClient, "getRecommendedMicrophone", selectBestMicrophone);
 export {
+  AttributeTree,
   BluetoothMicDefaultError,
   ConnectionState,
   E as ENTITY_INFO3_SIZE,

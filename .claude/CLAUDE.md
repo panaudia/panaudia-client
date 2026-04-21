@@ -33,7 +33,7 @@ When updating documentation, check it against the authoritative source. When upd
   - "Space" (capitalised) — a Panaudia audio space
   - "Ticket" (capitalised when referring to the concept) — a JWT for accessing a Space
   - "participant" or "user" — someone connected to a Space
-  - "entity" — the SDK term for a participant in code (EntityState, EntityAttributes)
+  - "entity" — the SDK term for a participant in code (EntityState, per-key attribute operations)
 - **Code examples** — keep them minimal and runnable. Don't add error handling unless it's the point of the example.
 - **Links** — use relative paths for internal links. For GitHub links to this repo, use `https://github.com/panaudia/panaudia-client/...`.
 

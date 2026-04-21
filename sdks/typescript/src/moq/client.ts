@@ -64,7 +64,8 @@ import { AudioSubscriber, AudioSubscriberStats } from './audio-subscriber.js';
 import { AudioPlayer, AudioPlayerState, AudioPlayerConfig, AudioPlayerStats } from './audio-player.js';
 import { StateSubscriber, EntityState, EntityStateHandler } from './state-subscriber.js';
 import { ControlTrackPublisher } from './control-publisher.js';
-import { AttributesSubscriber, EntityAttributes, AttributesHandler } from './attributes-subscriber.js';
+import { AttributesSubscriber, ValuesHandler, RemovedHandler, AttributeValue } from './attributes-subscriber.js';
+import { CacheMap } from '../shared/cache-map.js';
 
 /**
  * Event emitter for client events
@@ -181,7 +182,7 @@ class MoqSession {
   /**
    * Subscribe to a track with JWT authorization
    */
-  async subscribe(namespace: string[], trackName: string, authorization?: string): Promise<number> {
+  async subscribe(namespace: string[], trackName: string, authorization?: string, resumeOpId?: bigint): Promise<number> {
     const subscribeId = this.nextSubscribeId++;
 
     const subscribeMsg = buildSubscribe({
@@ -190,6 +191,7 @@ class MoqSession {
       trackName,
       filterType: MoqFilterType.LATEST_GROUP,
       authorization,
+      resumeOpId,
     });
 
     this.log('SUBSCRIBE message size:', subscribeMsg.length, 'bytes');
@@ -683,6 +685,7 @@ export class PanaudiaMoqClient {
   // Attributes tracking
   private attributesSubscriber: AttributesSubscriber | null = null;
   private attributesOutputTrackAlias: number = 0;
+  private readonly attributesCache: CacheMap = new CacheMap();
 
   // Track aliases (assigned after announcement/subscription)
   private audioInputTrackAlias: number = 1;
@@ -879,18 +882,25 @@ export class PanaudiaMoqClient {
       });
       this.stateSubscriber.start();
 
-      // Subscribe to attributes output track
+      // Subscribe to attributes output track (with resume opID if reconnecting)
       const attributesOutputNamespace = generateTrackNamespace(PanaudiaTrackType.ATTRIBUTES_OUTPUT, this.config.entityId);
-      this.log('Subscribing to attributes output:', attributesOutputNamespace.join('/'));
-      const attrsSubscribeId = await this.session.subscribe(attributesOutputNamespace, '');
+      const resumeOpId = this.attributesCache.getHighestOpId();
+      this.log('Subscribing to attributes output:', attributesOutputNamespace.join('/'),
+        resumeOpId > 0n ? `resumeOpId: ${resumeOpId}` : '');
+      const attrsSubscribeId = await this.session.subscribe(
+        attributesOutputNamespace, '', undefined, resumeOpId > 0n ? resumeOpId : undefined
+      );
       this.attributesOutputTrackAlias = this.session.getTrackAlias(attrsSubscribeId) ?? 0;
       this.log('Attributes output subscribed, trackAlias:', this.attributesOutputTrackAlias);
 
-      // Set up attributes subscriber
-      this.attributesSubscriber = new AttributesSubscriber();
+      // Set up attributes subscriber (reuses persistent cache for resume)
+      this.attributesSubscriber = new AttributesSubscriber(this.attributesCache);
       this.attributesSubscriber.attach(this.connection, this.attributesOutputTrackAlias);
-      this.attributesSubscriber.onAttributes((attrs) => {
-        this.events.emit<EntityAttributes>('attributes', attrs);
+      this.attributesSubscriber.onValues((values) => {
+        this.events.emit('attributes', values);
+      });
+      this.attributesSubscriber.onRemoved((keys) => {
+        this.events.emit('attributesRemoved', keys);
       });
       this.attributesSubscriber.start();
 
@@ -1061,17 +1071,31 @@ export class PanaudiaMoqClient {
   }
 
   /**
-   * Get all known nodes and their attributes
+   * Get the attributes cache containing all current key-value entries.
    */
-  getKnownEntities(): Map<string, EntityAttributes> {
-    return this.attributesSubscriber?.getKnownEntities() ?? new Map();
+  getAttributesCache(): ReadonlyMap<string, import('../shared/cache-map.js').CacheEntry> {
+    return this.attributesSubscriber?.getAll() ?? new Map();
   }
 
   /**
-   * Register a handler for attribute updates
+   * Register a handler for batches of attribute values.
+   * Fired once per envelope with all accepted (added/updated) values.
+   * A single-op envelope is delivered as a one-element array.
    */
-  onAttributes(handler: AttributesHandler): void {
-    this.events.on('attributes', handler as ClientEventHandler);
+  onAttributeValues(handler: ValuesHandler): void {
+    this.events.on('attributes', ((values: AttributeValue[]) => {
+      handler(values);
+    }) as ClientEventHandler);
+  }
+
+  /**
+   * Register a handler for batches of attribute key removals (tombstones).
+   * Fired once per envelope with all tombstoned keys.
+   */
+  onAttributeRemoved(handler: RemovedHandler): void {
+    this.events.on('attributesRemoved', ((keys: string[]) => {
+      handler(keys);
+    }) as ClientEventHandler);
   }
 
   /**

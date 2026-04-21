@@ -1,36 +1,52 @@
 import { MoqConnection } from './connection.js';
+import { CacheMap, CacheEntry } from '../shared/cache-map.js';
 /**
- * Node attributes received from the server
+ * A single key/value pair delivered to the application.
  */
-export interface EntityAttributes {
-    uuid: string;
-    name?: string;
-    ticket?: string;
-    connection?: string;
-    subspaces?: string[];
+export interface AttributeValue {
+    key: string;
+    value: string;
 }
 /**
- * Handler for attribute updates
+ * Handler called with a batch of accepted values (added or updated).
+ * A single-op message is delivered as a one-element array so callers
+ * can rely on the atomicity of each batch.
  */
-export type AttributesHandler = (attrs: EntityAttributes) => void;
+export type ValuesHandler = (values: AttributeValue[]) => void;
+/**
+ * Handler called with a batch of removed keys (tombstones).
+ * A single-op message is delivered as a one-element array.
+ */
+export type RemovedHandler = (keys: string[]) => void;
 /**
  * Attributes Subscriber
  *
- * Receives JSON-encoded attribute updates from the server's attributes output track.
- * Maintains a map of known nodes and their attributes.
+ * Receives per-key attribute operations from the server's attributes output track.
+ * Maintains a CacheMap of all current key-value pairs, with cache-aware merging
+ * via the binary cache envelope.
  */
 export declare class AttributesSubscriber {
     private connection;
     private trackAlias;
     private isListening;
-    private entities;
-    private handler;
+    private valuesHandler;
+    private removedHandler;
+    readonly cache: CacheMap;
+    constructor(cache?: CacheMap);
     private updatesReceived;
     private errorsDropped;
     /**
-     * Set handler for attribute updates
+     * Set handler called once per envelope with all accepted values.
+     * Each value is `{key, value}` where value is the JSON-serialised value
+     * from the operation. Single-op messages are delivered as a one-element
+     * array so the atomicity of batches is preserved at the API.
      */
-    onAttributes(handler: AttributesHandler): void;
+    onValues(handler: ValuesHandler): void;
+    /**
+     * Set handler called once per envelope with all tombstoned keys.
+     * Single-op messages are delivered as a one-element array.
+     */
+    onRemoved(handler: RemovedHandler): void;
     /**
      * Attach to a connection and track alias
      */
@@ -44,20 +60,24 @@ export declare class AttributesSubscriber {
      */
     stop(): void;
     /**
-     * Get all known entities
+     * Get a single cache entry by key.
      */
-    getKnownEntities(): Map<string, EntityAttributes>;
+    get(key: string): CacheEntry | undefined;
     /**
-     * Get attributes for a specific entity
+     * Get all cache entries as a read-only map.
      */
-    getEntityAttributes(uuid: string): EntityAttributes | undefined;
+    getAll(): ReadonlyMap<string, CacheEntry>;
+    /**
+     * Get the highest opId seen, for use as resume point on reconnection.
+     */
+    getResumeOpId(): bigint;
     /**
      * Get statistics
      */
     getStats(): {
         updatesReceived: number;
         errorsDropped: number;
-        entityCount: number;
+        entryCount: number;
     };
 }
 //# sourceMappingURL=attributes-subscriber.d.ts.map

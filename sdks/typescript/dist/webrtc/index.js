@@ -1,7 +1,7 @@
 var __defProp = Object.defineProperty;
 var __defNormalProp = (obj, key, value) => key in obj ? __defProp(obj, key, { enumerable: true, configurable: true, writable: true, value }) : obj[key] = value;
 var __publicField = (obj, key, value) => __defNormalProp(obj, typeof key !== "symbol" ? key + "" : key, value);
-import { C as ConnectionState, a as entityInfo3ToBytes, E as ENTITY_INFO3_SIZE, e as entityInfo3FromBytes } from "../encoding.js";
+import { C as ConnectionState, a as entityInfo3ToBytes, E as ENTITY_INFO3_SIZE, e as entityInfo3FromBytes, d as isCacheEnvelope, f as decodeCacheOp, p as parseJsonOps } from "../json-ops.js";
 function extractEntityIdFromJwt(token) {
   const parts = token.split(".");
   if (parts.length !== 3) throw new Error("Invalid JWT format");
@@ -26,6 +26,7 @@ class WebRtcTransport {
     // Event handlers
     __publicField(this, "entityStateHandlers", []);
     __publicField(this, "attributesHandlers", []);
+    __publicField(this, "attributesRemovedHandlers", []);
     __publicField(this, "connectionStateHandlers", []);
     __publicField(this, "errorHandlers", []);
     __publicField(this, "warningHandlers", []);
@@ -159,8 +160,11 @@ class WebRtcTransport {
   onEntityState(handler) {
     this.entityStateHandlers.push(handler);
   }
-  onAttributes(handler) {
+  onAttributeValues(handler) {
     this.attributesHandlers.push(handler);
+  }
+  onAttributeRemoved(handler) {
+    this.attributesRemovedHandlers.push(handler);
   }
   onConnectionStateChange(handler) {
     this.connectionStateHandlers.push(handler);
@@ -246,6 +250,7 @@ class WebRtcTransport {
       } else if (channel.label === "control") {
         this.dcControl = channel;
       } else if (channel.label === "attributes") {
+        channel.binaryType = "arraybuffer";
         channel.onmessage = (msg) => {
           this.handleAttributesMessage(msg.data);
         };
@@ -349,21 +354,40 @@ class WebRtcTransport {
     }
   }
   handleAttributesMessage(data) {
-    try {
-      const info = JSON.parse(data);
-      const attrs = {
-        uuid: info.uuid,
-        name: info.name,
-        ticket: info.ticket,
-        connection: info.connection
-      };
-      for (const handler of this.attributesHandlers) {
+    if (typeof data === "string") {
+      return;
+    }
+    const bytes = new Uint8Array(data);
+    if (!isCacheEnvelope(bytes)) return;
+    const envelope = decodeCacheOp(bytes);
+    if (!envelope) return;
+    const jsonOps = parseJsonOps(envelope.value);
+    if (!jsonOps) return;
+    const values = [];
+    const removed = [];
+    for (const op of jsonOps) {
+      if (!op.key) continue;
+      if (op.tombstone) {
+        removed.push(op.key);
+      } else {
+        values.push({ key: op.key, value: JSON.stringify(op.value) });
+      }
+    }
+    if (values.length > 0) {
+      for (const h of this.attributesHandlers) {
         try {
-          handler(attrs);
+          h(values);
         } catch {
         }
       }
-    } catch {
+    }
+    if (removed.length > 0) {
+      for (const h of this.attributesRemovedHandlers) {
+        try {
+          h(removed);
+        } catch {
+        }
+      }
     }
   }
 }

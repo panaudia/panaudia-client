@@ -10,13 +10,13 @@ import {
   type Position,
   type Rotation,
   type EntityInfo3,
-  type EntityAttributes,
   type ErrorEvent,
   type WarningEvent,
   type EntityState,
 } from './types.js';
 import type { PanaudiaPose } from './shared/coordinates.js';
 import { createEntityInfo3 } from './shared/encoding.js';
+import { AttributeTree, type AttributeNode } from './shared/attribute-tree.js';
 import { MoqTransportAdapter } from './moq/moq-transport-adapter.js';
 import { isWebTransportSupported } from './moq/connection.js';
 import { WebRtcTransport } from './webrtc/webrtc-transport.js';
@@ -61,7 +61,10 @@ type EventHandlerMap = {
   error: (event: ErrorEvent) => void;
   warning: (event: WarningEvent) => void;
   entityState: (state: EntityState) => void;
-  attributes: (attrs: EntityAttributes) => void;
+  attributes: (values: Array<{ key: string; value: string }>) => void;
+  attributesRemoved: (keys: string[]) => void;
+  attributeTreeChange: (uuid: string, attrs: AttributeNode) => void;
+  attributeTreeRemove: (uuid: string) => void;
 };
 
 export interface MicrophoneInfo {
@@ -118,7 +121,11 @@ export class PanaudiaClient {
   private muted = false;
 
   // Event emitter
-  private handlers = new Map<string, Set<(event: unknown) => void>>();
+  private handlers = new Map<string, Set<(...args: unknown[]) => void>>();
+
+  // Structured per-participant view of attribute state, kept in sync with
+  // the flat values/removed events from the transport.
+  private attributeTree = new AttributeTree();
 
   constructor(config: PanaudiaClientConfig) {
     this.config = config;
@@ -158,7 +165,25 @@ export class PanaudiaClient {
         this.emit('entityState', state);
       }
     });
-    this.transport.onAttributes((attrs) => this.emit('attributes', attrs));
+    this.transport.onAttributeValues((values) => {
+      this.emit('attributes', values);
+      const affected = this.attributeTree.applyValues(values);
+      for (const uuid of affected) {
+        const attrs = this.attributeTree.get(uuid);
+        if (attrs) this.emit('attributeTreeChange', uuid, attrs);
+      }
+    });
+    this.transport.onAttributeRemoved((keys) => {
+      this.emit('attributesRemoved', keys);
+      const { updated, removed } = this.attributeTree.applyRemoved(keys);
+      for (const uuid of updated) {
+        const attrs = this.attributeTree.get(uuid);
+        if (attrs) this.emit('attributeTreeChange', uuid, attrs);
+      }
+      for (const uuid of removed) {
+        this.emit('attributeTreeRemove', uuid);
+      }
+    });
     this.transport.onConnectionStateChange((state) => {
       if (state === ConnectionState.CONNECTED) this.emit('connected', undefined);
       if (state === ConnectionState.AUTHENTICATED) this.emit('authenticated', undefined);
@@ -325,24 +350,39 @@ export class PanaudiaClient {
       set = new Set();
       this.handlers.set(event, set);
     }
-    set.add(handler as (event: unknown) => void);
+    set.add(handler as (...args: unknown[]) => void);
   }
 
   off<K extends keyof EventHandlerMap>(event: K, handler: EventHandlerMap[K]): void {
     const set = this.handlers.get(event);
     if (set) {
-      set.delete(handler as (event: unknown) => void);
+      set.delete(handler as (...args: unknown[]) => void);
     }
+  }
+
+  /**
+   * Get the structured per-participant attribute tree, keyed by uuid.
+   * Maintained automatically from incoming attribute values and tombstones.
+   */
+  getAttributeTree(): ReadonlyMap<string, AttributeNode> {
+    return this.attributeTree.getAll();
+  }
+
+  /**
+   * Get a single participant's attributes, or undefined if unknown.
+   */
+  getAttributes(uuid: string): AttributeNode | undefined {
+    return this.attributeTree.get(uuid);
   }
 
   // ── Internal ─────────────────────────────────────────────────────────
 
-  private emit(event: string, data: unknown): void {
+  private emit(event: string, ...args: unknown[]): void {
     const set = this.handlers.get(event);
     if (set) {
       for (const handler of set) {
         try {
-          handler(data);
+          handler(...args);
         } catch (err) {
           console.error(`Error in ${event} handler:`, err);
         }

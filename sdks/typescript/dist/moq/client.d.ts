@@ -3,7 +3,7 @@ import { AudioPublisherConfig } from './audio-publisher.js';
 import { AudioSubscriberStats } from './audio-subscriber.js';
 import { AudioPlayerConfig, AudioPlayerStats } from './audio-player.js';
 import { EntityState, EntityStateHandler } from './state-subscriber.js';
-import { EntityAttributes, AttributesHandler } from './attributes-subscriber.js';
+import { ValuesHandler, RemovedHandler } from './attributes-subscriber.js';
 /**
  * Main Panaudia MOQ Client
  *
@@ -40,6 +40,7 @@ export declare class PanaudiaMoqClient {
     private controlTrackAlias;
     private attributesSubscriber;
     private attributesOutputTrackAlias;
+    private readonly attributesCache;
     private audioInputTrackAlias;
     private stateTrackAlias;
     private audioOutputTrackAlias;
@@ -118,13 +119,20 @@ export declare class PanaudiaMoqClient {
      */
     onEntityState(handler: EntityStateHandler): void;
     /**
-     * Get all known nodes and their attributes
+     * Get the attributes cache containing all current key-value entries.
      */
-    getKnownEntities(): Map<string, EntityAttributes>;
+    getAttributesCache(): ReadonlyMap<string, import('../shared/cache-map.js').CacheEntry>;
     /**
-     * Register a handler for attribute updates
+     * Register a handler for batches of attribute values.
+     * Fired once per envelope with all accepted (added/updated) values.
+     * A single-op envelope is delivered as a one-element array.
      */
-    onAttributes(handler: AttributesHandler): void;
+    onAttributeValues(handler: ValuesHandler): void;
+    /**
+     * Register a handler for batches of attribute key removals (tombstones).
+     * Fired once per envelope with all tombstoned keys.
+     */
+    onAttributeRemoved(handler: RemovedHandler): void;
     /**
      * Mute a remote entity (they will be silent in your mix)
      */

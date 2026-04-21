@@ -151,6 +151,7 @@ export interface MoqSubscription {
   forward?: number; // 0 or 1, default 0
   filterType: MoqFilterType;
   authorization?: string;
+  resumeOpId?: bigint;
 }
 
 /**

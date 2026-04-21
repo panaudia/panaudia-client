@@ -373,19 +373,30 @@ export function buildSubscribe(subscription: MoqSubscription): Uint8Array {
   // For ABSOLUTE_START and ABSOLUTE_RANGE, we would add group/object IDs
 
   // Parameters (KVPList format: count + key-value pairs)
-  if (subscription.authorization) {
-    // One parameter: authorization
-    contentBuilder.writeVarint(1);
+  // Count how many parameters we have
+  let paramCount = 0;
+  if (subscription.authorization) paramCount++;
+  if (subscription.resumeOpId !== undefined && subscription.resumeOpId > 0n) paramCount++;
 
+  contentBuilder.writeVarint(paramCount);
+
+  if (subscription.authorization) {
     // Authorization parameter (0x03 = AuthorizationTokenParameterKey per moqtransport v0.5.1)
     // KVP format: type (varint) + length (varint) + value (bytes)
     contentBuilder.writeVarint(0x03);
     const authBytes = textEncoder.encode(subscription.authorization);
     contentBuilder.writeVarint(authBytes.length);
     contentBuilder.writeRaw(authBytes);
-  } else {
-    // No parameters
-    contentBuilder.writeVarint(0);
+  }
+
+  if (subscription.resumeOpId !== undefined && subscription.resumeOpId > 0n) {
+    // ResumeOpID parameter (0xFF01 = custom key, odd = length-prefixed bytes)
+    // Value: 8 bytes big-endian uint64
+    contentBuilder.writeVarint(0xFF01);
+    contentBuilder.writeVarint(8);
+    const opIdBuf = new Uint8Array(8);
+    new DataView(opIdBuf.buffer).setBigUint64(0, subscription.resumeOpId, false);
+    contentBuilder.writeRaw(opIdBuf);
   }
 
   return wrapWithLengthFrame(MoqMessageType.SUBSCRIBE, contentBuilder.build());

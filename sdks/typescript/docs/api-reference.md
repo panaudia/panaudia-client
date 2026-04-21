@@ -89,6 +89,15 @@ client.setPose(pose);
 | `mute(entityId)` | Mute a remote entity |
 | `unmute(entityId)` | Unmute a remote entity |
 
+### Attributes
+
+The client maintains a structured per-participant attribute tree, kept in sync with incoming attribute values and tombstones. See [Events](#events) for the change/remove callbacks.
+
+| Method | Description |
+|--------|-------------|
+| `getAttributeTree()` | `ReadonlyMap<string, AttributeNode>` — snapshot of all known participants' attributes, keyed by uuid |
+| `getAttributes(uuid)` | `AttributeNode \| undefined` — attributes for a single participant |
+
 ### Events
 
 ```typescript
@@ -96,9 +105,12 @@ client.on('connected', () => { ... });
 client.on('disconnected', () => { ... });
 client.on('authenticated', () => { ... });
 client.on('error', (event: ErrorEvent) => { ... });
-client.on('warning', (event: WarningEvent) => { ... });       // Non-fatal issues (e.g. Bluetooth mic)
+client.on('warning', (event: WarningEvent) => { ... });        // Non-fatal issues (e.g. Bluetooth mic)
 client.on('entityState', (state: EntityState) => { ... });     // Panaudia coordinates
-client.on('attributes', (attrs: EntityAttributes) => { ... });
+client.on('attributes', (values: Array<{ key: string; value: string }>) => { ... });
+client.on('attributesRemoved', (keys: string[]) => { ... });
+client.on('attributeTreeChange', (uuid: string, attrs: AttributeNode) => { ... });
+client.on('attributeTreeRemove', (uuid: string) => { ... });
 ```
 
 #### Warning Codes
@@ -106,6 +118,35 @@ client.on('attributes', (attrs: EntityAttributes) => { ... });
 | Code | Meaning |
 |------|---------|
 | `BLUETOOTH_MIC` | A Bluetooth microphone is in use. Stereo audio may be reduced to mono. The `details` field contains `{ deviceId, label }`. |
+
+#### Raw value events
+
+The `attributes` event fires once per incoming envelope with all accepted values, delivered as an array. A single-key update arrives as a one-element array; a batch (e.g. a participant's initial state) arrives as a multi-element array so the application can apply the set atomically. Keys use dot-separated paths (e.g. `uuid.name`, `uuid.ticket.colour`). Each value is a JSON-serialised primitive — call `JSON.parse(value)` to read it.
+
+The `attributesRemoved` event fires when keys are deleted (e.g. when a participant leaves, the server tombstones all of their keys in one batch). It is also delivered atomically: a single-key tombstone arrives as a one-element array, a bulk disconnect as a multi-element array. The WebRTC transport does not currently emit tombstones — this event only fires on the MOQ transport.
+
+#### Structured per-participant view (recommended)
+
+Most applications want a structured object per participant rather than the raw flat key-value stream. The client maintains an `AttributeTree` automatically: dotted keys are reconstructed into nested objects, grouped by the uuid (always the first segment of the path).
+
+```typescript
+client.on('attributeTreeChange', (uuid, attrs) => {
+  // attrs is e.g. { name: 'Alice', ticket: { colour: '#f00', role: 'performer' } }
+  updateAvatar(uuid, attrs);
+});
+
+client.on('attributeTreeRemove', (uuid) => {
+  removeAvatar(uuid);
+});
+
+// Snapshot at any time:
+const all = client.getAttributeTree();        // ReadonlyMap<string, AttributeNode>
+const alice = client.getAttributes('alice');  // AttributeNode | undefined
+```
+
+`attributeTreeChange` fires once per affected uuid per envelope — when a participant's first batch of attributes arrives, the whole object is built before being inserted into the tree, so the handler always sees a fully populated participant. Existing participants are mutated in place. `attributeTreeRemove` fires when a participant's last attribute is tombstoned (typically a disconnect, where all their keys are tombstoned in one batch).
+
+The convention "first segment of the dotted key is the uuid" is built into the tree and applies to the `attributes` topic only.
 
 The `entityState` event provides state in Panaudia coordinates. If `worldBounds` is configured, positions are denormalized from 0-1 back to world space. Use framework converter functions to convert to your coordinate system:
 
@@ -215,15 +256,6 @@ interface EntityState {
   gone: boolean;     // true when entity has left
 }
 
-// Entity attributes received from the server
-interface EntityAttributes {
-  uuid: string;
-  name?: string;
-  ticket?: string;
-  connection?: string;
-  subspaces?: string[];
-}
-
 interface MicrophoneInfo {
   deviceId: string;
   label: string;
@@ -294,12 +326,12 @@ This provides access to MOQ protocol utilities, wire format encoders/decoders, a
 | `move(pos, rot)` | Convert with framework function + `client.setPose(...)` |
 | `moveAmbisonic(coords)` | `client.setPose({ position, rotation })` |
 | `setStateCallback(cb)` | `client.on('entityState', cb)` |
-| `setAttributesCallback(cb)` | `client.on('attributes', cb)` |
+| `setAttributesCallback(cb)` | `client.on('attributes', (values) => ...)` — batch of per-key entries `Array<{ key, value }>` |
 | `setConnectionStatusCallback(cb)` | `client.on('connected', cb)` / `client.on('disconnected', cb)` / `client.on('authenticated', cb)` |
 | `muteMic()` / `unmuteMic()` | Same |
 | `mute(id)` / `unmute(id)` | Same |
 | `ParticipantPose` / `participantState` event | `EntityState` / `entityState` event |
-| `NodeAttributes` | `EntityAttributes` |
+| `NodeAttributes` | Per-key attribute operations via `attributes` event |
 | `NodeInfo3` | `EntityInfo3` |
 | `getNodeId()` | `getEntityId()` |
 | `nodeId` config field | `entityId` config field |

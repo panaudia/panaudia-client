@@ -1,8 +1,8 @@
 var __defProp = Object.defineProperty;
 var __defNormalProp = (obj, key, value) => key in obj ? __defProp(obj, key, { enumerable: true, configurable: true, writable: true, value }) : obj[key] = value;
 var __publicField = (obj, key, value) => __defNormalProp(obj, typeof key !== "symbol" ? key + "" : key, value);
-import { C as ConnectionState, E as ENTITY_INFO3_SIZE, e as entityInfo3FromBytes, c as createEntityInfo3, a as entityInfo3ToBytes } from "../encoding.js";
-import { b, i, u } from "../encoding.js";
+import { C as ConnectionState, E as ENTITY_INFO3_SIZE, e as entityInfo3FromBytes, d as isCacheEnvelope, f as decodeCacheOp, p as parseJsonOps, c as createEntityInfo3, a as entityInfo3ToBytes } from "../json-ops.js";
+import { b, g, i, u } from "../json-ops.js";
 function clamp(value, min, max) {
   return Math.max(min, Math.min(max, value));
 }
@@ -1402,14 +1402,22 @@ function buildSubscribe(subscription) {
   const forward = subscription.forward ?? 0;
   contentBuilder.writeRaw(new Uint8Array([forward]));
   contentBuilder.writeVarint(subscription.filterType);
+  let paramCount = 0;
+  if (subscription.authorization) paramCount++;
+  if (subscription.resumeOpId !== void 0 && subscription.resumeOpId > 0n) paramCount++;
+  contentBuilder.writeVarint(paramCount);
   if (subscription.authorization) {
-    contentBuilder.writeVarint(1);
     contentBuilder.writeVarint(3);
     const authBytes = textEncoder.encode(subscription.authorization);
     contentBuilder.writeVarint(authBytes.length);
     contentBuilder.writeRaw(authBytes);
-  } else {
-    contentBuilder.writeVarint(0);
+  }
+  if (subscription.resumeOpId !== void 0 && subscription.resumeOpId > 0n) {
+    contentBuilder.writeVarint(65281);
+    contentBuilder.writeVarint(8);
+    const opIdBuf = new Uint8Array(8);
+    new DataView(opIdBuf.buffer).setBigUint64(0, subscription.resumeOpId, false);
+    contentBuilder.writeRaw(opIdBuf);
   }
   return wrapWithLengthFrame(MoqMessageType.SUBSCRIBE, contentBuilder.build());
 }
@@ -2578,22 +2586,110 @@ class ControlTrackPublisher extends TrackPublisher {
     await this.publish(data);
   }
 }
-class AttributesSubscriber {
+class CacheMap {
   constructor() {
+    __publicField(this, "entries", /* @__PURE__ */ new Map());
+    __publicField(this, "highestOpId", 0n);
+    __publicField(this, "changeHandler", null);
+  }
+  /**
+   * Register a handler called on every state change (add, update, remove).
+   */
+  onChange(handler) {
+    this.changeHandler = handler;
+  }
+  /**
+   * Merge an incoming cache operation.
+   *
+   * Returns 'accepted' if the value was stored, 'tombstoned' if a key
+   * was removed, or 'rejected' if the incoming opId was not higher.
+   */
+  merge(op) {
+    var _a, _b;
+    if (op.opId > this.highestOpId) {
+      this.highestOpId = op.opId;
+    }
+    const existing = this.entries.get(op.key);
+    if (existing && op.opId <= existing.opId) {
+      return "rejected";
+    }
+    if (op.tombstone) {
+      if (existing) {
+        this.entries.delete(op.key);
+        (_a = this.changeHandler) == null ? void 0 : _a.call(this, op.key, null, "tombstoned");
+      }
+      return "tombstoned";
+    }
+    const entry = {
+      value: op.value,
+      opId: op.opId,
+      nodeId: op.nodeId
+    };
+    this.entries.set(op.key, entry);
+    (_b = this.changeHandler) == null ? void 0 : _b.call(this, op.key, entry, "accepted");
+    return "accepted";
+  }
+  /**
+   * Get a single entry by key.
+   */
+  get(key) {
+    return this.entries.get(key);
+  }
+  /**
+   * Get all entries as a read-only map.
+   */
+  getAll() {
+    return this.entries;
+  }
+  /**
+   * Get the highest opId seen across all merge calls.
+   * Used as the resume point on reconnection.
+   */
+  getHighestOpId() {
+    return this.highestOpId;
+  }
+  /**
+   * Number of entries in the map.
+   */
+  get size() {
+    return this.entries.size;
+  }
+  /**
+   * Clear all entries and reset the highest opId.
+   */
+  clear() {
+    this.entries.clear();
+    this.highestOpId = 0n;
+  }
+}
+class AttributesSubscriber {
+  constructor(cache) {
     __publicField(this, "connection", null);
     __publicField(this, "trackAlias", 0);
     __publicField(this, "isListening", false);
-    __publicField(this, "entities", /* @__PURE__ */ new Map());
-    __publicField(this, "handler", null);
+    __publicField(this, "valuesHandler", null);
+    __publicField(this, "removedHandler", null);
+    __publicField(this, "cache");
     // Statistics
     __publicField(this, "updatesReceived", 0);
     __publicField(this, "errorsDropped", 0);
+    this.cache = cache ?? new CacheMap();
   }
   /**
-   * Set handler for attribute updates
+   * Set handler called once per envelope with all accepted values.
+   * Each value is `{key, value}` where value is the JSON-serialised value
+   * from the operation. Single-op messages are delivered as a one-element
+   * array so the atomicity of batches is preserved at the API.
    */
-  onAttributes(handler) {
-    this.handler = handler;
+  onValues(handler) {
+    this.valuesHandler = handler;
+  }
+  /**
+   * Set handler called once per envelope with all tombstoned keys.
+   * Single-op messages are delivered as a one-element array.
+   */
+  onRemoved(handler) {
+    this.removedHandler = handler;
   }
   /**
    * Attach to a connection and track alias
@@ -2609,18 +2705,54 @@ class AttributesSubscriber {
     if (!this.connection || this.isListening) return;
     this.isListening = true;
     this.connection.registerDatagramHandler(this.trackAlias, (payload) => {
+      var _a, _b;
       if (!this.isListening) return;
       try {
-        const json = new TextDecoder().decode(payload);
-        const attrs = JSON.parse(json);
-        if (!attrs.uuid) {
+        if (!isCacheEnvelope(payload)) {
           this.errorsDropped++;
           return;
         }
-        this.updatesReceived++;
-        this.entities.set(attrs.uuid, attrs);
-        if (this.handler) {
-          this.handler(attrs);
+        const envelope = decodeCacheOp(payload);
+        if (!envelope) {
+          this.errorsDropped++;
+          return;
+        }
+        const jsonOps = parseJsonOps(envelope.value);
+        if (!jsonOps) {
+          this.errorsDropped++;
+          return;
+        }
+        const acceptedValues = [];
+        const tombstonedKeys = [];
+        for (const jsonOp of jsonOps) {
+          if (!jsonOp.key) continue;
+          const isTombstone = jsonOp.tombstone === true;
+          const valueStr = isTombstone ? "" : JSON.stringify(jsonOp.value);
+          const valueBytes = new TextEncoder().encode(valueStr);
+          const cacheOp = {
+            topic: envelope.topic,
+            key: jsonOp.key,
+            value: valueBytes,
+            opId: envelope.opId,
+            nodeId: envelope.nodeId,
+            tombstone: isTombstone
+          };
+          const result = this.cache.merge(cacheOp);
+          if (result === "rejected") {
+            continue;
+          }
+          this.updatesReceived++;
+          if (result === "tombstoned") {
+            tombstonedKeys.push(jsonOp.key);
+          } else {
+            acceptedValues.push({ key: jsonOp.key, value: valueStr });
+          }
+        }
+        if (acceptedValues.length > 0) {
+          (_a = this.valuesHandler) == null ? void 0 : _a.call(this, acceptedValues);
+        }
+        if (tombstonedKeys.length > 0) {
+          (_b = this.removedHandler) == null ? void 0 : _b.call(this, tombstonedKeys);
         }
       } catch {
         this.errorsDropped++;
@@ -2637,16 +2769,22 @@ class AttributesSubscriber {
     }
   }
   /**
-   * Get all known entities
+   * Get a single cache entry by key.
    */
-  getKnownEntities() {
-    return new Map(this.entities);
+  get(key) {
+    return this.cache.get(key);
   }
   /**
-   * Get attributes for a specific entity
+   * Get all cache entries as a read-only map.
    */
-  getEntityAttributes(uuid) {
-    return this.entities.get(uuid);
+  getAll() {
+    return this.cache.getAll();
+  }
+  /**
+   * Get the highest opId seen, for use as resume point on reconnection.
+   */
+  getResumeOpId() {
+    return this.cache.getHighestOpId();
   }
   /**
    * Get statistics
@@ -2655,7 +2793,7 @@ class AttributesSubscriber {
     return {
       updatesReceived: this.updatesReceived,
       errorsDropped: this.errorsDropped,
-      entityCount: this.entities.size
+      entryCount: this.cache.size
     };
   }
 }
@@ -2751,14 +2889,15 @@ class MoqSession {
   /**
    * Subscribe to a track with JWT authorization
    */
-  async subscribe(namespace, trackName, authorization) {
+  async subscribe(namespace, trackName, authorization, resumeOpId) {
     const subscribeId = this.nextSubscribeId++;
     const subscribeMsg = buildSubscribe({
       subscribeId,
       namespace,
       trackName,
       filterType: MoqFilterType.LATEST_GROUP,
-      authorization
+      authorization,
+      resumeOpId
     });
     this.log("SUBSCRIBE message size:", subscribeMsg.length, "bytes");
     await this.writer.write(subscribeMsg);
@@ -3132,6 +3271,7 @@ class PanaudiaMoqClient {
     // Attributes tracking
     __publicField(this, "attributesSubscriber", null);
     __publicField(this, "attributesOutputTrackAlias", 0);
+    __publicField(this, "attributesCache", new CacheMap());
     // Track aliases (assigned after announcement/subscription)
     __publicField(this, "audioInputTrackAlias", 1);
     __publicField(this, "stateTrackAlias", 2);
@@ -3285,14 +3425,27 @@ class PanaudiaMoqClient {
       });
       this.stateSubscriber.start();
       const attributesOutputNamespace = generateTrackNamespace(PanaudiaTrackType.ATTRIBUTES_OUTPUT, this.config.entityId);
-      this.log("Subscribing to attributes output:", attributesOutputNamespace.join("/"));
-      const attrsSubscribeId = await this.session.subscribe(attributesOutputNamespace, "");
+      const resumeOpId = this.attributesCache.getHighestOpId();
+      this.log(
+        "Subscribing to attributes output:",
+        attributesOutputNamespace.join("/"),
+        resumeOpId > 0n ? `resumeOpId: ${resumeOpId}` : ""
+      );
+      const attrsSubscribeId = await this.session.subscribe(
+        attributesOutputNamespace,
+        "",
+        void 0,
+        resumeOpId > 0n ? resumeOpId : void 0
+      );
       this.attributesOutputTrackAlias = this.session.getTrackAlias(attrsSubscribeId) ?? 0;
       this.log("Attributes output subscribed, trackAlias:", this.attributesOutputTrackAlias);
-      this.attributesSubscriber = new AttributesSubscriber();
+      this.attributesSubscriber = new AttributesSubscriber(this.attributesCache);
       this.attributesSubscriber.attach(this.connection, this.attributesOutputTrackAlias);
-      this.attributesSubscriber.onAttributes((attrs) => {
-        this.events.emit("attributes", attrs);
+      this.attributesSubscriber.onValues((values) => {
+        this.events.emit("attributes", values);
+      });
+      this.attributesSubscriber.onRemoved((keys) => {
+        this.events.emit("attributesRemoved", keys);
       });
       this.attributesSubscriber.start();
       this.setState(ConnectionState.AUTHENTICATED);
@@ -3428,17 +3581,30 @@ class PanaudiaMoqClient {
     this.events.on("entityState", handler);
   }
   /**
-   * Get all known nodes and their attributes
+   * Get the attributes cache containing all current key-value entries.
    */
-  getKnownEntities() {
+  getAttributesCache() {
     var _a;
-    return ((_a = this.attributesSubscriber) == null ? void 0 : _a.getKnownEntities()) ?? /* @__PURE__ */ new Map();
+    return ((_a = this.attributesSubscriber) == null ? void 0 : _a.getAll()) ?? /* @__PURE__ */ new Map();
   }
   /**
-   * Register a handler for attribute updates
+   * Register a handler for batches of attribute values.
+   * Fired once per envelope with all accepted (added/updated) values.
+   * A single-op envelope is delivered as a one-element array.
    */
-  onAttributes(handler) {
-    this.events.on("attributes", handler);
+  onAttributeValues(handler) {
+    this.events.on("attributes", ((values) => {
+      handler(values);
+    }));
+  }
+  /**
+   * Register a handler for batches of attribute key removals (tombstones).
+   * Fired once per envelope with all tombstoned keys.
+   */
+  onAttributeRemoved(handler) {
+    this.events.on("attributesRemoved", ((keys) => {
+      handler(keys);
+    }));
   }
   /**
    * Mute a remote entity (they will be silent in your mix)
@@ -3870,8 +4036,11 @@ class MoqTransportAdapter {
   onEntityState(handler) {
     this.registerHandler("entityState", handler);
   }
-  onAttributes(handler) {
+  onAttributeValues(handler) {
     this.registerHandler("attributes", handler);
+  }
+  onAttributeRemoved(handler) {
+    this.registerHandler("attributesRemoved", handler);
   }
   onConnectionStateChange(handler) {
     this.registerHandler("statechange", (event) => {
@@ -3915,6 +4084,7 @@ export {
   AudioTrackPublisher,
   AuthenticationError,
   BluetoothMicDefaultError,
+  CacheMap,
   ConnectionError,
   ConnectionState,
   ControlTrackPublisher,
@@ -3953,9 +4123,11 @@ export {
   b as bytesToUuid,
   createEntityInfo3,
   decodeBytes,
+  decodeCacheOp,
   decodeString,
   decodeVarint,
   encodeBytes,
+  g as encodeCacheOp,
   encodeString,
   encodeVarint,
   entityInfo3FromBytes,
@@ -3969,6 +4141,7 @@ export {
   getWebTransportSupport,
   isAudioDecoderSupported,
   isAudioPlaybackSupported,
+  isCacheEnvelope,
   isOpusSupported,
   i as isValidUuid,
   isWebTransportSupported,

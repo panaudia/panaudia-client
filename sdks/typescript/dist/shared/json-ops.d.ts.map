@@ -1,0 +1,1 @@
+{"version":3,"file":"json-ops.d.ts","sourceRoot":"","sources":["../../src/shared/json-ops.ts"],"names":[],"mappings":"AAAA;;;;;GAKG;AAEH,MAAM,WAAW,MAAM;IACrB,GAAG,EAAE,MAAM,CAAC;IACZ,KAAK,CAAC,EAAE,OAAO,CAAC;IAChB,SAAS,CAAC,EAAE,OAAO,CAAC;CACrB;AAED;;;GAGG;AACH,wBAAgB,YAAY,CAAC,OAAO,EAAE,UAAU,GAAG,MAAM,EAAE,GAAG,IAAI,CAwBjE"}
