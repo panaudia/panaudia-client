@@ -1,5 +1,5 @@
 import { Transport, TransportConfig, AudioCaptureConfig, AudioPlaybackConfig } from '../transport.js';
-import { ConnectionState, EntityInfo3, ControlMessage, EntityState, EntityAttributes, WarningEvent } from '../types.js';
+import { ConnectionState, EntityInfo3, ControlMessage, EntityState, WarningEvent } from '../types.js';
 export declare class MoqTransportAdapter implements Transport {
     private client;
     private microphoneId?;
@@ -19,7 +19,11 @@ export declare class MoqTransportAdapter implements Transport {
     publishControl(msg: ControlMessage): Promise<void>;
     private pendingHandlers;
     onEntityState(handler: (state: EntityState) => void): void;
-    onAttributes(handler: (attrs: EntityAttributes) => void): void;
+    onAttributeValues(handler: (values: Array<{
+        key: string;
+        value: string;
+    }>) => void): void;
+    onAttributeRemoved(handler: (keys: string[]) => void): void;
     onConnectionStateChange(handler: (state: ConnectionState) => void): void;
     onError(handler: (error: Error) => void): void;
     onWarning(handler: (warning: WarningEvent) => void): void;

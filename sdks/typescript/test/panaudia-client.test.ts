@@ -1,7 +1,7 @@
 import { describe, it, expect, vi, beforeEach } from 'vitest';
 import { PanaudiaClient } from '../src/panaudia-client.js';
 import type { Transport, TransportConfig, AudioCaptureConfig, AudioPlaybackConfig } from '../src/transport.js';
-import type { ConnectionState, EntityInfo3, ControlMessage, EntityState, EntityAttributes } from '../src/types.js';
+import type { ConnectionState, EntityInfo3, ControlMessage, EntityState } from '../src/types.js';
 
 // Mock isWebTransportSupported to return true so 'auto' picks MOQ
 vi.mock('../src/moq/connection.js', () => ({
@@ -24,7 +24,8 @@ const mockTransport: Transport = {
   publishState: vi.fn().mockResolvedValue(undefined),
   publishControl: vi.fn().mockResolvedValue(undefined),
   onEntityState: vi.fn(),
-  onAttributes: vi.fn(),
+  onAttributeValues: vi.fn(),
+  onAttributeRemoved: vi.fn(),
   onConnectionStateChange: vi.fn(),
   onError: vi.fn(),
   onWarning: vi.fn(),

@@ -61,7 +61,7 @@ Additional configuration goes in a `panaudia` object within the payload:
 | `attenuation` | number (0.0–3.0) | 2.0 | Distance attenuation exponent. 2.0 = inverse square (natural), 1.0 = linear, 0.0 = no falloff, 3.0 = inverse cube |
 | `priority` | boolean | false | Priority speaker — ensures correct spatialisation even at distance. Useful for performers or moderators |
 | `subspaces` | string[] | — | List of subspace UUIDs. If set, this participant only hears and is heard by others sharing at least one subspace |
-| `attrs` | object | — | Custom key-value attributes broadcast to other participants (not used by Panaudia itself) |
+| `attrs` | object | — | Custom key-value attributes broadcast as per-key operations to other participants (not used by Panaudia itself). See [Data Tracks](data-tracks.md) for details. |
 
 ### Example payload
 
@@ -361,4 +361,4 @@ The full JSON Schema for the ticket payload is available at [`schemata/panaudia-
 
 - Tickets are **anonymous access tokens** — they make no claim about the identity of the bearer. The `jti` is the ticket's own ID, and `preferred_username` is just a display label.
 - The `jti` (UUID) is used by client SDKs as the participant's node ID. You can provide a specific UUID to tie the ticket to a user in your own system, or generate a random one.
-- Custom `attrs` are broadcast to other participants via the attributes data track. Use them for application-specific metadata like avatar colour, role, or profile URL.
+- Custom `attrs` are broadcast to other participants as per-key attribute operations (e.g. `{uuid}.ticket.colour`). Use them for application-specific metadata like avatar colour, role, or profile URL.

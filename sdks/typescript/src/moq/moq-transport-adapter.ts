@@ -4,7 +4,7 @@
 
 import type { Transport, TransportConfig, AudioCaptureConfig, AudioPlaybackConfig } from '../transport.js';
 import { ConnectionState } from '../types.js';
-import type { EntityInfo3, ControlMessage, EntityState, EntityAttributes, WarningEvent, ClientEventType } from '../types.js';
+import type { EntityInfo3, ControlMessage, EntityState, WarningEvent, ClientEventType } from '../types.js';
 import { PanaudiaMoqClient } from './client.js';
 import type { PanaudiaConfig } from './types.js';
 
@@ -152,8 +152,12 @@ export class MoqTransportAdapter implements Transport {
     this.registerHandler('entityState', handler);
   }
 
-  onAttributes(handler: (attrs: EntityAttributes) => void): void {
+  onAttributeValues(handler: (values: Array<{ key: string; value: string }>) => void): void {
     this.registerHandler('attributes', handler);
+  }
+
+  onAttributeRemoved(handler: (keys: string[]) => void): void {
+    this.registerHandler('attributesRemoved', handler);
   }
 
   onConnectionStateChange(handler: (state: ConnectionState) => void): void {

@@ -64,7 +64,7 @@ import { AudioSubscriber, AudioSubscriberStats } from './audio-subscriber.js';
 import { AudioPlayer, AudioPlayerState, AudioPlayerConfig, AudioPlayerStats } from './audio-player.js';
 import { StateSubscriber, EntityState, EntityStateHandler } from './state-subscriber.js';
 import { ControlTrackPublisher } from './control-publisher.js';
-import { AttributesSubscriber, EntityAttributes, AttributesHandler } from './attributes-subscriber.js';
+import { AttributesSubscriber, ValuesHandler, RemovedHandler, AttributeValue } from './attributes-subscriber.js';
 import { CacheMap } from '../shared/cache-map.js';
 
 /**
@@ -896,11 +896,11 @@ export class PanaudiaMoqClient {
       // Set up attributes subscriber (reuses persistent cache for resume)
       this.attributesSubscriber = new AttributesSubscriber(this.attributesCache);
       this.attributesSubscriber.attach(this.connection, this.attributesOutputTrackAlias);
-      this.attributesSubscriber.onAttributes((attrs) => {
-        this.events.emit<EntityAttributes>('attributes', attrs);
+      this.attributesSubscriber.onValues((values) => {
+        this.events.emit('attributes', values);
       });
-      this.attributesSubscriber.onRemoved((uuid) => {
-        this.events.emit<string>('attributesRemoved', uuid);
+      this.attributesSubscriber.onRemoved((keys) => {
+        this.events.emit('attributesRemoved', keys);
       });
       this.attributesSubscriber.start();
 
@@ -1071,17 +1071,31 @@ export class PanaudiaMoqClient {
   }
 
   /**
-   * Get all known nodes and their attributes
+   * Get the attributes cache containing all current key-value entries.
    */
-  getKnownEntities(): Map<string, EntityAttributes> {
-    return this.attributesSubscriber?.getKnownEntities() ?? new Map();
+  getAttributesCache(): ReadonlyMap<string, import('../shared/cache-map.js').CacheEntry> {
+    return this.attributesSubscriber?.getAll() ?? new Map();
   }
 
   /**
-   * Register a handler for attribute updates
+   * Register a handler for batches of attribute values.
+   * Fired once per envelope with all accepted (added/updated) values.
+   * A single-op envelope is delivered as a one-element array.
    */
-  onAttributes(handler: AttributesHandler): void {
-    this.events.on('attributes', handler as ClientEventHandler);
+  onAttributeValues(handler: ValuesHandler): void {
+    this.events.on('attributes', ((values: AttributeValue[]) => {
+      handler(values);
+    }) as ClientEventHandler);
+  }
+
+  /**
+   * Register a handler for batches of attribute key removals (tombstones).
+   * Fired once per envelope with all tombstoned keys.
+   */
+  onAttributeRemoved(handler: RemovedHandler): void {
+    this.events.on('attributesRemoved', ((keys: string[]) => {
+      handler(keys);
+    }) as ClientEventHandler);
   }
 
   /**

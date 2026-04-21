@@ -329,25 +329,68 @@ describe('WebRtcTransport', () => {
     });
   });
 
-  describe('onAttributes', () => {
-    it('should parse incoming JSON attributes and fire handler', async () => {
+  describe('onAttributeValues', () => {
+    it('should decode a cache envelope and fire one batched handler call', async () => {
+      const { encodeCacheOp } = await import('../../src/shared/cache-wire.js');
       const transport = new WebRtcTransport();
       const handler = vi.fn();
-      transport.onAttributes(handler);
+      transport.onAttributeValues(handler);
 
       await connectAndHandshake(transport);
 
       const dc = lastPc._createDataChannel('attributes');
 
-      dc._receive(JSON.stringify({
-        uuid: 'test-uuid',
-        name: 'Test User',
-        ticket: 'abc',
-        connection: 'ws',
-      }));
+      // Server sends a cache envelope wrapping a JSON batch of per-key ops.
+      const batch = JSON.stringify([
+        { key: 'test-uuid.name', value: 'Test User' },
+        { key: 'test-uuid.ticket', value: 'abc' },
+        { key: 'test-uuid.connection', value: 'ws' },
+      ]);
+      const envelope = encodeCacheOp({
+        topic: 'attributes',
+        key: 'test-uuid.name',
+        value: new TextEncoder().encode(batch),
+        opId: 1n,
+        nodeId: 0,
+        tombstone: false,
+      });
+      dc._receive(envelope.buffer);
 
       expect(handler).toHaveBeenCalledTimes(1);
-      expect(handler.mock.calls[0][0].name).toBe('Test User');
+      const values = handler.mock.calls[0]![0] as Array<{ key: string; value: string }>;
+      const keys = values.map((v) => v.key);
+      expect(keys).toContain('test-uuid.name');
+      expect(keys).toContain('test-uuid.ticket');
+      expect(keys).toContain('test-uuid.connection');
+    });
+
+    it('should fire onAttributeRemoved for tombstone ops in an envelope', async () => {
+      const { encodeCacheOp } = await import('../../src/shared/cache-wire.js');
+      const transport = new WebRtcTransport();
+      const removedHandler = vi.fn();
+      transport.onAttributeRemoved(removedHandler);
+
+      await connectAndHandshake(transport);
+
+      const dc = lastPc._createDataChannel('attributes');
+
+      const batch = JSON.stringify([
+        { key: 'gone-uuid.name', tombstone: true },
+        { key: 'gone-uuid.ticket', tombstone: true },
+      ]);
+      const envelope = encodeCacheOp({
+        topic: 'attributes',
+        key: 'gone-uuid.name',
+        value: new TextEncoder().encode(batch),
+        opId: 2n,
+        nodeId: 0,
+        tombstone: false,
+      });
+      dc._receive(envelope.buffer);
+
+      expect(removedHandler).toHaveBeenCalledTimes(1);
+      const keys = removedHandler.mock.calls[0]![0] as string[];
+      expect(keys).toEqual(['gone-uuid.name', 'gone-uuid.ticket']);
     });
   });
 

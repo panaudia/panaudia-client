@@ -1,5 +1,6 @@
-import { ConnectionState, Position, Rotation, EntityAttributes, ErrorEvent, WarningEvent, EntityState } from './types.js';
+import { ConnectionState, Position, Rotation, ErrorEvent, WarningEvent, EntityState } from './types.js';
 import { PanaudiaPose } from './shared/coordinates.js';
+import { AttributeNode } from './shared/attribute-tree.js';
 import { selectBestMicrophone, MicrophoneType } from './shared/microphone-selection.js';
 export type TransportType = 'moq' | 'webrtc';
 export interface PanaudiaClientConfig {
@@ -36,7 +37,13 @@ type EventHandlerMap = {
     error: (event: ErrorEvent) => void;
     warning: (event: WarningEvent) => void;
     entityState: (state: EntityState) => void;
-    attributes: (attrs: EntityAttributes) => void;
+    attributes: (values: Array<{
+        key: string;
+        value: string;
+    }>) => void;
+    attributesRemoved: (keys: string[]) => void;
+    attributeTreeChange: (uuid: string, attrs: AttributeNode) => void;
+    attributeTreeRemove: (uuid: string) => void;
 };
 export interface MicrophoneInfo {
     deviceId: string;
@@ -65,6 +72,7 @@ export declare class PanaudiaClient {
     private stateThrottleMs;
     private muted;
     private handlers;
+    private attributeTree;
     constructor(config: PanaudiaClientConfig);
     connect(): Promise<void>;
     disconnect(): Promise<void>;
@@ -96,6 +104,15 @@ export declare class PanaudiaClient {
     unmute(entityId: string): Promise<void>;
     on<K extends keyof EventHandlerMap>(event: K, handler: EventHandlerMap[K]): void;
     off<K extends keyof EventHandlerMap>(event: K, handler: EventHandlerMap[K]): void;
+    /**
+     * Get the structured per-participant attribute tree, keyed by uuid.
+     * Maintained automatically from incoming attribute values and tombstones.
+     */
+    getAttributeTree(): ReadonlyMap<string, AttributeNode>;
+    /**
+     * Get a single participant's attributes, or undefined if unknown.
+     */
+    getAttributes(uuid: string): AttributeNode | undefined;
     private emit;
     private scheduleStatePublish;
     private cancelPendingStatePublish;

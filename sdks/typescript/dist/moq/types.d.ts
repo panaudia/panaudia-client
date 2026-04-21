@@ -107,6 +107,7 @@ export interface MoqSubscription {
     forward?: number;
     filterType: MoqFilterType;
     authorization?: string;
+    resumeOpId?: bigint;
 }
 /**
  * MOQ Announcement

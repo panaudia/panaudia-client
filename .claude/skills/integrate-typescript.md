@@ -54,7 +54,10 @@ Before answering, read these files for the current API surface:
    - `connected`, `disconnected`, `authenticated` — connection lifecycle
    - `error` — connection/protocol errors
    - `entityState` — other entities' state in Panaudia coordinates (use converter functions to map back to framework coords)
-   - `attributes` — entity metadata (name, subspaces, etc.)
+   - `attributeTreeChange` — **preferred for most apps.** `(uuid, attrs)` — fires once per affected participant per envelope with their fully reconstructed attribute object (e.g. `{ name: 'Alice', ticket: { colour: '#f00' } }`). Dotted keys are grouped under the uuid (always the first segment). New participants are built fully before being inserted into the tree, so the handler always sees a complete object. Snapshot via `client.getAttributeTree()` / `client.getAttributes(uuid)`.
+   - `attributeTreeRemove` — `(uuid)` — fires when a participant's last attribute is tombstoned (typically a disconnect). MOQ transport only.
+   - `attributes` — raw flat batch of per-key values `Array<{ key, value }>`, one callback per envelope. Use this only if you need to bypass the structured tree. `value` is JSON-serialised — call `JSON.parse(value)` to read it.
+   - `attributesRemoved` — raw flat batch of tombstoned keys `string[]`, one callback per envelope. Use this only if you need to bypass the structured tree. MOQ transport only.
 
 7. **Audio controls**: `muteMic()`, `unmuteMic()`, `isMuted()`, `setVolume(v)`, `getVolume()`
 

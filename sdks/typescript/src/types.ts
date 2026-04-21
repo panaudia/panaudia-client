@@ -122,7 +122,11 @@ export interface EntityState {
 }
 
 /**
- * Entity attributes received from the server
+ * Entity attributes — replaced by per-key operations.
+ * Use the CacheMap from the AttributesSubscriber to access
+ * individual attribute key-value pairs.
+ *
+ * @deprecated Use per-key operations via onAttributeValues / getAttributesCache
  */
 export interface EntityAttributes {
   uuid: string;

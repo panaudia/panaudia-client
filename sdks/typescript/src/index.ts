@@ -104,3 +104,8 @@ export type { Transport, TransportConfig, AudioCaptureConfig, AudioPlaybackConfi
 // Unified client
 export { PanaudiaClient } from './panaudia-client.js';
 export type { PanaudiaClientConfig, TransportType, MicrophoneInfo } from './panaudia-client.js';
+
+// Structured attribute view (used internally by PanaudiaClient,
+// exported for direct use by clients that bypass the unified API).
+export { AttributeTree } from './shared/attribute-tree.js';
+export type { AttributeNode, AttributeValue } from './shared/attribute-tree.js';

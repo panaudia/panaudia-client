@@ -5,8 +5,10 @@
 
 import type { Transport, TransportConfig, AudioCaptureConfig, AudioPlaybackConfig } from '../transport.js';
 import { ConnectionState } from '../types.js';
-import type { EntityInfo3, ControlMessage, EntityState, EntityAttributes, WarningEvent } from '../types.js';
+import type { EntityInfo3, ControlMessage, EntityState, WarningEvent } from '../types.js';
 import { entityInfo3ToBytes, entityInfo3FromBytes, ENTITY_INFO3_SIZE } from '../shared/encoding.js';
+import { isCacheEnvelope, decodeCacheOp } from '../shared/cache-wire.js';
+import { parseJsonOps } from '../shared/json-ops.js';
 
 type EventHandler<T> = (event: T) => void;
 
@@ -36,7 +38,8 @@ export class WebRtcTransport implements Transport {
 
   // Event handlers
   private entityStateHandlers: EventHandler<EntityState>[] = [];
-  private attributesHandlers: EventHandler<EntityAttributes>[] = [];
+  private attributesHandlers: EventHandler<Array<{ key: string; value: string }>>[] = [];
+  private attributesRemovedHandlers: EventHandler<string[]>[] = [];
   private connectionStateHandlers: EventHandler<ConnectionState>[] = [];
   private errorHandlers: EventHandler<Error>[] = [];
   private warningHandlers: EventHandler<WarningEvent>[] = [];
@@ -213,8 +216,15 @@ export class WebRtcTransport implements Transport {
     this.entityStateHandlers.push(handler);
   }
 
-  onAttributes(handler: EventHandler<EntityAttributes>): void {
+  onAttributeValues(handler: EventHandler<Array<{ key: string; value: string }>>): void {
     this.attributesHandlers.push(handler);
+  }
+
+  onAttributeRemoved(handler: EventHandler<string[]>): void {
+    // WebRTC transport does not yet emit tombstones — registered for
+    // interface compatibility, will fire once the WebRTC path adopts the
+    // cache envelope format.
+    this.attributesRemovedHandlers.push(handler);
   }
 
   onConnectionStateChange(handler: EventHandler<ConnectionState>): void {
@@ -316,6 +326,7 @@ export class WebRtcTransport implements Transport {
       } else if (channel.label === 'control') {
         this.dcControl = channel;
       } else if (channel.label === 'attributes') {
+        channel.binaryType = 'arraybuffer';
         channel.onmessage = (msg) => {
           this.handleAttributesMessage(msg.data);
         };
@@ -433,20 +444,46 @@ export class WebRtcTransport implements Transport {
     }
   }
 
-  private handleAttributesMessage(data: string): void {
-    try {
-      const info = JSON.parse(data);
-      const attrs: EntityAttributes = {
-        uuid: info.uuid,
-        name: info.name,
-        ticket: info.ticket,
-        connection: info.connection,
-      };
-      for (const handler of this.attributesHandlers) {
-        try { handler(attrs); } catch { /* ignore */ }
+  private handleAttributesMessage(data: ArrayBuffer | string): void {
+    if (typeof data === 'string') {
+      // Legacy plain-JSON attributes from a server that doesn't wrap in
+      // cache envelopes. The current spatial-mixer always sends envelopes,
+      // but keep this branch as a no-op-friendly fallback rather than throw.
+      return;
+    }
+
+    const bytes = new Uint8Array(data);
+    if (!isCacheEnvelope(bytes)) return;
+
+    const envelope = decodeCacheOp(bytes);
+    if (!envelope) return;
+
+    const jsonOps = parseJsonOps(envelope.value);
+    if (!jsonOps) return;
+
+    // Split ops into accepted values and tombstoned keys; deliver each
+    // group as one atomic batch per envelope so the application can rely
+    // on bulk-init / bulk-disconnect arriving together.
+    const values: Array<{ key: string; value: string }> = [];
+    const removed: string[] = [];
+    for (const op of jsonOps) {
+      if (!op.key) continue;
+      if (op.tombstone) {
+        removed.push(op.key);
+      } else {
+        values.push({ key: op.key, value: JSON.stringify(op.value) });
       }
-    } catch {
-      // Malformed attributes JSON — ignore
+    }
+
+    if (values.length > 0) {
+      for (const h of this.attributesHandlers) {
+        try { h(values); } catch { /* ignore */ }
+      }
+    }
+    if (removed.length > 0) {
+      for (const h of this.attributesRemovedHandlers) {
+        try { h(removed); } catch { /* ignore */ }
+      }
     }
   }
 }

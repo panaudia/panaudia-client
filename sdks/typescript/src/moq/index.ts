@@ -204,7 +204,7 @@ export type { ControlMessage } from '../types.js';
 
 // Attributes subscription
 export { AttributesSubscriber } from './attributes-subscriber.js';
-export type { EntityAttributes, AttributesHandler, AttributesRemovedHandler } from './attributes-subscriber.js';
+export type { ValuesHandler, RemovedHandler, AttributeValue } from './attributes-subscriber.js';
 
 // Cache (shared)
 export { CacheMap } from '../shared/cache-map.js';

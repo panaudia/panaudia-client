@@ -7,7 +7,6 @@ import type {
   EntityInfo3,
   ControlMessage,
   EntityState,
-  EntityAttributes,
   WarningEvent,
   Position,
   Rotation,
@@ -100,8 +99,13 @@ export interface Transport {
   /** Register handler for entity state updates. */
   onEntityState(handler: (state: EntityState) => void): void;
 
-  /** Register handler for entity attribute updates. */
-  onAttributes(handler: (attrs: EntityAttributes) => void): void;
+  /** Register handler for batches of attribute values. Fired once per
+   * envelope; single-op messages arrive as a one-element array. */
+  onAttributeValues(handler: (values: Array<{ key: string; value: string }>) => void): void;
+
+  /** Register handler for batches of attribute key removals (tombstones).
+   * Fired once per envelope; single-op messages arrive as a one-element array. */
+  onAttributeRemoved(handler: (keys: string[]) => void): void;
 
   /** Register handler for connection state changes. */
   onConnectionStateChange(handler: (state: ConnectionState) => void): void;

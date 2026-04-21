@@ -40,7 +40,11 @@ export { ENTITY_INFO3_SIZE, uuidToBytes, bytesToUuid, entityInfo3ToBytes, entity
 export { ControlTrackPublisher } from './control-publisher.js';
 export type { ControlMessage } from '../types.js';
 export { AttributesSubscriber } from './attributes-subscriber.js';
-export type { EntityAttributes, AttributesHandler } from './attributes-subscriber.js';
+export type { ValuesHandler, RemovedHandler, AttributeValue } from './attributes-subscriber.js';
+export { CacheMap } from '../shared/cache-map.js';
+export type { CacheEntry, MergeResult, CacheChangeHandler } from '../shared/cache-map.js';
+export { isCacheEnvelope, decodeCacheOp, encodeCacheOp } from '../shared/cache-wire.js';
+export type { CacheOp } from '../shared/cache-wire.js';
 export { StateSubscriber } from './state-subscriber.js';
 export type { EntityState, EntityStateHandler } from './state-subscriber.js';
 export { AudioSubscriber, AudioSubscriberState, isAudioDecoderSupported, getAudioDecoderCapabilities, } from './audio-subscriber.js';

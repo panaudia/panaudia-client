@@ -1,5 +1,5 @@
 import { Transport, TransportConfig, AudioCaptureConfig, AudioPlaybackConfig } from '../transport.js';
-import { ConnectionState, EntityInfo3, ControlMessage, EntityState, EntityAttributes, WarningEvent } from '../types.js';
+import { ConnectionState, EntityInfo3, ControlMessage, EntityState, WarningEvent } from '../types.js';
 type EventHandler<T> = (event: T) => void;
 export declare class WebRtcTransport implements Transport {
     private ws;
@@ -15,6 +15,7 @@ export declare class WebRtcTransport implements Transport {
     private microphoneId?;
     private entityStateHandlers;
     private attributesHandlers;
+    private attributesRemovedHandlers;
     private connectionStateHandlers;
     private errorHandlers;
     private warningHandlers;
@@ -33,7 +34,11 @@ export declare class WebRtcTransport implements Transport {
     publishState(state: EntityInfo3): Promise<void>;
     publishControl(msg: ControlMessage): Promise<void>;
     onEntityState(handler: EventHandler<EntityState>): void;
-    onAttributes(handler: EventHandler<EntityAttributes>): void;
+    onAttributeValues(handler: EventHandler<Array<{
+        key: string;
+        value: string;
+    }>>): void;
+    onAttributeRemoved(handler: EventHandler<string[]>): void;
     onConnectionStateChange(handler: EventHandler<ConnectionState>): void;
     onError(handler: EventHandler<Error>): void;
     onWarning(handler: EventHandler<WarningEvent>): void;

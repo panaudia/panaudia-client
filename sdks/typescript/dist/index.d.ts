@@ -34,4 +34,6 @@ export type { ResolveServerOptions } from './gateway.js';
 export type { Transport, TransportConfig, AudioCaptureConfig, AudioPlaybackConfig } from './transport.js';
 export { PanaudiaClient } from './panaudia-client.js';
 export type { PanaudiaClientConfig, TransportType, MicrophoneInfo } from './panaudia-client.js';
+export { AttributeTree } from './shared/attribute-tree.js';
+export type { AttributeNode, AttributeValue } from './shared/attribute-tree.js';
 //# sourceMappingURL=index.d.ts.map
