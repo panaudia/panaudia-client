@@ -64,7 +64,14 @@ import { AudioSubscriber, AudioSubscriberStats } from './audio-subscriber.js';
 import { AudioPlayer, AudioPlayerState, AudioPlayerConfig, AudioPlayerStats } from './audio-player.js';
 import { StateSubscriber, EntityState, EntityStateHandler } from './state-subscriber.js';
 import { ControlTrackPublisher } from './control-publisher.js';
-import { AttributesSubscriber, ValuesHandler, RemovedHandler, AttributeValue } from './attributes-subscriber.js';
+import {
+  AttributesSubscriber,
+  EntitySubscriber,
+  SpaceSubscriber,
+  ValuesHandler,
+  RemovedHandler,
+  TopicValue,
+} from './cache-topic-subscriber.js';
 import { CacheMap } from '../shared/cache-map.js';
 
 /**
@@ -687,6 +694,20 @@ export class PanaudiaMoqClient {
   private attributesOutputTrackAlias: number = 0;
   private readonly attributesCache: CacheMap = new CacheMap();
 
+  // Entity tracking (per-client filtered: only this client's own uuid keys)
+  private entitySubscriber: EntitySubscriber | null = null;
+  private entityOutputTrackAlias: number = 0;
+  private readonly entityCache: CacheMap = new CacheMap();
+
+  // Space tracking (gated server-side by commands.ReadCapSpaceRead).
+  // The server only announces the space output track to holders with
+  // the cap; if the announce never arrives we leave the subscriber
+  // null and never subscribe. Cache is persistent across subscriber
+  // lifetimes to support resume HLC on reconnect.
+  private spaceSubscriber: SpaceSubscriber | null = null;
+  private spaceOutputTrackAlias: number = 0;
+  private readonly spaceCache: CacheMap = new CacheMap();
+
   // Track aliases (assigned after announcement/subscription)
   private audioInputTrackAlias: number = 1;
   private stateTrackAlias: number = 2;
@@ -702,16 +723,18 @@ export class PanaudiaMoqClient {
     if (!config.serverUrl) {
       throw new Error('serverUrl is required');
     }
-    if (!config.ticket) {
-      throw new Error('ticket is required');
+    if (!config.ticket && !config.entityId) {
+      throw new Error('either ticket or entityId is required');
     }
 
-    // Extract entity ID from JWT if not provided
-    const entityId = config.entityId ?? this.extractEntityIdFromJwt(config.ticket);
+    // Extract entity ID from JWT if not provided explicitly
+    const entityId = config.entityId ?? this.extractEntityIdFromJwt(config.ticket!);
 
     this.config = {
       serverUrl: config.serverUrl,
-      ticket: config.ticket,
+      // Empty string means "tokenless" — SUBSCRIBE/ANNOUNCE path treats an
+      // empty auth token as absent and skips the Authorization KVP.
+      ticket: config.ticket ?? '',
       entityId,
       initialPosition: config.initialPosition ?? { x: 0.5, y: 0.5, z: 0.5 },
       initialRotation: config.initialRotation ?? { yaw: 0, pitch: 0, roll: 0 },
@@ -902,7 +925,69 @@ export class PanaudiaMoqClient {
       this.attributesSubscriber.onRemoved((keys) => {
         this.events.emit('attributesRemoved', keys);
       });
+      this.attributesSubscriber.setDebugHandler((info) => {
+        this.events.emit('cacheDebug', info);
+      });
       this.attributesSubscriber.start();
+
+      // Subscribe to entity output track (per-client filtered).
+      // Server-side filter ensures only this client's own uuid keys flow
+      // here, so the cache stays small and safe to share globally.
+      const entityOutputNamespace = generateTrackNamespace(PanaudiaTrackType.ENTITY_OUTPUT, this.config.entityId);
+      const entityResumeOpId = this.entityCache.getHighestOpId();
+      this.log('Subscribing to entity output:', entityOutputNamespace.join('/'),
+        entityResumeOpId > 0n ? `resumeOpId: ${entityResumeOpId}` : '');
+      const entitySubscribeId = await this.session.subscribe(
+        entityOutputNamespace, '', undefined, entityResumeOpId > 0n ? entityResumeOpId : undefined
+      );
+      this.entityOutputTrackAlias = this.session.getTrackAlias(entitySubscribeId) ?? 0;
+      this.log('Entity output subscribed, trackAlias:', this.entityOutputTrackAlias);
+
+      this.entitySubscriber = new EntitySubscriber(this.entityCache);
+      this.entitySubscriber.attach(this.connection, this.entityOutputTrackAlias);
+      this.entitySubscriber.onValues((values) => {
+        this.events.emit('entity', values);
+      });
+      this.entitySubscriber.onRemoved((keys) => {
+        this.events.emit('entityRemoved', keys);
+      });
+      this.entitySubscriber.setDebugHandler((info) => {
+        this.events.emit('cacheDebug', info);
+      });
+      this.entitySubscriber.start();
+
+      // Subscribe to the space output track. Gated server-side on
+      // commands.ReadCapSpaceRead — the SUBSCRIBE is accepted by the
+      // catch-all path even for unauthorised holders, but the server
+      // never installs a publisher for them so no envelopes arrive.
+      // Tolerate a subscribe error (the server may also reject) and
+      // proceed without space data.
+      try {
+        const spaceOutputNamespace = generateTrackNamespace(PanaudiaTrackType.SPACE_OUTPUT, this.config.entityId);
+        const spaceResumeOpId = this.spaceCache.getHighestOpId();
+        this.log('Subscribing to space output:', spaceOutputNamespace.join('/'),
+          spaceResumeOpId > 0n ? `resumeOpId: ${spaceResumeOpId}` : '');
+        const spaceSubscribeId = await this.session.subscribe(
+          spaceOutputNamespace, '', undefined, spaceResumeOpId > 0n ? spaceResumeOpId : undefined,
+        );
+        this.spaceOutputTrackAlias = this.session.getTrackAlias(spaceSubscribeId) ?? 0;
+        this.log('Space output subscribed, trackAlias:', this.spaceOutputTrackAlias);
+
+        this.spaceSubscriber = new SpaceSubscriber(this.spaceCache);
+        this.spaceSubscriber.attach(this.connection, this.spaceOutputTrackAlias);
+        this.spaceSubscriber.onValues((values) => {
+          this.events.emit('space', values);
+        });
+        this.spaceSubscriber.onRemoved((keys) => {
+          this.events.emit('spaceRemoved', keys);
+        });
+        this.spaceSubscriber.setDebugHandler((info) => {
+          this.events.emit('cacheDebug', info);
+        });
+        this.spaceSubscriber.start();
+      } catch (err) {
+        this.log('Space output subscribe failed (likely no space.read cap):', err);
+      }
 
       this.setState(ConnectionState.AUTHENTICATED);
       this.events.emit('authenticated');
@@ -971,6 +1056,16 @@ export class PanaudiaMoqClient {
     if (this.attributesSubscriber) {
       this.attributesSubscriber.stop();
       this.attributesSubscriber = null;
+    }
+
+    if (this.entitySubscriber) {
+      this.entitySubscriber.stop();
+      this.entitySubscriber = null;
+    }
+
+    if (this.spaceSubscriber) {
+      this.spaceSubscriber.stop();
+      this.spaceSubscriber = null;
     }
 
     if (this.session) {
@@ -1083,7 +1178,7 @@ export class PanaudiaMoqClient {
    * A single-op envelope is delivered as a one-element array.
    */
   onAttributeValues(handler: ValuesHandler): void {
-    this.events.on('attributes', ((values: AttributeValue[]) => {
+    this.events.on('attributes', ((values: TopicValue[]) => {
       handler(values);
     }) as ClientEventHandler);
   }
@@ -1094,6 +1189,26 @@ export class PanaudiaMoqClient {
    */
   onAttributeRemoved(handler: RemovedHandler): void {
     this.events.on('attributesRemoved', ((keys: string[]) => {
+      handler(keys);
+    }) as ClientEventHandler);
+  }
+
+  /**
+   * Register a handler for batches of entity values. Mirrors
+   * `onAttributeValues` but for the per-client entity stream — only ops
+   * whose key starts with this client's own uuid arrive here.
+   */
+  onEntityValues(handler: ValuesHandler): void {
+    this.events.on('entity', ((values: TopicValue[]) => {
+      handler(values);
+    }) as ClientEventHandler);
+  }
+
+  /**
+   * Register a handler for batches of entity key removals (tombstones).
+   */
+  onEntityRemoved(handler: RemovedHandler): void {
+    this.events.on('entityRemoved', ((keys: string[]) => {
       handler(keys);
     }) as ClientEventHandler);
   }
@@ -1123,6 +1238,26 @@ export class PanaudiaMoqClient {
     await this.controlTrackPublisher.publishControlMessage({
       type: 'unmute',
       message: { node: entityId },
+    });
+  }
+
+  /**
+   * Invoke a named command from the server's command catalog.
+   *
+   * Strict-MVC: this fires-and-forgets. The command's effect (if any)
+   * arrives later as an echoed entity / attribute op via the existing
+   * subscriber path. There is no per-call error response — failed
+   * authorisation, unknown command names and bad args all silently
+   * drop on the server.
+   */
+  async command(name: string, args: Record<string, unknown> = {}): Promise<void> {
+    if (!this.controlTrackPublisher) {
+      this.logWarn('Control publisher not ready, cannot send command');
+      return;
+    }
+    await this.controlTrackPublisher.publishControlMessage({
+      type: 'command',
+      message: { command: name, args },
     });
   }
 

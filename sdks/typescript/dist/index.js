@@ -1,8 +1,8 @@
 var __defProp = Object.defineProperty;
 var __defNormalProp = (obj, key, value) => key in obj ? __defProp(obj, key, { enumerable: true, configurable: true, writable: true, value }) : obj[key] = value;
 var __publicField = (obj, key, value) => __defNormalProp(obj, typeof key !== "symbol" ? key + "" : key, value);
-import { C as ConnectionState, c as createEntityInfo3 } from "./json-ops.js";
-import { E, b, e, a, i, u } from "./json-ops.js";
+import { C as ConnectionState, c as createEntityInfo3 } from "./topic-merger.js";
+import { E, T, b, e, a, i, u } from "./topic-merger.js";
 import { isWebTransportSupported, MoqTransportAdapter, BluetoothMicDefaultError } from "./moq/index.js";
 import { aframeToPanaudia, ambisonicToWebglPosition, ambisonicToWebglRotation, babylonToPanaudia, getWebTransportSupport, panaudiaToAframe, panaudiaToBabylon, panaudiaToPixi, panaudiaToPlaycanvas, panaudiaToThreejs, panaudiaToUnity, panaudiaToUnreal, pixiToPanaudia, playcanvasToPanaudia, threejsToPanaudia, unityToPanaudia, unrealToPanaudia, webglToAmbisonicPosition, webglToAmbisonicRotation } from "./moq/index.js";
 import { WebRtcTransport } from "./webrtc/index.js";
@@ -235,12 +235,46 @@ async function resolveServer(ticket, options) {
   }
   return body.url;
 }
-class AttributeTree {
+const byteToHex = [];
+for (let i2 = 0; i2 < 256; ++i2) {
+  byteToHex.push((i2 + 256).toString(16).slice(1));
+}
+function unsafeStringify(arr, offset = 0) {
+  return (byteToHex[arr[offset + 0]] + byteToHex[arr[offset + 1]] + byteToHex[arr[offset + 2]] + byteToHex[arr[offset + 3]] + "-" + byteToHex[arr[offset + 4]] + byteToHex[arr[offset + 5]] + "-" + byteToHex[arr[offset + 6]] + byteToHex[arr[offset + 7]] + "-" + byteToHex[arr[offset + 8]] + byteToHex[arr[offset + 9]] + "-" + byteToHex[arr[offset + 10]] + byteToHex[arr[offset + 11]] + byteToHex[arr[offset + 12]] + byteToHex[arr[offset + 13]] + byteToHex[arr[offset + 14]] + byteToHex[arr[offset + 15]]).toLowerCase();
+}
+let getRandomValues;
+const rnds8 = new Uint8Array(16);
+function rng() {
+  if (!getRandomValues) {
+    if (typeof crypto === "undefined" || !crypto.getRandomValues) {
+      throw new Error("crypto.getRandomValues() not supported. See https://github.com/uuidjs/uuid#getrandomvalues-not-supported");
+    }
+    getRandomValues = crypto.getRandomValues.bind(crypto);
+  }
+  return getRandomValues(rnds8);
+}
+const randomUUID = typeof crypto !== "undefined" && crypto.randomUUID && crypto.randomUUID.bind(crypto);
+const native = { randomUUID };
+function v4(options, buf, offset) {
+  var _a;
+  if (native.randomUUID && true && !options) {
+    return native.randomUUID();
+  }
+  options = options || {};
+  const rnds = options.random ?? ((_a = options.rng) == null ? void 0 : _a.call(options)) ?? rng();
+  if (rnds.length < 16) {
+    throw new Error("Random bytes length must be >= 16");
+  }
+  rnds[6] = rnds[6] & 15 | 64;
+  rnds[8] = rnds[8] & 63 | 128;
+  return unsafeStringify(rnds);
+}
+class TopicTree {
   constructor() {
-    __publicField(this, "participants", /* @__PURE__ */ new Map());
+    __publicField(this, "records", /* @__PURE__ */ new Map());
   }
   /**
-   * Apply a batch of attribute values from one envelope.
+   * Apply a batch of values from one envelope.
    * Existing uuids are mutated in place; new uuids are built fully then
    * inserted atomically. Returns the set of uuids whose subtree changed.
    */
@@ -251,7 +285,7 @@ class AttributeTree {
       const parts = key.split(".");
       const uuid = parts[0];
       if (!uuid) continue;
-      let target = fresh.get(uuid) ?? this.participants.get(uuid);
+      let target = fresh.get(uuid) ?? this.records.get(uuid);
       if (target === void 0) {
         target = {};
         fresh.set(uuid, target);
@@ -278,7 +312,7 @@ class AttributeTree {
       node[parts[parts.length - 1]] = parsed;
     }
     for (const [uuid, attrs] of fresh) {
-      this.participants.set(uuid, attrs);
+      this.records.set(uuid, attrs);
     }
     return affected;
   }
@@ -286,7 +320,7 @@ class AttributeTree {
    * Apply a batch of tombstones from one envelope.
    * Walks the dotted path for each key and removes the leaf, cleaning up
    * empty intermediate objects. Returns the set of uuids that still have
-   * data (`updated`) and uuids whose last attribute was removed (`removed`).
+   * data (`updated`) and uuids whose last leaf was removed (`removed`).
    */
   applyRemoved(keys) {
     const touched = /* @__PURE__ */ new Set();
@@ -294,22 +328,22 @@ class AttributeTree {
       const parts = key.split(".");
       const uuid = parts[0];
       if (!uuid) continue;
-      const target = this.participants.get(uuid);
+      const target = this.records.get(uuid);
       if (target === void 0) continue;
       touched.add(uuid);
       if (parts.length === 1) {
-        this.participants.delete(uuid);
+        this.records.delete(uuid);
         continue;
       }
       this.deletePath(target, parts, 1);
       if (Object.keys(target).length === 0) {
-        this.participants.delete(uuid);
+        this.records.delete(uuid);
       }
     }
     const updated = /* @__PURE__ */ new Set();
     const removed = /* @__PURE__ */ new Set();
     for (const uuid of touched) {
-      if (this.participants.has(uuid)) {
+      if (this.records.has(uuid)) {
         updated.add(uuid);
       } else {
         removed.add(uuid);
@@ -318,28 +352,28 @@ class AttributeTree {
     return { updated, removed };
   }
   /**
-   * Get the attribute object for a single participant.
+   * Get the record for a single uuid.
    */
   get(uuid) {
-    return this.participants.get(uuid);
+    return this.records.get(uuid);
   }
   /**
-   * Get the full tree as a read-only map of `uuid -> attributes`.
+   * Get the full tree as a read-only map of `uuid -> record`.
    */
   getAll() {
-    return this.participants;
+    return this.records;
   }
   /**
-   * Number of participants in the tree.
+   * Number of records in the tree.
    */
   get size() {
-    return this.participants.size;
+    return this.records.size;
   }
   /**
-   * Drop all participants.
+   * Drop all records.
    */
   clear() {
-    this.participants.clear();
+    this.records.clear();
   }
   deletePath(node, parts, index) {
     const seg = parts[index];
@@ -354,6 +388,90 @@ class AttributeTree {
         delete node[seg];
       }
     }
+  }
+}
+class SingleRecordTree {
+  constructor() {
+    __publicField(this, "record", {});
+  }
+  /**
+   * Apply a batch of values from one envelope. Existing leaves are
+   * overwritten; intermediate path segments are created on demand.
+   * Returns true if any leaf changed (the unified client uses this
+   * to decide whether to emit a tree-change event).
+   */
+  applyValues(values) {
+    let changed = false;
+    for (const { key, value } of values) {
+      const parts = key.split(".");
+      if (parts.length === 0 || parts[0] === "") continue;
+      let parsed;
+      try {
+        parsed = JSON.parse(value);
+      } catch {
+        continue;
+      }
+      let node = this.record;
+      for (let i2 = 0; i2 < parts.length - 1; i2++) {
+        const seg = parts[i2];
+        const child = node[seg];
+        if (typeof child !== "object" || child === null || Array.isArray(child)) {
+          node[seg] = {};
+        }
+        node = node[seg];
+      }
+      const leaf = parts[parts.length - 1];
+      node[leaf] = parsed;
+      changed = true;
+    }
+    return changed;
+  }
+  /**
+   * Apply a batch of tombstones from one envelope. Walks the dotted
+   * path for each key and removes the leaf, cleaning up empty
+   * intermediate objects. Returns true if anything was removed.
+   */
+  applyRemoved(keys) {
+    let changed = false;
+    for (const key of keys) {
+      const parts = key.split(".");
+      if (parts.length === 0 || parts[0] === "") continue;
+      if (this.deletePath(this.record, parts, 0)) {
+        changed = true;
+      }
+    }
+    return changed;
+  }
+  /** Get the entire reconstructed record as a read-only object. */
+  get() {
+    return this.record;
+  }
+  /** Number of top-level fields in the record. */
+  get size() {
+    return Object.keys(this.record).length;
+  }
+  /** Drop all entries. */
+  clear() {
+    this.record = {};
+  }
+  deletePath(node, parts, index) {
+    const seg = parts[index];
+    if (index === parts.length - 1) {
+      if (seg in node) {
+        delete node[seg];
+        return true;
+      }
+      return false;
+    }
+    const child = node[seg];
+    if (typeof child !== "object" || child === null || Array.isArray(child)) {
+      return false;
+    }
+    const removed = this.deletePath(child, parts, index + 1);
+    if (removed && Object.keys(child).length === 0) {
+      delete node[seg];
+    }
+    return removed;
   }
 }
 class PanaudiaClient {
@@ -372,7 +490,17 @@ class PanaudiaClient {
     __publicField(this, "handlers", /* @__PURE__ */ new Map());
     // Structured per-participant view of attribute state, kept in sync with
     // the flat values/removed events from the transport.
-    __publicField(this, "attributeTree", new AttributeTree());
+    __publicField(this, "attributeTree", new TopicTree());
+    // Structured per-entity view of server-internal entity state, kept in
+    // sync with the flat entity values/removed events. The server filters
+    // the stream so only this client's own entity record arrives.
+    __publicField(this, "entityTree", new TopicTree());
+    // Space-wide role-rule record (roles-muted, roles-kicked,
+    // roles-gain, roles-attenuation). Single nested object — no
+    // per-uuid grouping since the topic's keys are uuid-less. Stays
+    // empty for connections without the `space.read` cap (no envelopes
+    // arrive). See plan/commands/space-read-path-plan.md.
+    __publicField(this, "spaceTree", new SingleRecordTree());
     this.config = config;
     this.position = config.initialPosition ?? { x: 0.5, y: 0.5, z: 0.5 };
     this.rotation = config.initialRotation ?? { yaw: 0, pitch: 0, roll: 0 };
@@ -423,6 +551,37 @@ class PanaudiaClient {
         this.emit("attributeTreeRemove", uuid);
       }
     });
+    this.transport.onEntityValues((values) => {
+      this.emit("entity", values);
+      const affected = this.entityTree.applyValues(values);
+      for (const uuid of affected) {
+        const record = this.entityTree.get(uuid);
+        if (record) this.emit("entityTreeChange", uuid, record);
+      }
+    });
+    this.transport.onEntityRemoved((keys) => {
+      this.emit("entityRemoved", keys);
+      const { updated, removed } = this.entityTree.applyRemoved(keys);
+      for (const uuid of updated) {
+        const record = this.entityTree.get(uuid);
+        if (record) this.emit("entityTreeChange", uuid, record);
+      }
+      for (const uuid of removed) {
+        this.emit("entityTreeRemove", uuid);
+      }
+    });
+    this.transport.onSpaceValues((values) => {
+      this.emit("space", values);
+      if (this.spaceTree.applyValues(values)) {
+        this.emit("spaceTreeChange", this.spaceTree.get());
+      }
+    });
+    this.transport.onSpaceRemoved((keys) => {
+      this.emit("spaceRemoved", keys);
+      if (this.spaceTree.applyRemoved(keys)) {
+        this.emit("spaceTreeChange", this.spaceTree.get());
+      }
+    });
     this.transport.onConnectionStateChange((state) => {
       if (state === ConnectionState.CONNECTED) this.emit("connected", void 0);
       if (state === ConnectionState.AUTHENTICATED) this.emit("authenticated", void 0);
@@ -438,6 +597,9 @@ class PanaudiaClient {
     });
     this.transport.onWarning((warning) => {
       this.emit("warning", warning);
+    });
+    this.transport.onCacheDebug((info) => {
+      this.emit("cacheDebug", info);
     });
   }
   /**
@@ -491,14 +653,20 @@ class PanaudiaClient {
         if (e2 instanceof BluetoothMicDefaultError) throw e2;
       }
     }
+    let entityId = this.config.entityId;
+    const queryParams = { ...this.config.queryParams ?? {} };
+    if (!this.config.ticket) {
+      if (!entityId) entityId = v4();
+      if (!queryParams["uuid"]) queryParams["uuid"] = entityId;
+    }
     await this.transport.connect({
       serverUrl: this.config.serverUrl,
       ticket: this.config.ticket,
-      entityId: this.config.entityId,
+      entityId,
       initialPosition: this.position,
       initialRotation: this.rotation,
       presence: this.config.presence,
-      queryParams: this.config.queryParams,
+      queryParams,
       microphoneId: this.config.microphoneId,
       debug: this.config.debug
     });
@@ -574,6 +742,25 @@ class PanaudiaClient {
   async unmute(entityId) {
     await this.transport.publishControl({ type: "unmute", message: { node: entityId } });
   }
+  /**
+   * Invoke a named command from the server's command catalog
+   * (see `plan/commands/command_types.md`). Args are command-specific —
+   * for example `space.entity.mute` takes `{entity_id}` and
+   * `personal.role.mute` takes `{role}`.
+   *
+   * Strict-MVC: this fires-and-forgets. The server applies the command
+   * (if the holder's roles allow it) and the resulting cache op flows
+   * back through the entity / attribute streams. Failed authorisation,
+   * unknown command names and bad arguments all silently drop on the
+   * server — clients infer success from the absence or presence of an
+   * echoed op. There is no per-call error path by design.
+   */
+  async command(name, args = {}) {
+    await this.transport.publishControl({
+      type: "command",
+      message: { command: name, args }
+    });
+  }
   // ── Events ───────────────────────────────────────────────────────────
   on(event, handler) {
     let set = this.handlers.get(event);
@@ -601,6 +788,30 @@ class PanaudiaClient {
    */
   getAttributes(uuid) {
     return this.attributeTree.get(uuid);
+  }
+  /**
+   * Get the structured per-entity tree, keyed by uuid. Maintained
+   * automatically from incoming entity values and tombstones. Under the
+   * current server-side filter the only uuid this map will contain is
+   * the client's own (`getEntityId()`).
+   */
+  getEntityTree() {
+    return this.entityTree.getAll();
+  }
+  /**
+   * Get a single entity's record, or undefined if unknown. Pass
+   * `getEntityId()` to retrieve this client's own record.
+   */
+  getEntity(uuid) {
+    return this.entityTree.get(uuid);
+  }
+  /**
+   * Get the space-wide role-rule record (roles-muted, roles-kicked,
+   * roles-gain, roles-attenuation). Empty for connections without
+   * the `space.read` read cap.
+   */
+  getSpace() {
+    return this.spaceTree.get();
   }
   // ── Internal ─────────────────────────────────────────────────────────
   emit(event, ...args) {
@@ -654,11 +865,13 @@ class PanaudiaClient {
  */
 __publicField(PanaudiaClient, "getRecommendedMicrophone", selectBestMicrophone);
 export {
-  AttributeTree,
   BluetoothMicDefaultError,
   ConnectionState,
   E as ENTITY_INFO3_SIZE,
   PanaudiaClient,
+  SingleRecordTree,
+  T as TopicMerger,
+  TopicTree,
   aframeToPanaudia,
   ambisonicToWebglPosition,
   ambisonicToWebglRotation,

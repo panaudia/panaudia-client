@@ -123,9 +123,11 @@ export interface MoqAnnouncement {
 export interface PanaudiaConfig {
     /** Server URL (e.g., "https://server.example.com:4433") */
     serverUrl: string;
-    /** JWT authentication token */
-    ticket: string;
-    /** Entity ID (UUID) - typically extracted from JWT, but can be provided */
+    /** JWT authentication token. Omit for tokenless mode (requires server-side
+     *  PANAUDIA_UNTICKETED=1 and an entityId to be provided explicitly). */
+    ticket?: string;
+    /** Entity ID (UUID) — typically extracted from the JWT ticket, but must be
+     *  provided explicitly when `ticket` is omitted. */
     entityId?: string;
     /** Initial position in Panaudia coordinates (0-1 range) */
     initialPosition?: Position;
@@ -143,6 +145,8 @@ export declare enum PanaudiaTrackType {
     STATE = "state",
     STATE_OUTPUT = "out/state",
     ATTRIBUTES_OUTPUT = "out/attributes",
+    ENTITY_OUTPUT = "out/entity",
+    SPACE_OUTPUT = "out/space",
     CONTROL_INPUT = "in/control"
 }
 /**

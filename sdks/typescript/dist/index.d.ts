@@ -34,6 +34,10 @@ export type { ResolveServerOptions } from './gateway.js';
 export type { Transport, TransportConfig, AudioCaptureConfig, AudioPlaybackConfig } from './transport.js';
 export { PanaudiaClient } from './panaudia-client.js';
 export type { PanaudiaClientConfig, TransportType, MicrophoneInfo } from './panaudia-client.js';
-export { AttributeTree } from './shared/attribute-tree.js';
-export type { AttributeNode, AttributeValue } from './shared/attribute-tree.js';
+export { TopicTree } from './shared/topic-tree.js';
+export type { TopicNode, TopicValue } from './shared/topic-tree.js';
+export { SingleRecordTree } from './shared/single-record-tree.js';
+export type { SingleRecordNode, SingleRecordValue } from './shared/single-record-tree.js';
+export { TopicMerger } from './shared/topic-merger.js';
+export type { MergeResult, MergeDebugInfo } from './shared/topic-merger.js';
 //# sourceMappingURL=index.d.ts.map

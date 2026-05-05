@@ -174,10 +174,12 @@ export interface PanaudiaConfig {
   /** Server URL (e.g., "https://server.example.com:4433") */
   serverUrl: string;
 
-  /** JWT authentication token */
-  ticket: string;
+  /** JWT authentication token. Omit for tokenless mode (requires server-side
+   *  PANAUDIA_UNTICKETED=1 and an entityId to be provided explicitly). */
+  ticket?: string;
 
-  /** Entity ID (UUID) - typically extracted from JWT, but can be provided */
+  /** Entity ID (UUID) — typically extracted from the JWT ticket, but must be
+   *  provided explicitly when `ticket` is omitted. */
   entityId?: string;
 
   /** Initial position in Panaudia coordinates (0-1 range) */
@@ -203,6 +205,8 @@ export enum PanaudiaTrackType {
   STATE = 'state',
   STATE_OUTPUT = 'out/state',
   ATTRIBUTES_OUTPUT = 'out/attributes',
+  ENTITY_OUTPUT = 'out/entity',
+  SPACE_OUTPUT = 'out/space',
   CONTROL_INPUT = 'in/control',
 }
 
@@ -221,6 +225,10 @@ export function generateTrackNamespace(trackType: PanaudiaTrackType, entityId: s
       return ['out', 'state', entityId];
     case PanaudiaTrackType.ATTRIBUTES_OUTPUT:
       return ['out', 'attributes', entityId];
+    case PanaudiaTrackType.ENTITY_OUTPUT:
+      return ['out', 'entity', entityId];
+    case PanaudiaTrackType.SPACE_OUTPUT:
+      return ['out', 'space', entityId];
     case PanaudiaTrackType.CONTROL_INPUT:
       return ['in', 'control', entityId];
     default:

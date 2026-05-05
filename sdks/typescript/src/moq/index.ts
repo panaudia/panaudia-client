@@ -202,9 +202,18 @@ export {
 export { ControlTrackPublisher } from './control-publisher.js';
 export type { ControlMessage } from '../types.js';
 
-// Attributes subscription
-export { AttributesSubscriber } from './attributes-subscriber.js';
-export type { ValuesHandler, RemovedHandler, AttributeValue } from './attributes-subscriber.js';
+// Topic subscription (attributes / entity / future cache topics)
+export {
+  CacheTopicSubscriber,
+  AttributesSubscriber,
+  EntitySubscriber,
+} from './cache-topic-subscriber.js';
+export type {
+  ValuesHandler,
+  RemovedHandler,
+  TopicValue,
+  AttributeValue,
+} from './cache-topic-subscriber.js';
 
 // Cache (shared)
 export { CacheMap } from '../shared/cache-map.js';

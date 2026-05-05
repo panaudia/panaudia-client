@@ -3,7 +3,7 @@ import { AudioPublisherConfig } from './audio-publisher.js';
 import { AudioSubscriberStats } from './audio-subscriber.js';
 import { AudioPlayerConfig, AudioPlayerStats } from './audio-player.js';
 import { EntityState, EntityStateHandler } from './state-subscriber.js';
-import { ValuesHandler, RemovedHandler } from './attributes-subscriber.js';
+import { ValuesHandler, RemovedHandler } from './cache-topic-subscriber.js';
 /**
  * Main Panaudia MOQ Client
  *
@@ -41,6 +41,12 @@ export declare class PanaudiaMoqClient {
     private attributesSubscriber;
     private attributesOutputTrackAlias;
     private readonly attributesCache;
+    private entitySubscriber;
+    private entityOutputTrackAlias;
+    private readonly entityCache;
+    private spaceSubscriber;
+    private spaceOutputTrackAlias;
+    private readonly spaceCache;
     private audioInputTrackAlias;
     private stateTrackAlias;
     private audioOutputTrackAlias;
@@ -134,6 +140,16 @@ export declare class PanaudiaMoqClient {
      */
     onAttributeRemoved(handler: RemovedHandler): void;
     /**
+     * Register a handler for batches of entity values. Mirrors
+     * `onAttributeValues` but for the per-client entity stream — only ops
+     * whose key starts with this client's own uuid arrive here.
+     */
+    onEntityValues(handler: ValuesHandler): void;
+    /**
+     * Register a handler for batches of entity key removals (tombstones).
+     */
+    onEntityRemoved(handler: RemovedHandler): void;
+    /**
      * Mute a remote entity (they will be silent in your mix)
      */
     mute(entityId: string): Promise<void>;
@@ -141,6 +157,16 @@ export declare class PanaudiaMoqClient {
      * Unmute a remote entity
      */
     unmute(entityId: string): Promise<void>;
+    /**
+     * Invoke a named command from the server's command catalog.
+     *
+     * Strict-MVC: this fires-and-forgets. The command's effect (if any)
+     * arrives later as an echoed entity / attribute op via the existing
+     * subscriber path. There is no per-call error response — failed
+     * authorisation, unknown command names and bad args all silently
+     * drop on the server.
+     */
+    command(name: string, args?: Record<string, unknown>): Promise<void>;
     /**
      * Start capturing and publishing microphone audio
      *

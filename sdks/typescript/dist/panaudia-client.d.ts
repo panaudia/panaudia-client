@@ -1,13 +1,17 @@
 import { ConnectionState, Position, Rotation, ErrorEvent, WarningEvent, EntityState } from './types.js';
 import { PanaudiaPose } from './shared/coordinates.js';
-import { AttributeNode } from './shared/attribute-tree.js';
+import { TopicNode } from './shared/topic-tree.js';
+import { SingleRecordNode } from './shared/single-record-tree.js';
+import { MergeDebugInfo } from './shared/topic-merger.js';
 import { selectBestMicrophone, MicrophoneType } from './shared/microphone-selection.js';
 export type TransportType = 'moq' | 'webrtc';
 export interface PanaudiaClientConfig {
     /** Server URL (from resolveServer() or hardcoded for dev). */
     serverUrl: string;
-    /** JWT authentication token. */
-    ticket: string;
+    /** JWT authentication token. Omit for tokenless (dev/sandbox) connections —
+     *  the client will generate a UUID and pass it in the connection URL. The
+     *  server must be running with PANAUDIA_UNTICKETED=1 for this to succeed. */
+    ticket?: string;
     /** Transport to use. Default: 'auto' (MOQ if supported, else WebRTC). */
     transport?: 'auto' | 'moq' | 'webrtc';
     /** Initial position in Panaudia coordinates (0-1 range). */
@@ -42,8 +46,22 @@ type EventHandlerMap = {
         value: string;
     }>) => void;
     attributesRemoved: (keys: string[]) => void;
-    attributeTreeChange: (uuid: string, attrs: AttributeNode) => void;
+    attributeTreeChange: (uuid: string, attrs: TopicNode) => void;
     attributeTreeRemove: (uuid: string) => void;
+    entity: (values: Array<{
+        key: string;
+        value: string;
+    }>) => void;
+    entityRemoved: (keys: string[]) => void;
+    entityTreeChange: (uuid: string, record: TopicNode) => void;
+    entityTreeRemove: (uuid: string) => void;
+    space: (values: Array<{
+        key: string;
+        value: string;
+    }>) => void;
+    spaceRemoved: (keys: string[]) => void;
+    spaceTreeChange: (record: SingleRecordNode) => void;
+    cacheDebug: (info: MergeDebugInfo) => void;
 };
 export interface MicrophoneInfo {
     deviceId: string;
@@ -73,6 +91,8 @@ export declare class PanaudiaClient {
     private muted;
     private handlers;
     private attributeTree;
+    private entityTree;
+    private spaceTree;
     constructor(config: PanaudiaClientConfig);
     connect(): Promise<void>;
     disconnect(): Promise<void>;
@@ -102,17 +122,49 @@ export declare class PanaudiaClient {
     setPose(pose: PanaudiaPose): void;
     mute(entityId: string): Promise<void>;
     unmute(entityId: string): Promise<void>;
+    /**
+     * Invoke a named command from the server's command catalog
+     * (see `plan/commands/command_types.md`). Args are command-specific —
+     * for example `space.entity.mute` takes `{entity_id}` and
+     * `personal.role.mute` takes `{role}`.
+     *
+     * Strict-MVC: this fires-and-forgets. The server applies the command
+     * (if the holder's roles allow it) and the resulting cache op flows
+     * back through the entity / attribute streams. Failed authorisation,
+     * unknown command names and bad arguments all silently drop on the
+     * server — clients infer success from the absence or presence of an
+     * echoed op. There is no per-call error path by design.
+     */
+    command(name: string, args?: Record<string, unknown>): Promise<void>;
     on<K extends keyof EventHandlerMap>(event: K, handler: EventHandlerMap[K]): void;
     off<K extends keyof EventHandlerMap>(event: K, handler: EventHandlerMap[K]): void;
     /**
      * Get the structured per-participant attribute tree, keyed by uuid.
      * Maintained automatically from incoming attribute values and tombstones.
      */
-    getAttributeTree(): ReadonlyMap<string, AttributeNode>;
+    getAttributeTree(): ReadonlyMap<string, TopicNode>;
     /**
      * Get a single participant's attributes, or undefined if unknown.
      */
-    getAttributes(uuid: string): AttributeNode | undefined;
+    getAttributes(uuid: string): TopicNode | undefined;
+    /**
+     * Get the structured per-entity tree, keyed by uuid. Maintained
+     * automatically from incoming entity values and tombstones. Under the
+     * current server-side filter the only uuid this map will contain is
+     * the client's own (`getEntityId()`).
+     */
+    getEntityTree(): ReadonlyMap<string, TopicNode>;
+    /**
+     * Get a single entity's record, or undefined if unknown. Pass
+     * `getEntityId()` to retrieve this client's own record.
+     */
+    getEntity(uuid: string): TopicNode | undefined;
+    /**
+     * Get the space-wide role-rule record (roles-muted, roles-kicked,
+     * roles-gain, roles-attenuation). Empty for connections without
+     * the `space.read` read cap.
+     */
+    getSpace(): Readonly<SingleRecordNode>;
     private emit;
     private scheduleStatePublish;
     private cancelPendingStatePublish;

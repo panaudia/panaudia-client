@@ -1,7 +1,7 @@
 var __defProp = Object.defineProperty;
 var __defNormalProp = (obj, key, value) => key in obj ? __defProp(obj, key, { enumerable: true, configurable: true, writable: true, value }) : obj[key] = value;
 var __publicField = (obj, key, value) => __defNormalProp(obj, typeof key !== "symbol" ? key + "" : key, value);
-import { C as ConnectionState, a as entityInfo3ToBytes, E as ENTITY_INFO3_SIZE, e as entityInfo3FromBytes, d as isCacheEnvelope, f as decodeCacheOp, p as parseJsonOps } from "../json-ops.js";
+import { C as ConnectionState, T as TopicMerger, a as entityInfo3ToBytes, E as ENTITY_INFO3_SIZE, e as entityInfo3FromBytes } from "../topic-merger.js";
 function extractEntityIdFromJwt(token) {
   const parts = token.split(".");
   if (parts.length !== 3) throw new Error("Invalid JWT format");
@@ -27,12 +27,42 @@ class WebRtcTransport {
     __publicField(this, "entityStateHandlers", []);
     __publicField(this, "attributesHandlers", []);
     __publicField(this, "attributesRemovedHandlers", []);
+    __publicField(this, "entityHandlers", []);
+    __publicField(this, "entityRemovedHandlers", []);
+    __publicField(this, "spaceHandlers", []);
+    __publicField(this, "spaceRemovedHandlers", []);
     __publicField(this, "connectionStateHandlers", []);
     __publicField(this, "errorHandlers", []);
     __publicField(this, "warningHandlers", []);
+    // Per-topic merge gates. Without these, an out-of-order arrival on
+    // the data channel (stale backfill envelope landing after a newer
+    // live envelope for the same key) would let the older value clobber
+    // the newer one, since TopicTree.applyValues is opId-blind. The MOQ
+    // path runs the same gate inside CacheTopicSubscriber.
+    __publicField(this, "attributesMerger", new TopicMerger());
+    __publicField(this, "entityMerger", new TopicMerger());
+    __publicField(this, "spaceMerger", new TopicMerger());
+    __publicField(this, "cacheDebugHandlers", []);
+    const dispatch = (info) => {
+      for (const h of this.cacheDebugHandlers) {
+        try {
+          h(info);
+        } catch {
+        }
+      }
+    };
+    this.attributesMerger.setDebugHandler(dispatch);
+    this.entityMerger.setDebugHandler(dispatch);
+    this.spaceMerger.setDebugHandler(dispatch);
   }
   async connect(config) {
-    this.entityId = config.entityId ?? extractEntityIdFromJwt(config.ticket);
+    if (config.entityId) {
+      this.entityId = config.entityId;
+    } else if (config.ticket) {
+      this.entityId = extractEntityIdFromJwt(config.ticket);
+    } else {
+      throw new Error("either ticket or entityId is required");
+    }
     this.microphoneId = config.microphoneId;
     this.setState(ConnectionState.CONNECTING);
     this.pc = new RTCPeerConnection({
@@ -166,6 +196,18 @@ class WebRtcTransport {
   onAttributeRemoved(handler) {
     this.attributesRemovedHandlers.push(handler);
   }
+  onEntityValues(handler) {
+    this.entityHandlers.push(handler);
+  }
+  onEntityRemoved(handler) {
+    this.entityRemovedHandlers.push(handler);
+  }
+  onSpaceValues(handler) {
+    this.spaceHandlers.push(handler);
+  }
+  onSpaceRemoved(handler) {
+    this.spaceRemovedHandlers.push(handler);
+  }
   onConnectionStateChange(handler) {
     this.connectionStateHandlers.push(handler);
   }
@@ -174,6 +216,9 @@ class WebRtcTransport {
   }
   onWarning(handler) {
     this.warningHandlers.push(handler);
+  }
+  onCacheDebug(handler) {
+    this.cacheDebugHandlers.push(handler);
   }
   // ── Internal ──────────────────────────────────────────────────────────
   setState(state) {
@@ -195,7 +240,9 @@ class WebRtcTransport {
   }
   buildWsUrl(config) {
     const url = new URL(config.serverUrl);
-    url.searchParams.set("ticket", config.ticket);
+    if (config.ticket) {
+      url.searchParams.set("ticket", config.ticket);
+    }
     if (config.initialPosition) {
       url.searchParams.set("x", String(config.initialPosition.x));
       url.searchParams.set("y", String(config.initialPosition.y));
@@ -253,6 +300,16 @@ class WebRtcTransport {
         channel.binaryType = "arraybuffer";
         channel.onmessage = (msg) => {
           this.handleAttributesMessage(msg.data);
+        };
+      } else if (channel.label === "entity") {
+        channel.binaryType = "arraybuffer";
+        channel.onmessage = (msg) => {
+          this.handleEntityMessage(msg.data);
+        };
+      } else if (channel.label === "space") {
+        channel.binaryType = "arraybuffer";
+        channel.onmessage = (msg) => {
+          this.handleSpaceMessage(msg.data);
         };
       }
     };
@@ -357,34 +414,66 @@ class WebRtcTransport {
     if (typeof data === "string") {
       return;
     }
-    const bytes = new Uint8Array(data);
-    if (!isCacheEnvelope(bytes)) return;
-    const envelope = decodeCacheOp(bytes);
-    if (!envelope) return;
-    const jsonOps = parseJsonOps(envelope.value);
-    if (!jsonOps) return;
-    const values = [];
-    const removed = [];
-    for (const op of jsonOps) {
-      if (!op.key) continue;
-      if (op.tombstone) {
-        removed.push(op.key);
-      } else {
-        values.push({ key: op.key, value: JSON.stringify(op.value) });
-      }
-    }
-    if (values.length > 0) {
+    const result = this.attributesMerger.applyEnvelope(new Uint8Array(data));
+    if (!result) return;
+    if (result.accepted.length > 0) {
       for (const h of this.attributesHandlers) {
         try {
-          h(values);
+          h(result.accepted);
         } catch {
         }
       }
     }
-    if (removed.length > 0) {
+    if (result.tombstoned.length > 0) {
       for (const h of this.attributesRemovedHandlers) {
         try {
-          h(removed);
+          h(result.tombstoned);
+        } catch {
+        }
+      }
+    }
+  }
+  handleEntityMessage(data) {
+    if (typeof data === "string") {
+      return;
+    }
+    const result = this.entityMerger.applyEnvelope(new Uint8Array(data));
+    if (!result) return;
+    if (result.accepted.length > 0) {
+      for (const h of this.entityHandlers) {
+        try {
+          h(result.accepted);
+        } catch {
+        }
+      }
+    }
+    if (result.tombstoned.length > 0) {
+      for (const h of this.entityRemovedHandlers) {
+        try {
+          h(result.tombstoned);
+        } catch {
+        }
+      }
+    }
+  }
+  handleSpaceMessage(data) {
+    if (typeof data === "string") {
+      return;
+    }
+    const result = this.spaceMerger.applyEnvelope(new Uint8Array(data));
+    if (!result) return;
+    if (result.accepted.length > 0) {
+      for (const h of this.spaceHandlers) {
+        try {
+          h(result.accepted);
+        } catch {
+        }
+      }
+    }
+    if (result.tombstoned.length > 0) {
+      for (const h of this.spaceRemovedHandlers) {
+        try {
+          h(result.tombstoned);
         } catch {
         }
       }

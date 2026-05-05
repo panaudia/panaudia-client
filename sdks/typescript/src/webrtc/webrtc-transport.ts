@@ -7,8 +7,7 @@ import type { Transport, TransportConfig, AudioCaptureConfig, AudioPlaybackConfi
 import { ConnectionState } from '../types.js';
 import type { EntityInfo3, ControlMessage, EntityState, WarningEvent } from '../types.js';
 import { entityInfo3ToBytes, entityInfo3FromBytes, ENTITY_INFO3_SIZE } from '../shared/encoding.js';
-import { isCacheEnvelope, decodeCacheOp } from '../shared/cache-wire.js';
-import { parseJsonOps } from '../shared/json-ops.js';
+import { TopicMerger, type MergeDebugInfo } from '../shared/topic-merger.js';
 
 type EventHandler<T> = (event: T) => void;
 
@@ -40,12 +39,48 @@ export class WebRtcTransport implements Transport {
   private entityStateHandlers: EventHandler<EntityState>[] = [];
   private attributesHandlers: EventHandler<Array<{ key: string; value: string }>>[] = [];
   private attributesRemovedHandlers: EventHandler<string[]>[] = [];
+  private entityHandlers: EventHandler<Array<{ key: string; value: string }>>[] = [];
+  private entityRemovedHandlers: EventHandler<string[]>[] = [];
+  private spaceHandlers: EventHandler<Array<{ key: string; value: string }>>[] = [];
+  private spaceRemovedHandlers: EventHandler<string[]>[] = [];
   private connectionStateHandlers: EventHandler<ConnectionState>[] = [];
   private errorHandlers: EventHandler<Error>[] = [];
   private warningHandlers: EventHandler<WarningEvent>[] = [];
 
+  // Per-topic merge gates. Without these, an out-of-order arrival on
+  // the data channel (stale backfill envelope landing after a newer
+  // live envelope for the same key) would let the older value clobber
+  // the newer one, since TopicTree.applyValues is opId-blind. The MOQ
+  // path runs the same gate inside CacheTopicSubscriber.
+  private readonly attributesMerger = new TopicMerger();
+  private readonly entityMerger = new TopicMerger();
+  private readonly spaceMerger = new TopicMerger();
+  private cacheDebugHandlers: EventHandler<MergeDebugInfo>[] = [];
+
+  constructor() {
+    // Fan out per-envelope merge diagnostics from both mergers to any
+    // registered cache-debug handler. Used by callers that need to
+    // distinguish "envelope arrived but every op was stale" from "no
+    // envelope arrived".
+    const dispatch = (info: MergeDebugInfo) => {
+      for (const h of this.cacheDebugHandlers) {
+        try { h(info); } catch { /* ignore */ }
+      }
+    };
+    this.attributesMerger.setDebugHandler(dispatch);
+    this.entityMerger.setDebugHandler(dispatch);
+    this.spaceMerger.setDebugHandler(dispatch);
+  }
+
   async connect(config: TransportConfig): Promise<void> {
-    this.entityId = config.entityId ?? extractEntityIdFromJwt(config.ticket);
+    // Resolve entity id: explicit override > JWT jti > error
+    if (config.entityId) {
+      this.entityId = config.entityId;
+    } else if (config.ticket) {
+      this.entityId = extractEntityIdFromJwt(config.ticket);
+    } else {
+      throw new Error('either ticket or entityId is required');
+    }
     this.microphoneId = config.microphoneId;
 
     this.setState(ConnectionState.CONNECTING);
@@ -227,6 +262,22 @@ export class WebRtcTransport implements Transport {
     this.attributesRemovedHandlers.push(handler);
   }
 
+  onEntityValues(handler: EventHandler<Array<{ key: string; value: string }>>): void {
+    this.entityHandlers.push(handler);
+  }
+
+  onEntityRemoved(handler: EventHandler<string[]>): void {
+    this.entityRemovedHandlers.push(handler);
+  }
+
+  onSpaceValues(handler: EventHandler<Array<{ key: string; value: string }>>): void {
+    this.spaceHandlers.push(handler);
+  }
+
+  onSpaceRemoved(handler: EventHandler<string[]>): void {
+    this.spaceRemovedHandlers.push(handler);
+  }
+
   onConnectionStateChange(handler: EventHandler<ConnectionState>): void {
     this.connectionStateHandlers.push(handler);
   }
@@ -237,6 +288,10 @@ export class WebRtcTransport implements Transport {
 
   onWarning(handler: EventHandler<WarningEvent>): void {
     this.warningHandlers.push(handler);
+  }
+
+  onCacheDebug(handler: EventHandler<MergeDebugInfo>): void {
+    this.cacheDebugHandlers.push(handler);
   }
 
   // ── Internal ──────────────────────────────────────────────────────────
@@ -257,7 +312,9 @@ export class WebRtcTransport implements Transport {
   private buildWsUrl(config: TransportConfig): string {
     // serverUrl is expected to be wss://host:port/join (from resolveServer)
     const url = new URL(config.serverUrl);
-    url.searchParams.set('ticket', config.ticket);
+    if (config.ticket) {
+      url.searchParams.set('ticket', config.ticket);
+    }
 
     if (config.initialPosition) {
       url.searchParams.set('x', String(config.initialPosition.x));
@@ -329,6 +386,19 @@ export class WebRtcTransport implements Transport {
         channel.binaryType = 'arraybuffer';
         channel.onmessage = (msg) => {
           this.handleAttributesMessage(msg.data);
+        };
+      } else if (channel.label === 'entity') {
+        channel.binaryType = 'arraybuffer';
+        channel.onmessage = (msg) => {
+          this.handleEntityMessage(msg.data);
+        };
+      } else if (channel.label === 'space') {
+        // Server always creates the space channel; whether any
+        // envelopes arrive depends on the holder's space.read cap.
+        // We just bind the handler — quiet for unauthorised holders.
+        channel.binaryType = 'arraybuffer';
+        channel.onmessage = (msg) => {
+          this.handleSpaceMessage(msg.data);
         };
       }
     };
@@ -452,37 +522,59 @@ export class WebRtcTransport implements Transport {
       return;
     }
 
-    const bytes = new Uint8Array(data);
-    if (!isCacheEnvelope(bytes)) return;
+    const result = this.attributesMerger.applyEnvelope(new Uint8Array(data));
+    if (!result) return;
 
-    const envelope = decodeCacheOp(bytes);
-    if (!envelope) return;
-
-    const jsonOps = parseJsonOps(envelope.value);
-    if (!jsonOps) return;
-
-    // Split ops into accepted values and tombstoned keys; deliver each
-    // group as one atomic batch per envelope so the application can rely
-    // on bulk-init / bulk-disconnect arriving together.
-    const values: Array<{ key: string; value: string }> = [];
-    const removed: string[] = [];
-    for (const op of jsonOps) {
-      if (!op.key) continue;
-      if (op.tombstone) {
-        removed.push(op.key);
-      } else {
-        values.push({ key: op.key, value: JSON.stringify(op.value) });
-      }
-    }
-
-    if (values.length > 0) {
+    if (result.accepted.length > 0) {
       for (const h of this.attributesHandlers) {
-        try { h(values); } catch { /* ignore */ }
+        try { h(result.accepted); } catch { /* ignore */ }
       }
     }
-    if (removed.length > 0) {
+    if (result.tombstoned.length > 0) {
       for (const h of this.attributesRemovedHandlers) {
-        try { h(removed); } catch { /* ignore */ }
+        try { h(result.tombstoned); } catch { /* ignore */ }
+      }
+    }
+  }
+
+  private handleEntityMessage(data: ArrayBuffer | string): void {
+    if (typeof data === 'string') {
+      // The server only emits binary cache envelopes on the entity
+      // channel; ignore any stray text payloads.
+      return;
+    }
+
+    const result = this.entityMerger.applyEnvelope(new Uint8Array(data));
+    if (!result) return;
+
+    if (result.accepted.length > 0) {
+      for (const h of this.entityHandlers) {
+        try { h(result.accepted); } catch { /* ignore */ }
+      }
+    }
+    if (result.tombstoned.length > 0) {
+      for (const h of this.entityRemovedHandlers) {
+        try { h(result.tombstoned); } catch { /* ignore */ }
+      }
+    }
+  }
+
+  private handleSpaceMessage(data: ArrayBuffer | string): void {
+    if (typeof data === 'string') {
+      return;
+    }
+
+    const result = this.spaceMerger.applyEnvelope(new Uint8Array(data));
+    if (!result) return;
+
+    if (result.accepted.length > 0) {
+      for (const h of this.spaceHandlers) {
+        try { h(result.accepted); } catch { /* ignore */ }
+      }
+    }
+    if (result.tombstoned.length > 0) {
+      for (const h of this.spaceRemovedHandlers) {
+        try { h(result.tombstoned); } catch { /* ignore */ }
       }
     }
   }

@@ -105,7 +105,18 @@ export type { Transport, TransportConfig, AudioCaptureConfig, AudioPlaybackConfi
 export { PanaudiaClient } from './panaudia-client.js';
 export type { PanaudiaClientConfig, TransportType, MicrophoneInfo } from './panaudia-client.js';
 
-// Structured attribute view (used internally by PanaudiaClient,
+// Structured per-uuid topic view (used internally by PanaudiaClient,
 // exported for direct use by clients that bypass the unified API).
-export { AttributeTree } from './shared/attribute-tree.js';
-export type { AttributeNode, AttributeValue } from './shared/attribute-tree.js';
+export { TopicTree } from './shared/topic-tree.js';
+export type { TopicNode, TopicValue } from './shared/topic-tree.js';
+
+// Single-record topic view — used for the `space` topic where keys
+// are uuid-less and the reconstructed shape is one nested record
+// rather than a per-uuid map.
+export { SingleRecordTree } from './shared/single-record-tree.js';
+export type { SingleRecordNode, SingleRecordValue } from './shared/single-record-tree.js';
+
+// Per-key opId-gated merge applied by both transports before values
+// reach the application — exported for tests and advanced consumers.
+export { TopicMerger } from './shared/topic-merger.js';
+export type { MergeResult, MergeDebugInfo } from './shared/topic-merger.js';

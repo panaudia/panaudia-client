@@ -26,9 +26,14 @@ const mockTransport: Transport = {
   onEntityState: vi.fn(),
   onAttributeValues: vi.fn(),
   onAttributeRemoved: vi.fn(),
+  onEntityValues: vi.fn(),
+  onEntityRemoved: vi.fn(),
   onConnectionStateChange: vi.fn(),
   onError: vi.fn(),
   onWarning: vi.fn(),
+  onCacheDebug: vi.fn(),
+  onSpaceValues: vi.fn(),
+  onSpaceRemoved: vi.fn(),
   setVolume: vi.fn(),
   getVolume: vi.fn().mockReturnValue(1),
 };
@@ -282,6 +287,101 @@ describe('PanaudiaClient', () => {
       });
 
       expect(handler).not.toHaveBeenCalled();
+    });
+  });
+
+  describe('entity tree', () => {
+    const myId = '11111111-1111-1111-1111-111111111111';
+    const subA = 'aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa';
+    const otherId = '22222222-2222-2222-2222-222222222222';
+
+    // Helpers to grab the handler the client registered on the mock
+    // transport during construction. Those calls happen synchronously in
+    // the constructor, so the [0]th invocation is always the live one.
+    const valuesHandler = () =>
+      vi.mocked(mockTransport.onEntityValues).mock.calls[0]?.[0];
+    const removedHandler = () =>
+      vi.mocked(mockTransport.onEntityRemoved).mock.calls[0]?.[0];
+
+    it('builds a structured entity record from flat keys', () => {
+      const client = new PanaudiaClient(defaultConfig);
+      const treeChange = vi.fn();
+      const raw = vi.fn();
+      client.on('entityTreeChange', treeChange);
+      client.on('entity', raw);
+
+      // Marker + one subspace key — the schema BouncerClient.sendEntity
+      // emits in production.
+      valuesHandler()!([
+        { key: myId, value: JSON.stringify(true) },
+        { key: `${myId}.subspaces.${subA}`, value: JSON.stringify(true) },
+      ]);
+
+      // Raw flat-batch event fires once per envelope.
+      expect(raw).toHaveBeenCalledTimes(1);
+
+      // Structured event fires once per affected uuid (just `myId` here).
+      expect(treeChange).toHaveBeenCalledTimes(1);
+      const [, record] = treeChange.mock.calls[0];
+      expect(record).toEqual({ subspaces: { [subA]: true } });
+
+      // Public getters expose the same record.
+      expect(client.getEntity(myId)).toEqual({ subspaces: { [subA]: true } });
+      expect(client.getEntityTree().size).toBe(1);
+    });
+
+    it('reconstructs nested personal-mute paths', () => {
+      const client = new PanaudiaClient(defaultConfig);
+      const treeChange = vi.fn();
+      client.on('entityTreeChange', treeChange);
+
+      valuesHandler()!([
+        { key: myId, value: JSON.stringify(true) },
+        { key: `${myId}.mutes.${otherId}`, value: JSON.stringify(true) },
+      ]);
+
+      expect(client.getEntity(myId)).toEqual({
+        mutes: { [otherId]: true },
+      });
+    });
+
+    it('removes a single leaf on tombstone while other leaves persist', () => {
+      const client = new PanaudiaClient(defaultConfig);
+      const subB = 'bbbbbbbb-bbbb-bbbb-bbbb-bbbbbbbbbbbb';
+      const treeChange = vi.fn();
+      const treeRemove = vi.fn();
+      client.on('entityTreeChange', treeChange);
+      client.on('entityTreeRemove', treeRemove);
+
+      valuesHandler()!([
+        { key: myId, value: JSON.stringify(true) },
+        { key: `${myId}.subspaces.${subA}`, value: JSON.stringify(true) },
+        { key: `${myId}.subspaces.${subB}`, value: JSON.stringify(true) },
+      ]);
+
+      treeChange.mockClear();
+      removedHandler()!([`${myId}.subspaces.${subA}`]);
+
+      expect(client.getEntity(myId)).toEqual({ subspaces: { [subB]: true } });
+      expect(treeChange).toHaveBeenCalledTimes(1);
+      expect(treeRemove).not.toHaveBeenCalled();
+    });
+
+    it('removes the whole record when the existence marker is tombstoned', () => {
+      const client = new PanaudiaClient(defaultConfig);
+      const treeRemove = vi.fn();
+      client.on('entityTreeRemove', treeRemove);
+
+      valuesHandler()!([
+        { key: myId, value: JSON.stringify(true) },
+        { key: `${myId}.subspaces.${subA}`, value: JSON.stringify(true) },
+      ]);
+
+      removedHandler()!([myId]);
+
+      expect(client.getEntity(myId)).toBeUndefined();
+      expect(client.getEntityTree().size).toBe(0);
+      expect(treeRemove).toHaveBeenCalledWith(myId);
     });
   });
 });

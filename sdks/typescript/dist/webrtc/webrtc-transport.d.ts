@@ -1,5 +1,6 @@
 import { Transport, TransportConfig, AudioCaptureConfig, AudioPlaybackConfig } from '../transport.js';
 import { ConnectionState, EntityInfo3, ControlMessage, EntityState, WarningEvent } from '../types.js';
+import { MergeDebugInfo } from '../shared/topic-merger.js';
 type EventHandler<T> = (event: T) => void;
 export declare class WebRtcTransport implements Transport {
     private ws;
@@ -16,9 +17,18 @@ export declare class WebRtcTransport implements Transport {
     private entityStateHandlers;
     private attributesHandlers;
     private attributesRemovedHandlers;
+    private entityHandlers;
+    private entityRemovedHandlers;
+    private spaceHandlers;
+    private spaceRemovedHandlers;
     private connectionStateHandlers;
     private errorHandlers;
     private warningHandlers;
+    private readonly attributesMerger;
+    private readonly entityMerger;
+    private readonly spaceMerger;
+    private cacheDebugHandlers;
+    constructor();
     connect(config: TransportConfig): Promise<void>;
     disconnect(): Promise<void>;
     getState(): ConnectionState;
@@ -39,9 +49,20 @@ export declare class WebRtcTransport implements Transport {
         value: string;
     }>>): void;
     onAttributeRemoved(handler: EventHandler<string[]>): void;
+    onEntityValues(handler: EventHandler<Array<{
+        key: string;
+        value: string;
+    }>>): void;
+    onEntityRemoved(handler: EventHandler<string[]>): void;
+    onSpaceValues(handler: EventHandler<Array<{
+        key: string;
+        value: string;
+    }>>): void;
+    onSpaceRemoved(handler: EventHandler<string[]>): void;
     onConnectionStateChange(handler: EventHandler<ConnectionState>): void;
     onError(handler: EventHandler<Error>): void;
     onWarning(handler: EventHandler<WarningEvent>): void;
+    onCacheDebug(handler: EventHandler<MergeDebugInfo>): void;
     private setState;
     private emitError;
     private buildWsUrl;
@@ -52,6 +73,8 @@ export declare class WebRtcTransport implements Transport {
     private handleStateMessage;
     private parseStateBuffer;
     private handleAttributesMessage;
+    private handleEntityMessage;
+    private handleSpaceMessage;
 }
 export {};
 //# sourceMappingURL=webrtc-transport.d.ts.map

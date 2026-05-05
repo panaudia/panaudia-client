@@ -24,6 +24,17 @@ export declare class MoqTransportAdapter implements Transport {
         value: string;
     }>) => void): void;
     onAttributeRemoved(handler: (keys: string[]) => void): void;
+    onEntityValues(handler: (values: Array<{
+        key: string;
+        value: string;
+    }>) => void): void;
+    onEntityRemoved(handler: (keys: string[]) => void): void;
+    onSpaceValues(handler: (values: Array<{
+        key: string;
+        value: string;
+    }>) => void): void;
+    onSpaceRemoved(handler: (keys: string[]) => void): void;
+    onCacheDebug(handler: (info: any) => void): void;
     onConnectionStateChange(handler: (state: ConnectionState) => void): void;
     onError(handler: (error: Error) => void): void;
     onWarning(handler: (warning: WarningEvent) => void): void;

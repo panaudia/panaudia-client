@@ -23,6 +23,20 @@ export interface ConnectionEventHandlers {
  */
 export type DatagramHandler = (payload: Uint8Array, trackAlias: number, groupId: bigint, objectId: bigint) => void;
 
+interface PendingDatagram {
+  trackAlias: number;
+  payload: Uint8Array;
+  groupId: bigint;
+  objectId: bigint;
+}
+
+// Maximum bytes the pre-handler datagram buffer is allowed to hold
+// across all unknown aliases. 1 MiB is the same envelope-size budget
+// used elsewhere in the SDK and is far more than any realistic
+// SUBSCRIBE_OK race needs (typically a handful of envelopes a few
+// hundred bytes each).
+const PENDING_DATAGRAM_MAX_BYTES = 1 * 1024 * 1024;
+
 export class MoqConnection {
   private transport: WebTransport | null = null;
   private state: ConnectionState = ConnectionState.DISCONNECTED;
@@ -32,6 +46,21 @@ export class MoqConnection {
   // Datagram dispatcher
   private datagramHandlers: Map<number, DatagramHandler> = new Map();
   private datagramDispatcherRunning: boolean = false;
+
+  // Pre-handler datagram buffer. The server's MOQ AddPublisher writes
+  // SUBSCRIBE_OK on the bidi control stream and then immediately
+  // SendDatagram's any backfilled / pre-buffered objects via the
+  // unreliable QUIC datagram channel. Datagrams can race ahead of the
+  // SUBSCRIBE_OK on the wire (the streams have independent flow), so a
+  // datagram for a freshly-assigned trackAlias can arrive at the
+  // dispatcher *before* the await session.subscribe() resolves and
+  // registerDatagramHandler is called. We buffer those here in arrival
+  // order and drain them when the handler is registered.
+  //
+  // FIFO across all aliases; oldest dropped when the byte cap is
+  // exceeded. Cleared on close().
+  private pendingDatagrams: PendingDatagram[] = [];
+  private pendingDatagramBytes: number = 0;
 
   constructor(private readonly serverUrl: string) {}
 
@@ -103,6 +132,8 @@ export class MoqConnection {
   close(closeInfo?: WebTransportCloseInfo): void {
     this.datagramDispatcherRunning = false;
     this.datagramHandlers.clear();
+    this.pendingDatagrams = [];
+    this.pendingDatagramBytes = 0;
     if (this.datagramWriter) {
       this.datagramWriter.releaseLock();
       this.datagramWriter = null;
@@ -186,20 +217,96 @@ export class MoqConnection {
 
   /**
    * Register a datagram handler for a specific track alias.
-   * Starts the dispatcher on first registration.
+   * Starts the dispatcher on first registration. Drains any datagrams
+   * that arrived for this alias before the handler was registered (the
+   * SUBSCRIBE_OK / first-datagram race — see `pendingDatagrams`).
    */
   registerDatagramHandler(trackAlias: number, handler: DatagramHandler): void {
     this.datagramHandlers.set(trackAlias, handler);
     if (!this.datagramDispatcherRunning) {
       this.startDatagramDispatcher();
     }
+    if (this.pendingDatagrams.length > 0) {
+      this.drainPendingForAlias(trackAlias, handler);
+    }
   }
 
   /**
-   * Unregister a datagram handler for a track alias
+   * Unregister a datagram handler for a track alias. Discards any
+   * still-buffered pre-handler datagrams for that alias.
    */
   unregisterDatagramHandler(trackAlias: number): void {
     this.datagramHandlers.delete(trackAlias);
+    if (this.pendingDatagrams.length > 0) {
+      this.discardPendingForAlias(trackAlias);
+    }
+  }
+
+  /**
+   * Number of buffered pre-handler datagrams currently held. Exposed
+   * for tests and diagnostics; production callers shouldn't need it.
+   */
+  getPendingDatagramCount(): number {
+    return this.pendingDatagrams.length;
+  }
+
+  /**
+   * Drain any datagrams that arrived for `trackAlias` before its
+   * handler was registered, in arrival order. Called from
+   * registerDatagramHandler.
+   */
+  private drainPendingForAlias(trackAlias: number, handler: DatagramHandler): void {
+    const remaining: PendingDatagram[] = [];
+    let drainedBytes = 0;
+    for (const d of this.pendingDatagrams) {
+      if (d.trackAlias === trackAlias) {
+        try {
+          handler(d.payload, d.trackAlias, d.groupId, d.objectId);
+        } catch {
+          // Ignore handler errors; drain proceeds.
+        }
+        drainedBytes += d.payload.length;
+      } else {
+        remaining.push(d);
+      }
+    }
+    this.pendingDatagrams = remaining;
+    this.pendingDatagramBytes -= drainedBytes;
+  }
+
+  /**
+   * Drop any buffered datagrams for `trackAlias` (called on
+   * unregister so we don't keep stale bytes around).
+   */
+  private discardPendingForAlias(trackAlias: number): void {
+    const remaining: PendingDatagram[] = [];
+    let discardedBytes = 0;
+    for (const d of this.pendingDatagrams) {
+      if (d.trackAlias === trackAlias) {
+        discardedBytes += d.payload.length;
+      } else {
+        remaining.push(d);
+      }
+    }
+    this.pendingDatagrams = remaining;
+    this.pendingDatagramBytes -= discardedBytes;
+  }
+
+  /**
+   * Buffer a datagram whose trackAlias has no registered handler yet.
+   * FIFO across all aliases; oldest entries are dropped when the byte
+   * cap is exceeded. Called from the dispatcher loop.
+   */
+  private bufferUnknownDatagram(d: PendingDatagram): void {
+    this.pendingDatagrams.push(d);
+    this.pendingDatagramBytes += d.payload.length;
+    while (
+      this.pendingDatagramBytes > PENDING_DATAGRAM_MAX_BYTES &&
+      this.pendingDatagrams.length > 0
+    ) {
+      const dropped = this.pendingDatagrams.shift()!;
+      this.pendingDatagramBytes -= dropped.payload.length;
+    }
   }
 
   /**
@@ -222,11 +329,7 @@ export class MoqConnection {
 
           try {
             const parsed = parseObjectDatagram(value);
-            const handler = this.datagramHandlers.get(parsed.trackAlias);
-            if (handler) {
-              handler(parsed.payload, parsed.trackAlias, parsed.groupId, parsed.objectId);
-            }
-            // Datagrams for unknown track aliases are silently dropped
+            this.dispatchOrBuffer(parsed);
           } catch {
             // Malformed datagram — skip
           }
@@ -241,6 +344,20 @@ export class MoqConnection {
     };
 
     loop();
+  }
+
+  /**
+   * Route a parsed datagram to its handler, or buffer it if the
+   * handler hasn't been registered yet. Extracted from the dispatcher
+   * loop so unit tests can drive it without a real WebTransport.
+   */
+  private dispatchOrBuffer(parsed: PendingDatagram): void {
+    const handler = this.datagramHandlers.get(parsed.trackAlias);
+    if (handler) {
+      handler(parsed.payload, parsed.trackAlias, parsed.groupId, parsed.objectId);
+    } else {
+      this.bufferUnknownDatagram(parsed);
+    }
   }
 
   /**

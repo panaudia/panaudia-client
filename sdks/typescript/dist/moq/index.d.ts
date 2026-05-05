@@ -39,8 +39,8 @@ export type { TrackPublisherConfig, TrackPublisherStats, } from './track-publish
 export { ENTITY_INFO3_SIZE, uuidToBytes, bytesToUuid, entityInfo3ToBytes, entityInfo3FromBytes, createEntityInfo3, isValidUuid, } from '../shared/encoding.js';
 export { ControlTrackPublisher } from './control-publisher.js';
 export type { ControlMessage } from '../types.js';
-export { AttributesSubscriber } from './attributes-subscriber.js';
-export type { ValuesHandler, RemovedHandler, AttributeValue } from './attributes-subscriber.js';
+export { CacheTopicSubscriber, AttributesSubscriber, EntitySubscriber, } from './cache-topic-subscriber.js';
+export type { ValuesHandler, RemovedHandler, TopicValue, AttributeValue, } from './cache-topic-subscriber.js';
 export { CacheMap } from '../shared/cache-map.js';
 export type { CacheEntry, MergeResult, CacheChangeHandler } from '../shared/cache-map.js';
 export { isCacheEnvelope, decodeCacheOp, encodeCacheOp } from '../shared/cache-wire.js';

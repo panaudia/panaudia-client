@@ -141,6 +141,8 @@ export class MoqTransportAdapter implements Transport {
       await client.mute(msg.message.node);
     } else if (msg.type === 'unmute') {
       await client.unmute(msg.message.node);
+    } else if (msg.type === 'command') {
+      await client.command(msg.message.command, msg.message.args);
     }
   }
 
@@ -158,6 +160,27 @@ export class MoqTransportAdapter implements Transport {
 
   onAttributeRemoved(handler: (keys: string[]) => void): void {
     this.registerHandler('attributesRemoved', handler);
+  }
+
+  onEntityValues(handler: (values: Array<{ key: string; value: string }>) => void): void {
+    this.registerHandler('entity', handler);
+  }
+
+  onEntityRemoved(handler: (keys: string[]) => void): void {
+    this.registerHandler('entityRemoved', handler);
+  }
+
+  onSpaceValues(handler: (values: Array<{ key: string; value: string }>) => void): void {
+    this.registerHandler('space', handler);
+  }
+
+  onSpaceRemoved(handler: (keys: string[]) => void): void {
+    this.registerHandler('spaceRemoved', handler);
+  }
+
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  onCacheDebug(handler: (info: any) => void): void {
+    this.registerHandler('cacheDebug', handler);
   }
 
   onConnectionStateChange(handler: (state: ConnectionState) => void): void {

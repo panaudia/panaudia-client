@@ -364,6 +364,39 @@ describe('WebRtcTransport', () => {
       expect(keys).toContain('test-uuid.connection');
     });
 
+    it('should drop a stale attribute envelope arriving after a newer one', async () => {
+      // Regression: TopicTree is opId-blind, so the transport must run
+      // a CacheMap gate to prevent a backfill envelope (lower opId)
+      // arriving after a live one (higher opId) from clobbering the
+      // newer value. See plan/distributed-state-sync/topic-ordering.md.
+      const { encodeCacheOp } = await import('../../src/shared/cache-wire.js');
+      const transport = new WebRtcTransport();
+      const handler = vi.fn();
+      transport.onAttributeValues(handler);
+
+      await connectAndHandshake(transport);
+      const dc = lastPc._createDataChannel('attributes');
+
+      const make = (opId: bigint, value: string) => encodeCacheOp({
+        topic: 'attributes',
+        key: 'a-uuid.name',
+        value: new TextEncoder().encode(JSON.stringify([{ key: 'a-uuid.name', value }])),
+        opId,
+        nodeId: 0,
+        tombstone: false,
+      });
+
+      // Live op at opId=20 lands first; its value should be the one
+      // the application sees end-of-test.
+      dc._receive(make(20n, 'live').buffer);
+      // Stale backfill at opId=10 arrives second — must be filtered.
+      dc._receive(make(10n, 'stale').buffer);
+
+      expect(handler).toHaveBeenCalledTimes(1);
+      const values = handler.mock.calls[0]![0] as Array<{ key: string; value: string }>;
+      expect(values).toEqual([{ key: 'a-uuid.name', value: '"live"' }]);
+    });
+
     it('should fire onAttributeRemoved for tombstone ops in an envelope', async () => {
       const { encodeCacheOp } = await import('../../src/shared/cache-wire.js');
       const transport = new WebRtcTransport();
@@ -391,6 +424,67 @@ describe('WebRtcTransport', () => {
       expect(removedHandler).toHaveBeenCalledTimes(1);
       const keys = removedHandler.mock.calls[0]![0] as string[];
       expect(keys).toEqual(['gone-uuid.name', 'gone-uuid.ticket']);
+    });
+  });
+
+  describe('onSpaceValues', () => {
+    it('decodes a cache envelope on the space data channel', async () => {
+      const { encodeCacheOp } = await import('../../src/shared/cache-wire.js');
+      const transport = new WebRtcTransport();
+      const handler = vi.fn();
+      transport.onSpaceValues(handler);
+
+      await connectAndHandshake(transport);
+
+      const dc = lastPc._createDataChannel('space');
+
+      const batch = JSON.stringify([
+        { key: 'roles-muted.performer', value: true },
+        { key: 'roles-gain.performer', value: 1.5 },
+      ]);
+      const envelope = encodeCacheOp({
+        topic: 'space',
+        key: 'roles-muted.performer',
+        value: new TextEncoder().encode(batch),
+        opId: 1n,
+        nodeId: 0,
+        tombstone: false,
+      });
+      dc._receive(envelope.buffer);
+
+      expect(handler).toHaveBeenCalledTimes(1);
+      const values = handler.mock.calls[0]![0] as Array<{ key: string; value: string }>;
+      const keys = values.map((v) => v.key);
+      expect(keys).toContain('roles-muted.performer');
+      expect(keys).toContain('roles-gain.performer');
+    });
+
+    it('drops a stale space envelope arriving after a newer one', async () => {
+      // Same opId-gate regression as the attributes test — the
+      // space data channel runs through its own TopicMerger.
+      const { encodeCacheOp } = await import('../../src/shared/cache-wire.js');
+      const transport = new WebRtcTransport();
+      const handler = vi.fn();
+      transport.onSpaceValues(handler);
+
+      await connectAndHandshake(transport);
+      const dc = lastPc._createDataChannel('space');
+
+      const make = (opId: bigint, value: string) => encodeCacheOp({
+        topic: 'space',
+        key: 'roles-gain.performer',
+        value: new TextEncoder().encode(JSON.stringify([{ key: 'roles-gain.performer', value }])),
+        opId,
+        nodeId: 0,
+        tombstone: false,
+      });
+
+      dc._receive(make(20n, '2.0').buffer);
+      dc._receive(make(10n, '1.0').buffer);
+
+      expect(handler).toHaveBeenCalledTimes(1);
+      const values = handler.mock.calls[0]![0] as Array<{ key: string; value: string }>;
+      expect(values).toEqual([{ key: 'roles-gain.performer', value: '"2.0"' }]);
     });
   });
 

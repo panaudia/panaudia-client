@@ -1,8 +1,8 @@
 var __defProp = Object.defineProperty;
 var __defNormalProp = (obj, key, value) => key in obj ? __defProp(obj, key, { enumerable: true, configurable: true, writable: true, value }) : obj[key] = value;
 var __publicField = (obj, key, value) => __defNormalProp(obj, typeof key !== "symbol" ? key + "" : key, value);
-import { C as ConnectionState, E as ENTITY_INFO3_SIZE, e as entityInfo3FromBytes, d as isCacheEnvelope, f as decodeCacheOp, p as parseJsonOps, c as createEntityInfo3, a as entityInfo3ToBytes } from "../json-ops.js";
-import { b, g, i, u } from "../json-ops.js";
+import { C as ConnectionState, E as ENTITY_INFO3_SIZE, e as entityInfo3FromBytes, T as TopicMerger, d as CacheMap, c as createEntityInfo3, a as entityInfo3ToBytes } from "../topic-merger.js";
+import { b, f, g, h, i, u } from "../topic-merger.js";
 function clamp(value, min, max) {
   return Math.max(min, Math.min(max, value));
 }
@@ -1177,6 +1177,8 @@ var PanaudiaTrackType = /* @__PURE__ */ ((PanaudiaTrackType2) => {
   PanaudiaTrackType2["STATE"] = "state";
   PanaudiaTrackType2["STATE_OUTPUT"] = "out/state";
   PanaudiaTrackType2["ATTRIBUTES_OUTPUT"] = "out/attributes";
+  PanaudiaTrackType2["ENTITY_OUTPUT"] = "out/entity";
+  PanaudiaTrackType2["SPACE_OUTPUT"] = "out/space";
   PanaudiaTrackType2["CONTROL_INPUT"] = "in/control";
   return PanaudiaTrackType2;
 })(PanaudiaTrackType || {});
@@ -1192,6 +1194,10 @@ function generateTrackNamespace(trackType, entityId) {
       return ["out", "state", entityId];
     case "out/attributes":
       return ["out", "attributes", entityId];
+    case "out/entity":
+      return ["out", "entity", entityId];
+    case "out/space":
+      return ["out", "space", entityId];
     case "in/control":
       return ["in", "control", entityId];
     default:
@@ -1594,6 +1600,7 @@ function parseObjectDatagram(data, offset = 0) {
   };
 }
 const MOQ_TRANSPORT_VERSION = 4278190080 + 11;
+const PENDING_DATAGRAM_MAX_BYTES = 1 * 1024 * 1024;
 class MoqConnection {
   constructor(serverUrl) {
     __publicField(this, "transport", null);
@@ -1603,6 +1610,20 @@ class MoqConnection {
     // Datagram dispatcher
     __publicField(this, "datagramHandlers", /* @__PURE__ */ new Map());
     __publicField(this, "datagramDispatcherRunning", false);
+    // Pre-handler datagram buffer. The server's MOQ AddPublisher writes
+    // SUBSCRIBE_OK on the bidi control stream and then immediately
+    // SendDatagram's any backfilled / pre-buffered objects via the
+    // unreliable QUIC datagram channel. Datagrams can race ahead of the
+    // SUBSCRIBE_OK on the wire (the streams have independent flow), so a
+    // datagram for a freshly-assigned trackAlias can arrive at the
+    // dispatcher *before* the await session.subscribe() resolves and
+    // registerDatagramHandler is called. We buffer those here in arrival
+    // order and drain them when the handler is registered.
+    //
+    // FIFO across all aliases; oldest dropped when the byte cap is
+    // exceeded. Cleared on close().
+    __publicField(this, "pendingDatagrams", []);
+    __publicField(this, "pendingDatagramBytes", 0);
     this.serverUrl = serverUrl;
   }
   /**
@@ -1658,6 +1679,8 @@ class MoqConnection {
   close(closeInfo) {
     this.datagramDispatcherRunning = false;
     this.datagramHandlers.clear();
+    this.pendingDatagrams = [];
+    this.pendingDatagramBytes = 0;
     if (this.datagramWriter) {
       this.datagramWriter.releaseLock();
       this.datagramWriter = null;
@@ -1736,19 +1759,87 @@ class MoqConnection {
   }
   /**
    * Register a datagram handler for a specific track alias.
-   * Starts the dispatcher on first registration.
+   * Starts the dispatcher on first registration. Drains any datagrams
+   * that arrived for this alias before the handler was registered (the
+   * SUBSCRIBE_OK / first-datagram race — see `pendingDatagrams`).
    */
   registerDatagramHandler(trackAlias, handler) {
     this.datagramHandlers.set(trackAlias, handler);
     if (!this.datagramDispatcherRunning) {
       this.startDatagramDispatcher();
     }
+    if (this.pendingDatagrams.length > 0) {
+      this.drainPendingForAlias(trackAlias, handler);
+    }
   }
   /**
-   * Unregister a datagram handler for a track alias
+   * Unregister a datagram handler for a track alias. Discards any
+   * still-buffered pre-handler datagrams for that alias.
    */
   unregisterDatagramHandler(trackAlias) {
     this.datagramHandlers.delete(trackAlias);
+    if (this.pendingDatagrams.length > 0) {
+      this.discardPendingForAlias(trackAlias);
+    }
+  }
+  /**
+   * Number of buffered pre-handler datagrams currently held. Exposed
+   * for tests and diagnostics; production callers shouldn't need it.
+   */
+  getPendingDatagramCount() {
+    return this.pendingDatagrams.length;
+  }
+  /**
+   * Drain any datagrams that arrived for `trackAlias` before its
+   * handler was registered, in arrival order. Called from
+   * registerDatagramHandler.
+   */
+  drainPendingForAlias(trackAlias, handler) {
+    const remaining = [];
+    let drainedBytes = 0;
+    for (const d of this.pendingDatagrams) {
+      if (d.trackAlias === trackAlias) {
+        try {
+          handler(d.payload, d.trackAlias, d.groupId, d.objectId);
+        } catch {
+        }
+        drainedBytes += d.payload.length;
+      } else {
+        remaining.push(d);
+      }
+    }
+    this.pendingDatagrams = remaining;
+    this.pendingDatagramBytes -= drainedBytes;
+  }
+  /**
+   * Drop any buffered datagrams for `trackAlias` (called on
+   * unregister so we don't keep stale bytes around).
+   */
+  discardPendingForAlias(trackAlias) {
+    const remaining = [];
+    let discardedBytes = 0;
+    for (const d of this.pendingDatagrams) {
+      if (d.trackAlias === trackAlias) {
+        discardedBytes += d.payload.length;
+      } else {
+        remaining.push(d);
+      }
+    }
+    this.pendingDatagrams = remaining;
+    this.pendingDatagramBytes -= discardedBytes;
+  }
+  /**
+   * Buffer a datagram whose trackAlias has no registered handler yet.
+   * FIFO across all aliases; oldest entries are dropped when the byte
+   * cap is exceeded. Called from the dispatcher loop.
+   */
+  bufferUnknownDatagram(d) {
+    this.pendingDatagrams.push(d);
+    this.pendingDatagramBytes += d.payload.length;
+    while (this.pendingDatagramBytes > PENDING_DATAGRAM_MAX_BYTES && this.pendingDatagrams.length > 0) {
+      const dropped = this.pendingDatagrams.shift();
+      this.pendingDatagramBytes -= dropped.payload.length;
+    }
   }
   /**
    * Start the single datagram reader loop that dispatches to handlers by track alias
@@ -1767,10 +1858,7 @@ class MoqConnection {
           if (!value) continue;
           try {
             const parsed = parseObjectDatagram(value);
-            const handler = this.datagramHandlers.get(parsed.trackAlias);
-            if (handler) {
-              handler(parsed.payload, parsed.trackAlias, parsed.groupId, parsed.objectId);
-            }
+            this.dispatchOrBuffer(parsed);
           } catch {
           }
         }
@@ -1783,6 +1871,19 @@ class MoqConnection {
       }
     };
     loop();
+  }
+  /**
+   * Route a parsed datagram to its handler, or buffer it if the
+   * handler hasn't been registered yet. Extracted from the dispatcher
+   * loop so unit tests can drive it without a real WebTransport.
+   */
+  dispatchOrBuffer(parsed) {
+    const handler = this.datagramHandlers.get(parsed.trackAlias);
+    if (handler) {
+      handler(parsed.payload, parsed.trackAlias, parsed.groupId, parsed.objectId);
+    } else {
+      this.bufferUnknownDatagram(parsed);
+    }
   }
   /**
    * Update connection state and notify handlers
@@ -2586,94 +2687,26 @@ class ControlTrackPublisher extends TrackPublisher {
     await this.publish(data);
   }
 }
-class CacheMap {
-  constructor() {
-    __publicField(this, "entries", /* @__PURE__ */ new Map());
-    __publicField(this, "highestOpId", 0n);
-    __publicField(this, "changeHandler", null);
-  }
-  /**
-   * Register a handler called on every state change (add, update, remove).
-   */
-  onChange(handler) {
-    this.changeHandler = handler;
-  }
-  /**
-   * Merge an incoming cache operation.
-   *
-   * Returns 'accepted' if the value was stored, 'tombstoned' if a key
-   * was removed, or 'rejected' if the incoming opId was not higher.
-   */
-  merge(op) {
-    var _a, _b;
-    if (op.opId > this.highestOpId) {
-      this.highestOpId = op.opId;
-    }
-    const existing = this.entries.get(op.key);
-    if (existing && op.opId <= existing.opId) {
-      return "rejected";
-    }
-    if (op.tombstone) {
-      if (existing) {
-        this.entries.delete(op.key);
-        (_a = this.changeHandler) == null ? void 0 : _a.call(this, op.key, null, "tombstoned");
-      }
-      return "tombstoned";
-    }
-    const entry = {
-      value: op.value,
-      opId: op.opId,
-      nodeId: op.nodeId
-    };
-    this.entries.set(op.key, entry);
-    (_b = this.changeHandler) == null ? void 0 : _b.call(this, op.key, entry, "accepted");
-    return "accepted";
-  }
-  /**
-   * Get a single entry by key.
-   */
-  get(key) {
-    return this.entries.get(key);
-  }
-  /**
-   * Get all entries as a read-only map.
-   */
-  getAll() {
-    return this.entries;
-  }
-  /**
-   * Get the highest opId seen across all merge calls.
-   * Used as the resume point on reconnection.
-   */
-  getHighestOpId() {
-    return this.highestOpId;
-  }
-  /**
-   * Number of entries in the map.
-   */
-  get size() {
-    return this.entries.size;
-  }
-  /**
-   * Clear all entries and reset the highest opId.
-   */
-  clear() {
-    this.entries.clear();
-    this.highestOpId = 0n;
-  }
-}
-class AttributesSubscriber {
+class CacheTopicSubscriber {
   constructor(cache) {
     __publicField(this, "connection", null);
     __publicField(this, "trackAlias", 0);
     __publicField(this, "isListening", false);
     __publicField(this, "valuesHandler", null);
     __publicField(this, "removedHandler", null);
-    __publicField(this, "cache");
-    // Statistics
-    __publicField(this, "updatesReceived", 0);
-    __publicField(this, "errorsDropped", 0);
-    this.cache = cache ?? new CacheMap();
+    __publicField(this, "merger");
+    this.merger = new TopicMerger(cache);
+  }
+  /** Underlying CacheMap. Exposed so callers (PanaudiaMoqClient) can pass
+   *  a shared instance to preserve resume state across subscriber lifetimes. */
+  get cache() {
+    return this.merger.cache;
+  }
+  /** Install a per-envelope diagnostic callback that fires after every
+   *  applyEnvelope. Used by the test page to distinguish "envelope
+   *  arrived but every op was stale" from "no envelope arrived". */
+  setDebugHandler(handler) {
+    this.merger.setDebugHandler(handler);
   }
   /**
    * Set handler called once per envelope with all accepted values.
@@ -2692,14 +2725,14 @@ class AttributesSubscriber {
     this.removedHandler = handler;
   }
   /**
-   * Attach to a connection and track alias
+   * Attach to a connection and track alias.
    */
   attach(connection, trackAlias) {
     this.connection = connection;
     this.trackAlias = trackAlias;
   }
   /**
-   * Start receiving attribute updates via the datagram dispatcher
+   * Start receiving updates via the datagram dispatcher.
    */
   start() {
     if (!this.connection || this.isListening) return;
@@ -2707,60 +2740,18 @@ class AttributesSubscriber {
     this.connection.registerDatagramHandler(this.trackAlias, (payload) => {
       var _a, _b;
       if (!this.isListening) return;
-      try {
-        if (!isCacheEnvelope(payload)) {
-          this.errorsDropped++;
-          return;
-        }
-        const envelope = decodeCacheOp(payload);
-        if (!envelope) {
-          this.errorsDropped++;
-          return;
-        }
-        const jsonOps = parseJsonOps(envelope.value);
-        if (!jsonOps) {
-          this.errorsDropped++;
-          return;
-        }
-        const acceptedValues = [];
-        const tombstonedKeys = [];
-        for (const jsonOp of jsonOps) {
-          if (!jsonOp.key) continue;
-          const isTombstone = jsonOp.tombstone === true;
-          const valueStr = isTombstone ? "" : JSON.stringify(jsonOp.value);
-          const valueBytes = new TextEncoder().encode(valueStr);
-          const cacheOp = {
-            topic: envelope.topic,
-            key: jsonOp.key,
-            value: valueBytes,
-            opId: envelope.opId,
-            nodeId: envelope.nodeId,
-            tombstone: isTombstone
-          };
-          const result = this.cache.merge(cacheOp);
-          if (result === "rejected") {
-            continue;
-          }
-          this.updatesReceived++;
-          if (result === "tombstoned") {
-            tombstonedKeys.push(jsonOp.key);
-          } else {
-            acceptedValues.push({ key: jsonOp.key, value: valueStr });
-          }
-        }
-        if (acceptedValues.length > 0) {
-          (_a = this.valuesHandler) == null ? void 0 : _a.call(this, acceptedValues);
-        }
-        if (tombstonedKeys.length > 0) {
-          (_b = this.removedHandler) == null ? void 0 : _b.call(this, tombstonedKeys);
-        }
-      } catch {
-        this.errorsDropped++;
+      const result = this.merger.applyEnvelope(payload);
+      if (!result) return;
+      if (result.accepted.length > 0) {
+        (_a = this.valuesHandler) == null ? void 0 : _a.call(this, result.accepted);
+      }
+      if (result.tombstoned.length > 0) {
+        (_b = this.removedHandler) == null ? void 0 : _b.call(this, result.tombstoned);
       }
     });
   }
   /**
-   * Stop receiving attribute updates
+   * Stop receiving updates.
    */
   stop() {
     this.isListening = false;
@@ -2772,30 +2763,32 @@ class AttributesSubscriber {
    * Get a single cache entry by key.
    */
   get(key) {
-    return this.cache.get(key);
+    return this.merger.get(key);
   }
   /**
    * Get all cache entries as a read-only map.
    */
   getAll() {
-    return this.cache.getAll();
+    return this.merger.getAll();
   }
   /**
    * Get the highest opId seen, for use as resume point on reconnection.
    */
   getResumeOpId() {
-    return this.cache.getHighestOpId();
+    return this.merger.getResumeOpId();
   }
   /**
-   * Get statistics
+   * Get statistics.
    */
   getStats() {
-    return {
-      updatesReceived: this.updatesReceived,
-      errorsDropped: this.errorsDropped,
-      entryCount: this.cache.size
-    };
+    return this.merger.getStats();
   }
+}
+class AttributesSubscriber extends CacheTopicSubscriber {
+}
+class EntitySubscriber extends CacheTopicSubscriber {
+}
+class SpaceSubscriber extends CacheTopicSubscriber {
 }
 class EventEmitter {
   constructor() {
@@ -3272,6 +3265,18 @@ class PanaudiaMoqClient {
     __publicField(this, "attributesSubscriber", null);
     __publicField(this, "attributesOutputTrackAlias", 0);
     __publicField(this, "attributesCache", new CacheMap());
+    // Entity tracking (per-client filtered: only this client's own uuid keys)
+    __publicField(this, "entitySubscriber", null);
+    __publicField(this, "entityOutputTrackAlias", 0);
+    __publicField(this, "entityCache", new CacheMap());
+    // Space tracking (gated server-side by commands.ReadCapSpaceRead).
+    // The server only announces the space output track to holders with
+    // the cap; if the announce never arrives we leave the subscriber
+    // null and never subscribe. Cache is persistent across subscriber
+    // lifetimes to support resume HLC on reconnect.
+    __publicField(this, "spaceSubscriber", null);
+    __publicField(this, "spaceOutputTrackAlias", 0);
+    __publicField(this, "spaceCache", new CacheMap());
     // Track aliases (assigned after announcement/subscription)
     __publicField(this, "audioInputTrackAlias", 1);
     __publicField(this, "stateTrackAlias", 2);
@@ -3285,13 +3290,15 @@ class PanaudiaMoqClient {
     if (!config.serverUrl) {
       throw new Error("serverUrl is required");
     }
-    if (!config.ticket) {
-      throw new Error("ticket is required");
+    if (!config.ticket && !config.entityId) {
+      throw new Error("either ticket or entityId is required");
     }
     const entityId = config.entityId ?? this.extractEntityIdFromJwt(config.ticket);
     this.config = {
       serverUrl: config.serverUrl,
-      ticket: config.ticket,
+      // Empty string means "tokenless" — SUBSCRIBE/ANNOUNCE path treats an
+      // empty auth token as absent and skips the Authorization KVP.
+      ticket: config.ticket ?? "",
       entityId,
       initialPosition: config.initialPosition ?? { x: 0.5, y: 0.5, z: 0.5 },
       initialRotation: config.initialRotation ?? { yaw: 0, pitch: 0, roll: 0 },
@@ -3447,7 +3454,68 @@ class PanaudiaMoqClient {
       this.attributesSubscriber.onRemoved((keys) => {
         this.events.emit("attributesRemoved", keys);
       });
+      this.attributesSubscriber.setDebugHandler((info) => {
+        this.events.emit("cacheDebug", info);
+      });
       this.attributesSubscriber.start();
+      const entityOutputNamespace = generateTrackNamespace(PanaudiaTrackType.ENTITY_OUTPUT, this.config.entityId);
+      const entityResumeOpId = this.entityCache.getHighestOpId();
+      this.log(
+        "Subscribing to entity output:",
+        entityOutputNamespace.join("/"),
+        entityResumeOpId > 0n ? `resumeOpId: ${entityResumeOpId}` : ""
+      );
+      const entitySubscribeId = await this.session.subscribe(
+        entityOutputNamespace,
+        "",
+        void 0,
+        entityResumeOpId > 0n ? entityResumeOpId : void 0
+      );
+      this.entityOutputTrackAlias = this.session.getTrackAlias(entitySubscribeId) ?? 0;
+      this.log("Entity output subscribed, trackAlias:", this.entityOutputTrackAlias);
+      this.entitySubscriber = new EntitySubscriber(this.entityCache);
+      this.entitySubscriber.attach(this.connection, this.entityOutputTrackAlias);
+      this.entitySubscriber.onValues((values) => {
+        this.events.emit("entity", values);
+      });
+      this.entitySubscriber.onRemoved((keys) => {
+        this.events.emit("entityRemoved", keys);
+      });
+      this.entitySubscriber.setDebugHandler((info) => {
+        this.events.emit("cacheDebug", info);
+      });
+      this.entitySubscriber.start();
+      try {
+        const spaceOutputNamespace = generateTrackNamespace(PanaudiaTrackType.SPACE_OUTPUT, this.config.entityId);
+        const spaceResumeOpId = this.spaceCache.getHighestOpId();
+        this.log(
+          "Subscribing to space output:",
+          spaceOutputNamespace.join("/"),
+          spaceResumeOpId > 0n ? `resumeOpId: ${spaceResumeOpId}` : ""
+        );
+        const spaceSubscribeId = await this.session.subscribe(
+          spaceOutputNamespace,
+          "",
+          void 0,
+          spaceResumeOpId > 0n ? spaceResumeOpId : void 0
+        );
+        this.spaceOutputTrackAlias = this.session.getTrackAlias(spaceSubscribeId) ?? 0;
+        this.log("Space output subscribed, trackAlias:", this.spaceOutputTrackAlias);
+        this.spaceSubscriber = new SpaceSubscriber(this.spaceCache);
+        this.spaceSubscriber.attach(this.connection, this.spaceOutputTrackAlias);
+        this.spaceSubscriber.onValues((values) => {
+          this.events.emit("space", values);
+        });
+        this.spaceSubscriber.onRemoved((keys) => {
+          this.events.emit("spaceRemoved", keys);
+        });
+        this.spaceSubscriber.setDebugHandler((info) => {
+          this.events.emit("cacheDebug", info);
+        });
+        this.spaceSubscriber.start();
+      } catch (err) {
+        this.log("Space output subscribe failed (likely no space.read cap):", err);
+      }
       this.setState(ConnectionState.AUTHENTICATED);
       this.events.emit("authenticated");
       const audioInputNamespace = generateTrackNamespace(PanaudiaTrackType.AUDIO_INPUT, this.config.entityId);
@@ -3496,6 +3564,14 @@ class PanaudiaMoqClient {
     if (this.attributesSubscriber) {
       this.attributesSubscriber.stop();
       this.attributesSubscriber = null;
+    }
+    if (this.entitySubscriber) {
+      this.entitySubscriber.stop();
+      this.entitySubscriber = null;
+    }
+    if (this.spaceSubscriber) {
+      this.spaceSubscriber.stop();
+      this.spaceSubscriber = null;
     }
     if (this.session) {
       await this.session.close();
@@ -3607,6 +3683,24 @@ class PanaudiaMoqClient {
     }));
   }
   /**
+   * Register a handler for batches of entity values. Mirrors
+   * `onAttributeValues` but for the per-client entity stream — only ops
+   * whose key starts with this client's own uuid arrive here.
+   */
+  onEntityValues(handler) {
+    this.events.on("entity", ((values) => {
+      handler(values);
+    }));
+  }
+  /**
+   * Register a handler for batches of entity key removals (tombstones).
+   */
+  onEntityRemoved(handler) {
+    this.events.on("entityRemoved", ((keys) => {
+      handler(keys);
+    }));
+  }
+  /**
    * Mute a remote entity (they will be silent in your mix)
    */
   async mute(entityId) {
@@ -3630,6 +3724,25 @@ class PanaudiaMoqClient {
     await this.controlTrackPublisher.publishControlMessage({
       type: "unmute",
       message: { node: entityId }
+    });
+  }
+  /**
+   * Invoke a named command from the server's command catalog.
+   *
+   * Strict-MVC: this fires-and-forgets. The command's effect (if any)
+   * arrives later as an echoed entity / attribute op via the existing
+   * subscriber path. There is no per-call error response — failed
+   * authorisation, unknown command names and bad args all silently
+   * drop on the server.
+   */
+  async command(name, args = {}) {
+    if (!this.controlTrackPublisher) {
+      this.logWarn("Control publisher not ready, cannot send command");
+      return;
+    }
+    await this.controlTrackPublisher.publishControlMessage({
+      type: "command",
+      message: { command: name, args }
     });
   }
   /**
@@ -4031,6 +4144,8 @@ class MoqTransportAdapter {
       await client.mute(msg.message.node);
     } else if (msg.type === "unmute") {
       await client.unmute(msg.message.node);
+    } else if (msg.type === "command") {
+      await client.command(msg.message.command, msg.message.args);
     }
   }
   onEntityState(handler) {
@@ -4041,6 +4156,22 @@ class MoqTransportAdapter {
   }
   onAttributeRemoved(handler) {
     this.registerHandler("attributesRemoved", handler);
+  }
+  onEntityValues(handler) {
+    this.registerHandler("entity", handler);
+  }
+  onEntityRemoved(handler) {
+    this.registerHandler("entityRemoved", handler);
+  }
+  onSpaceValues(handler) {
+    this.registerHandler("space", handler);
+  }
+  onSpaceRemoved(handler) {
+    this.registerHandler("spaceRemoved", handler);
+  }
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  onCacheDebug(handler) {
+    this.registerHandler("cacheDebug", handler);
   }
   onConnectionStateChange(handler) {
     this.registerHandler("statechange", (event) => {
@@ -4085,10 +4216,12 @@ export {
   AuthenticationError,
   BluetoothMicDefaultError,
   CacheMap,
+  CacheTopicSubscriber,
   ConnectionError,
   ConnectionState,
   ControlTrackPublisher,
   ENTITY_INFO3_SIZE,
+  EntitySubscriber,
   InvalidStateError,
   JwtParseError,
   MOQ_TRANSPORT_VERSION,
@@ -4123,7 +4256,7 @@ export {
   b as bytesToUuid,
   createEntityInfo3,
   decodeBytes,
-  decodeCacheOp,
+  f as decodeCacheOp,
   decodeString,
   decodeVarint,
   encodeBytes,
@@ -4141,7 +4274,7 @@ export {
   getWebTransportSupport,
   isAudioDecoderSupported,
   isAudioPlaybackSupported,
-  isCacheEnvelope,
+  h as isCacheEnvelope,
   isOpusSupported,
   i as isValidUuid,
   isWebTransportSupported,

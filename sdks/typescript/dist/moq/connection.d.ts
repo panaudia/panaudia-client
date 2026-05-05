@@ -21,6 +21,8 @@ export declare class MoqConnection {
     private datagramWriter;
     private datagramHandlers;
     private datagramDispatcherRunning;
+    private pendingDatagrams;
+    private pendingDatagramBytes;
     constructor(serverUrl: string);
     /**
      * Get current connection state
@@ -68,17 +70,48 @@ export declare class MoqConnection {
     sendDatagram(data: Uint8Array): Promise<void>;
     /**
      * Register a datagram handler for a specific track alias.
-     * Starts the dispatcher on first registration.
+     * Starts the dispatcher on first registration. Drains any datagrams
+     * that arrived for this alias before the handler was registered (the
+     * SUBSCRIBE_OK / first-datagram race — see `pendingDatagrams`).
      */
     registerDatagramHandler(trackAlias: number, handler: DatagramHandler): void;
     /**
-     * Unregister a datagram handler for a track alias
+     * Unregister a datagram handler for a track alias. Discards any
+     * still-buffered pre-handler datagrams for that alias.
      */
     unregisterDatagramHandler(trackAlias: number): void;
+    /**
+     * Number of buffered pre-handler datagrams currently held. Exposed
+     * for tests and diagnostics; production callers shouldn't need it.
+     */
+    getPendingDatagramCount(): number;
+    /**
+     * Drain any datagrams that arrived for `trackAlias` before its
+     * handler was registered, in arrival order. Called from
+     * registerDatagramHandler.
+     */
+    private drainPendingForAlias;
+    /**
+     * Drop any buffered datagrams for `trackAlias` (called on
+     * unregister so we don't keep stale bytes around).
+     */
+    private discardPendingForAlias;
+    /**
+     * Buffer a datagram whose trackAlias has no registered handler yet.
+     * FIFO across all aliases; oldest entries are dropped when the byte
+     * cap is exceeded. Called from the dispatcher loop.
+     */
+    private bufferUnknownDatagram;
     /**
      * Start the single datagram reader loop that dispatches to handlers by track alias
      */
     private startDatagramDispatcher;
+    /**
+     * Route a parsed datagram to its handler, or buffer it if the
+     * handler hasn't been registered yet. Extracted from the dispatcher
+     * loop so unit tests can drive it without a real WebTransport.
+     */
+    private dispatchOrBuffer;
     /**
      * Update connection state and notify handlers
      */
