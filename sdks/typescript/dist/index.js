@@ -474,6 +474,45 @@ class SingleRecordTree {
     return removed;
   }
 }
+function createCommandsAPI(client) {
+  return {
+    space: {
+      entity: {
+        mute: (entityId) => client.command("space.entity.mute", { entity_id: entityId }),
+        unmute: (entityId) => client.command("space.entity.unmute", { entity_id: entityId }),
+        kick: (entityId, mins) => client.command("space.entity.kick", { entity_id: entityId, mins }),
+        unkick: (entityId) => client.command("space.entity.unkick", { entity_id: entityId }),
+        setGain: (entityId, gain) => client.command("space.entity.set_gain", { entity_id: entityId, gain }),
+        setAttenuation: (entityId, attenuation) => client.command("space.entity.set_attenuation", {
+          entity_id: entityId,
+          attenuation
+        })
+      },
+      role: {
+        mute: (role) => client.command("space.role.mute", { role }),
+        unmute: (role) => client.command("space.role.unmute", { role }),
+        kick: (role, mins) => client.command("space.role.kick", { role, mins }),
+        unkick: (role) => client.command("space.role.unkick", { role }),
+        setGain: (role, gain) => client.command("space.role.set_gain", { role, gain }),
+        unsetGain: (role) => client.command("space.role.unset_gain", { role }),
+        setAttenuation: (role, attenuation) => client.command("space.role.set_attenuation", { role, attenuation }),
+        unsetAttenuation: (role) => client.command("space.role.unset_attenuation", { role })
+      }
+    },
+    personal: {
+      entity: {
+        mute: (entityId) => client.command("personal.entity.mute", { entity_id: entityId }),
+        unmute: (entityId) => client.command("personal.entity.unmute", { entity_id: entityId }),
+        solo: (entityId) => client.command("personal.entity.solo", { entity_id: entityId }),
+        unsolo: (entityId) => client.command("personal.entity.unsolo", { entity_id: entityId })
+      },
+      role: {
+        mute: (role) => client.command("personal.role.mute", { role }),
+        unmute: (role) => client.command("personal.role.unmute", { role })
+      }
+    }
+  };
+}
 class PanaudiaClient {
   constructor(config) {
     __publicField(this, "transport");
@@ -501,6 +540,7 @@ class PanaudiaClient {
     // empty for connections without the `space.read` cap (no envelopes
     // arrive). See plan/commands/space-read-path-plan.md.
     __publicField(this, "spaceTree", new SingleRecordTree());
+    __publicField(this, "_commands");
     this.config = config;
     this.position = config.initialPosition ?? { x: 0.5, y: 0.5, z: 0.5 };
     this.rotation = config.initialRotation ?? { yaw: 0, pitch: 0, roll: 0 };
@@ -736,12 +776,6 @@ class PanaudiaClient {
     this.scheduleStatePublish();
   }
   // ── Remote entity control ───────────────────────────────────────────
-  async mute(entityId) {
-    await this.transport.publishControl({ type: "mute", message: { node: entityId } });
-  }
-  async unmute(entityId) {
-    await this.transport.publishControl({ type: "unmute", message: { node: entityId } });
-  }
   /**
    * Invoke a named command from the server's command catalog
    * (see `plan/commands/command_types.md`). Args are command-specific —
@@ -760,6 +794,19 @@ class PanaudiaClient {
       type: "command",
       message: { command: name, args }
     });
+  }
+  /**
+   * Typed catalog wrappers — `client.commands.space.entity.mute(id)`,
+   * `client.commands.personal.role.unmute(role)`, etc. Each wrapper is a
+   * thin delegator around `command()` with TypeScript-checked argument
+   * names. Use these for autocomplete and arg checking; fall back to
+   * `command()` directly for any new server command not yet wrapped.
+   */
+  get commands() {
+    if (!this._commands) {
+      this._commands = createCommandsAPI(this);
+    }
+    return this._commands;
   }
   // ── Events ───────────────────────────────────────────────────────────
   on(event, handler) {

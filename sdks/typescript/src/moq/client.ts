@@ -1214,34 +1214,6 @@ export class PanaudiaMoqClient {
   }
 
   /**
-   * Mute a remote entity (they will be silent in your mix)
-   */
-  async mute(entityId: string): Promise<void> {
-    if (!this.controlTrackPublisher) {
-      this.logWarn('Control publisher not ready, cannot mute');
-      return;
-    }
-    await this.controlTrackPublisher.publishControlMessage({
-      type: 'mute',
-      message: { node: entityId },
-    });
-  }
-
-  /**
-   * Unmute a remote entity
-   */
-  async unmute(entityId: string): Promise<void> {
-    if (!this.controlTrackPublisher) {
-      this.logWarn('Control publisher not ready, cannot unmute');
-      return;
-    }
-    await this.controlTrackPublisher.publishControlMessage({
-      type: 'unmute',
-      message: { node: entityId },
-    });
-  }
-
-  /**
    * Invoke a named command from the server's command catalog.
    *
    * Strict-MVC: this fires-and-forgets. The command's effect (if any)

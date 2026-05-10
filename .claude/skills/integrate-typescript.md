@@ -61,7 +61,17 @@ Before answering, read these files for the current API surface:
 
 7. **Audio controls**: `muteMic()`, `unmuteMic()`, `isMuted()`, `setVolume(v)`, `getVolume()`
 
-8. **Remote control**: `mute(entityId)`, `unmute(entityId)` to mute/unmute other entities
+8. **Commands** — typed wrappers around the server's command catalog, exposed on `client.commands`. Effects fire-and-forget; results arrive later as echoed entity / space ops via the existing subscriber path (strict-MVC). Authorisation depends on the holder's roles (see `roles-schema.json` in the spatial-mixer repo).
+
+   - **Personal** (apply only to caller's own listening):
+     - `client.commands.personal.entity.mute(entityId)` / `unmute(entityId)`
+     - `client.commands.personal.entity.solo(entityId)` / `unsolo(entityId)` — solo wins over every mute kind
+     - `client.commands.personal.role.mute(role)` / `unmute(role)`
+   - **Space-wide** (require an admin/moderator role; silently dropped otherwise):
+     - `client.commands.space.entity.mute(id)` / `unmute(id)` / `kick(id, mins)` / `unkick(id)` / `setGain(id, gain)` / `setAttenuation(id, attenuation)`
+     - `client.commands.space.role.mute(role)` / `unmute(role)` / `kick(role, mins)` / `unkick(role)` / `setGain(role, gain)` / `unsetGain(role)` / `setAttenuation(role, atten)` / `unsetAttenuation(role)`
+   - For commands not yet wrapped, fall back to `client.command(name, args)`.
+   - `mins = 0` on any kick means "forever" (no expiry).
 
 9. **Cleanup**: Always call `disconnect()` when done (component unmount, page unload, etc.)
 

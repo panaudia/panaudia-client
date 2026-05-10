@@ -192,22 +192,29 @@ describe('PanaudiaClient', () => {
     });
   });
 
-  describe('control', () => {
-    it('should send mute control message', async () => {
+  describe('commands', () => {
+    it('exposes the typed catalog as client.commands', () => {
       const client = new PanaudiaClient(defaultConfig);
-      await client.mute('some-node-id');
-      expect(mockTransport.publishControl).toHaveBeenCalledWith({
-        type: 'mute',
-        message: { node: 'some-node-id' },
-      });
+      expect(client.commands.space.entity.mute).toBeTypeOf('function');
+      expect(client.commands.space.role.unsetAttenuation).toBeTypeOf('function');
+      expect(client.commands.personal.entity.solo).toBeTypeOf('function');
+      expect(client.commands.personal.role.unmute).toBeTypeOf('function');
     });
 
-    it('should send unmute control message', async () => {
+    it('returns the same instance on repeat access (memoised)', () => {
       const client = new PanaudiaClient(defaultConfig);
-      await client.unmute('some-node-id');
+      expect(client.commands).toBe(client.commands);
+    });
+
+    it('routes through publishControl with the catalog name and args', async () => {
+      const client = new PanaudiaClient(defaultConfig);
+      await client.commands.space.entity.kick('uuid-A', 5);
       expect(mockTransport.publishControl).toHaveBeenCalledWith({
-        type: 'unmute',
-        message: { node: 'some-node-id' },
+        type: 'command',
+        message: {
+          command: 'space.entity.kick',
+          args: { entity_id: 'uuid-A', mins: 5 },
+        },
       });
     });
   });

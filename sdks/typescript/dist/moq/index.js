@@ -3701,32 +3701,6 @@ class PanaudiaMoqClient {
     }));
   }
   /**
-   * Mute a remote entity (they will be silent in your mix)
-   */
-  async mute(entityId) {
-    if (!this.controlTrackPublisher) {
-      this.logWarn("Control publisher not ready, cannot mute");
-      return;
-    }
-    await this.controlTrackPublisher.publishControlMessage({
-      type: "mute",
-      message: { node: entityId }
-    });
-  }
-  /**
-   * Unmute a remote entity
-   */
-  async unmute(entityId) {
-    if (!this.controlTrackPublisher) {
-      this.logWarn("Control publisher not ready, cannot unmute");
-      return;
-    }
-    await this.controlTrackPublisher.publishControlMessage({
-      type: "unmute",
-      message: { node: entityId }
-    });
-  }
-  /**
    * Invoke a named command from the server's command catalog.
    *
    * Strict-MVC: this fires-and-forgets. The command's effect (if any)
@@ -4140,11 +4114,7 @@ class MoqTransportAdapter {
   }
   async publishControl(msg) {
     const client = this.requireClient();
-    if (msg.type === "mute") {
-      await client.mute(msg.message.node);
-    } else if (msg.type === "unmute") {
-      await client.unmute(msg.message.node);
-    } else if (msg.type === "command") {
+    if (msg.type === "command") {
       await client.command(msg.message.command, msg.message.args);
     }
   }

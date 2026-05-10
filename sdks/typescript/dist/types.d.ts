@@ -103,22 +103,13 @@ export interface EntityAttributes {
     subspaces?: string[];
 }
 /**
- * Control-channel message envelope. The server-side dispatcher branches
- * on `type`:
- *
- *   - "mute" / "unmute": legacy direct-mute messages (kept for the
- *     swap-over period; no server-side effect today).
- *   - "command": invoke a named command from the catalog. The op the
- *     command produces flows back through the entity / space cache,
- *     i.e. the client only sees its effect via the echoed entity
- *     stream (strict-MVC).
+ * Control-channel message envelope. The only message type today is
+ * "command", which invokes a named command from the catalog. The op the
+ * command produces flows back through the entity / space cache, i.e.
+ * the client only sees its effect via the echoed entity stream
+ * (strict-MVC).
  */
 export type ControlMessage = {
-    type: 'mute' | 'unmute';
-    message: {
-        node: string;
-    };
-} | {
     type: 'command';
     message: {
         command: string;

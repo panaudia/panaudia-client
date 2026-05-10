@@ -105,6 +105,17 @@ export type { Transport, TransportConfig, AudioCaptureConfig, AudioPlaybackConfi
 export { PanaudiaClient } from './panaudia-client.js';
 export type { PanaudiaClientConfig, TransportType, MicrophoneInfo } from './panaudia-client.js';
 
+// Typed catalog wrappers — exposed via `client.commands.*`. Types are
+// re-exported here for callers that want to take a CommandsAPI subtree
+// as a parameter (e.g. UI components scoped to a single namespace).
+export type {
+  CommandsAPI,
+  SpaceEntityCommands,
+  SpaceRoleCommands,
+  PersonalEntityCommands,
+  PersonalRoleCommands,
+} from './commands.js';
+
 // Structured per-uuid topic view (used internally by PanaudiaClient,
 // exported for direct use by clients that bypass the unified API).
 export { TopicTree } from './shared/topic-tree.js';

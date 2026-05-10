@@ -34,6 +34,7 @@ export type { ResolveServerOptions } from './gateway.js';
 export type { Transport, TransportConfig, AudioCaptureConfig, AudioPlaybackConfig } from './transport.js';
 export { PanaudiaClient } from './panaudia-client.js';
 export type { PanaudiaClientConfig, TransportType, MicrophoneInfo } from './panaudia-client.js';
+export type { CommandsAPI, SpaceEntityCommands, SpaceRoleCommands, PersonalEntityCommands, PersonalRoleCommands, } from './commands.js';
 export { TopicTree } from './shared/topic-tree.js';
 export type { TopicNode, TopicValue } from './shared/topic-tree.js';
 export { SingleRecordTree } from './shared/single-record-tree.js';

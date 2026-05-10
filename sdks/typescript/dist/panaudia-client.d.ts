@@ -4,6 +4,7 @@ import { TopicNode } from './shared/topic-tree.js';
 import { SingleRecordNode } from './shared/single-record-tree.js';
 import { MergeDebugInfo } from './shared/topic-merger.js';
 import { selectBestMicrophone, MicrophoneType } from './shared/microphone-selection.js';
+import { CommandsAPI } from './commands.js';
 export type TransportType = 'moq' | 'webrtc';
 export interface PanaudiaClientConfig {
     /** Server URL (from resolveServer() or hardcoded for dev). */
@@ -120,8 +121,6 @@ export declare class PanaudiaClient {
      * client.setPose(threejsToPanaudia(position, rotation));
      */
     setPose(pose: PanaudiaPose): void;
-    mute(entityId: string): Promise<void>;
-    unmute(entityId: string): Promise<void>;
     /**
      * Invoke a named command from the server's command catalog
      * (see `plan/commands/command_types.md`). Args are command-specific —
@@ -136,6 +135,15 @@ export declare class PanaudiaClient {
      * echoed op. There is no per-call error path by design.
      */
     command(name: string, args?: Record<string, unknown>): Promise<void>;
+    /**
+     * Typed catalog wrappers — `client.commands.space.entity.mute(id)`,
+     * `client.commands.personal.role.unmute(role)`, etc. Each wrapper is a
+     * thin delegator around `command()` with TypeScript-checked argument
+     * names. Use these for autocomplete and arg checking; fall back to
+     * `command()` directly for any new server command not yet wrapped.
+     */
+    get commands(): CommandsAPI;
+    private _commands?;
     on<K extends keyof EventHandlerMap>(event: K, handler: EventHandlerMap[K]): void;
     off<K extends keyof EventHandlerMap>(event: K, handler: EventHandlerMap[K]): void;
     /**

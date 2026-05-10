@@ -3,7 +3,7 @@ import { ControlMessage } from '../types.js';
 /**
  * Control Track Publisher
  *
- * Publishes JSON control messages (mute/unmute) as MOQ objects.
+ * Publishes JSON control messages as MOQ objects.
  */
 export declare class ControlTrackPublisher extends TrackPublisher {
     constructor(config: TrackPublisherConfig);

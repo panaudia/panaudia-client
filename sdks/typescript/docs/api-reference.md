@@ -82,12 +82,54 @@ const pose = threejsToPanaudia(mesh.position, mesh.rotation);
 client.setPose(pose);
 ```
 
-### Remote Control
+### Commands
 
-| Method | Description |
-|--------|-------------|
-| `mute(entityId)` | Mute a remote entity |
-| `unmute(entityId)` | Unmute a remote entity |
+The server exposes a catalog of named commands the holder of a ticket can invoke depending on the roles on that ticket. The TS SDK wraps the catalog as a hierarchical, type-checked object on `client.commands`. Each call fires-and-forgets — there is no per-call response. Effects (if the holder is authorised) arrive later as echoed entity / space ops via the existing subscriber path (strict-MVC).
+
+```typescript
+// Space-wide effects (require permitted roles, e.g. moderator/admin)
+await client.commands.space.entity.mute(entityId);
+await client.commands.space.entity.unmute(entityId);
+await client.commands.space.entity.kick(entityId, mins);          // mins = 0 → forever
+await client.commands.space.entity.unkick(entityId);
+await client.commands.space.entity.setGain(entityId, gain);
+await client.commands.space.entity.setAttenuation(entityId, attenuation);
+
+await client.commands.space.role.mute(role);
+await client.commands.space.role.unmute(role);
+await client.commands.space.role.kick(role, mins);
+await client.commands.space.role.unkick(role);
+await client.commands.space.role.setGain(role, gain);
+await client.commands.space.role.unsetGain(role);
+await client.commands.space.role.setAttenuation(role, attenuation);
+await client.commands.space.role.unsetAttenuation(role);
+
+// Personal effects (apply only to the caller's own listening mix)
+await client.commands.personal.entity.mute(entityId);
+await client.commands.personal.entity.unmute(entityId);
+await client.commands.personal.entity.solo(entityId);              // solo wins over every mute kind
+await client.commands.personal.entity.unsolo(entityId);
+await client.commands.personal.role.mute(role);
+await client.commands.personal.role.unmute(role);
+```
+
+Composition rules — see [`spatial-mixer/plan/commands/server-enforcement-plan.md`](https://github.com/panaudia/spatial-mixer/blob/main/plan/commands/server-enforcement-plan.md) for the full version:
+
+- **Mute is a veto.** Any of `space.entity.mute`, `space.role.mute` (over a role the source holds), `personal.entity.mute`, or `personal.role.mute` excludes the source.
+- **Solo wins over every mute.** A soloed source is audible to the listener even if it would otherwise be silenced.
+- **Gain is multiplicative.** `effective = entity.gain × min(roles-gain.R)` over the source's set roles.
+- **Attenuation is replace, not multiply.** `roles-attenuation` overrides per-entity attenuation; multi-role conflicts resolve to `min`.
+- **Kick is terminal.** Closes the session and refuses re-auth until the deadline (`mins = 0` → forever).
+
+#### Generic dispatcher (forward-compat)
+
+For commands not yet wrapped in `client.commands.*`, fall back to the generic dispatcher:
+
+```typescript
+await client.command('some.future.command', { foo: 'bar' });
+```
+
+This is the same wire path; the typed wrappers are thin delegators around it.
 
 ### Attributes
 
@@ -95,8 +137,8 @@ The client maintains a structured per-participant attribute tree, kept in sync w
 
 | Method | Description |
 |--------|-------------|
-| `getAttributeTree()` | `ReadonlyMap<string, AttributeNode>` — snapshot of all known participants' attributes, keyed by uuid |
-| `getAttributes(uuid)` | `AttributeNode \| undefined` — attributes for a single participant |
+| `getAttributeTree()` | `ReadonlyMap<string, TopicNode>` — snapshot of all known participants' attributes, keyed by uuid |
+| `getAttributes(uuid)` | `TopicNode \| undefined` — attributes for a single participant |
 
 ### Events
 
@@ -109,7 +151,7 @@ client.on('warning', (event: WarningEvent) => { ... });        // Non-fatal issu
 client.on('entityState', (state: EntityState) => { ... });     // Panaudia coordinates
 client.on('attributes', (values: Array<{ key: string; value: string }>) => { ... });
 client.on('attributesRemoved', (keys: string[]) => { ... });
-client.on('attributeTreeChange', (uuid: string, attrs: AttributeNode) => { ... });
+client.on('attributeTreeChange', (uuid: string, attrs: TopicNode) => { ... });
 client.on('attributeTreeRemove', (uuid: string) => { ... });
 ```
 
@@ -140,8 +182,8 @@ client.on('attributeTreeRemove', (uuid) => {
 });
 
 // Snapshot at any time:
-const all = client.getAttributeTree();        // ReadonlyMap<string, AttributeNode>
-const alice = client.getAttributes('alice');  // AttributeNode | undefined
+const all = client.getAttributeTree();        // ReadonlyMap<string, TopicNode>
+const alice = client.getAttributes('alice');  // TopicNode | undefined
 ```
 
 `attributeTreeChange` fires once per affected uuid per envelope — when a participant's first batch of attributes arrives, the whole object is built before being inserted into the tree, so the handler always sees a fully populated participant. Existing participants are mutated in place. `attributeTreeRemove` fires when a participant's last attribute is tombstoned (typically a disconnect, where all their keys are tombstoned in one batch).
@@ -329,7 +371,7 @@ This provides access to MOQ protocol utilities, wire format encoders/decoders, a
 | `setAttributesCallback(cb)` | `client.on('attributes', (values) => ...)` — batch of per-key entries `Array<{ key, value }>` |
 | `setConnectionStatusCallback(cb)` | `client.on('connected', cb)` / `client.on('disconnected', cb)` / `client.on('authenticated', cb)` |
 | `muteMic()` / `unmuteMic()` | Same |
-| `mute(id)` / `unmute(id)` | Same |
+| `mute(id)` / `unmute(id)` | `client.commands.personal.entity.mute(id)` / `unmute(id)` (per-listener) or `client.commands.space.entity.mute(id)` / `unmute(id)` (space-wide, requires permitted role) |
 | `ParticipantPose` / `participantState` event | `EntityState` / `entityState` event |
 | `NodeAttributes` | Per-key attribute operations via `attributes` event |
 | `NodeInfo3` | `EntityInfo3` |

@@ -6,7 +6,7 @@ Panaudia exchanges three types of data between participants alongside audio:
 |-------|-----------|--------|----------------|
 | **State** | Server → Client | Binary (48 bytes) | Yes — emitted as typed events |
 | **Attributes** | Server → Client | JSON (per-key operations) | Yes — emitted as per-key events |
-| **Control** | Client → Server | JSON | Yes — via `mute()`/`unmute()` API |
+| **Control** | Client → Server | JSON | Yes — via `client.commands.*` API |
 
 ## State
 
@@ -114,8 +114,8 @@ client.on('attributeTreeRemove', (uuid) => {
 });
 
 // Snapshot at any time:
-const all = client.getAttributeTree();        // ReadonlyMap<string, AttributeNode>
-const alice = client.getAttributes('alice');  // AttributeNode | undefined
+const all = client.getAttributeTree();        // ReadonlyMap<string, TopicNode>
+const alice = client.getAttributes('alice');  // TopicNode | undefined
 ```
 
 `attributeTreeChange` fires once per affected participant per envelope. When a participant's first batch of attributes arrives, the whole object is built before being placed in the tree, so the handler always sees a fully populated participant — no partial state. Existing participants are mutated in place. `attributeTreeRemove` fires when a participant's last attribute is tombstoned (typically a disconnect, where all of their keys are tombstoned in one batch).
@@ -148,18 +148,29 @@ Attributes are cached by the server. When a new participant joins, they receive 
 
 ## Control
 
-Control messages let you mute or unmute remote participants. The SDKs handle the JSON format internally:
+Control messages let the client invoke named commands from the server's command catalog (mute, unmute, kick, gain, attenuation, solo, etc.). The SDKs handle the JSON envelope internally.
 
-**TypeScript:**
+**TypeScript:** the catalog is exposed as a typed hierarchy under `client.commands`. Each call fires-and-forgets — effects arrive later as echoed entity / space ops via the existing subscriber path (strict-MVC).
+
 ```typescript
-client.mute(entityId);
-client.unmute(entityId);
+// Personal — applies only to your own listening mix
+await client.commands.personal.entity.mute(entityId);
+await client.commands.personal.entity.unmute(entityId);
+await client.commands.personal.entity.solo(entityId);    // wins over every mute kind
+await client.commands.personal.entity.unsolo(entityId);
+await client.commands.personal.role.mute(role);
+await client.commands.personal.role.unmute(role);
+
+// Space-wide — requires an admin/moderator role; silently dropped otherwise
+await client.commands.space.entity.mute(entityId);
+await client.commands.space.entity.kick(entityId, mins); // mins=0 → forever
+await client.commands.space.entity.setGain(entityId, gain);
+await client.commands.space.role.mute(role);
+// …see api-reference for the full list
 ```
 
-**Unreal:**
-```cpp
-PanaudiaComp->MuteNode(NodeId);
-PanaudiaComp->UnmuteNode(NodeId);
-```
+For commands not yet wrapped in the typed hierarchy, fall back to the generic `client.command(name, args)` dispatcher.
 
-The underlying JSON format is `{"type": "mute", "message": {"node": "<uuid>"}}` but you should not need to construct this yourself.
+**Unreal:** the `PanaudiaComp->MuteNode(NodeId)` / `UnmuteNode(NodeId)` API is **pending migration** to the new command envelope and currently no-ops against an updated server. See the Unreal plugin README for status. The `personal.entity.mute` / `unmute` commands map to those operations directly.
+
+The underlying JSON envelope sent on the control track is `{"type": "command", "message": {"command": "<name>", "args": {...}}}` — but you should not need to construct this yourself.

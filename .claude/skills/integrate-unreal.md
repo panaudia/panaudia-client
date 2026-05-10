@@ -55,7 +55,7 @@ For a working integration example, also read:
 8. **Audio**: Microphone capture and spatial playback start automatically on connect. Control with:
    - `SetMicrophoneEnabled(bool)` — enable/disable mic
    - `InputVolume` / `OutputVolume` — volume properties (0-1)
-   - `MuteNode(NodeId)` / `UnmuteNode(NodeId)` — mute/unmute remote participants
+   - `MuteNode(NodeId)` / `UnmuteNode(NodeId)` — mute/unmute remote participants. **Note:** these still emit the legacy `{type:"mute"}` wire format and are pending migration to the new `{type:"command"}` catalog envelope; against an updated server they currently no-op. The TS SDK's `client.commands.personal.entity.mute(id)` / `unmute(id)` are the migrated equivalents.
 
 9. **Events/Delegates**: Bind to these delegates for state changes:
    ```cpp

@@ -137,11 +137,7 @@ export class MoqTransportAdapter implements Transport {
 
   async publishControl(msg: ControlMessage): Promise<void> {
     const client = this.requireClient();
-    if (msg.type === 'mute') {
-      await client.mute(msg.message.node);
-    } else if (msg.type === 'unmute') {
-      await client.unmute(msg.message.node);
-    } else if (msg.type === 'command') {
+    if (msg.type === 'command') {
       await client.command(msg.message.command, msg.message.args);
     }
   }

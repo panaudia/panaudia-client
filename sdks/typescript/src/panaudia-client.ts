@@ -29,6 +29,7 @@ import {
   type MicrophoneType,
 } from './shared/microphone-selection.js';
 import { BluetoothMicDefaultError } from './moq/audio-publisher.js';
+import { createCommandsAPI, type CommandsAPI } from './commands.js';
 
 export type TransportType = 'moq' | 'webrtc';
 
@@ -406,14 +407,6 @@ export class PanaudiaClient {
 
   // ── Remote entity control ───────────────────────────────────────────
 
-  async mute(entityId: string): Promise<void> {
-    await this.transport.publishControl({ type: 'mute', message: { node: entityId } });
-  }
-
-  async unmute(entityId: string): Promise<void> {
-    await this.transport.publishControl({ type: 'unmute', message: { node: entityId } });
-  }
-
   /**
    * Invoke a named command from the server's command catalog
    * (see `plan/commands/command_types.md`). Args are command-specific —
@@ -433,6 +426,21 @@ export class PanaudiaClient {
       message: { command: name, args },
     });
   }
+
+  /**
+   * Typed catalog wrappers — `client.commands.space.entity.mute(id)`,
+   * `client.commands.personal.role.unmute(role)`, etc. Each wrapper is a
+   * thin delegator around `command()` with TypeScript-checked argument
+   * names. Use these for autocomplete and arg checking; fall back to
+   * `command()` directly for any new server command not yet wrapped.
+   */
+  get commands(): CommandsAPI {
+    if (!this._commands) {
+      this._commands = createCommandsAPI(this);
+    }
+    return this._commands;
+  }
+  private _commands?: CommandsAPI;
 
   // ── Events ───────────────────────────────────────────────────────────
 

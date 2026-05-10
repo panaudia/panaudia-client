@@ -150,14 +150,6 @@ export declare class PanaudiaMoqClient {
      */
     onEntityRemoved(handler: RemovedHandler): void;
     /**
-     * Mute a remote entity (they will be silent in your mix)
-     */
-    mute(entityId: string): Promise<void>;
-    /**
-     * Unmute a remote entity
-     */
-    unmute(entityId: string): Promise<void>;
-    /**
      * Invoke a named command from the server's command catalog.
      *
      * Strict-MVC: this fires-and-forgets. The command's effect (if any)

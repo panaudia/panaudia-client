@@ -1,5 +1,5 @@
 /**
- * Control Track Publisher - Publishes control messages (mute/unmute) via MOQ
+ * Control Track Publisher - Publishes control messages via MOQ
  *
  * Sends JSON-encoded control messages to the server's control input track.
  */
@@ -11,7 +11,7 @@ import type { ControlMessage } from '../types.js';
 /**
  * Control Track Publisher
  *
- * Publishes JSON control messages (mute/unmute) as MOQ objects.
+ * Publishes JSON control messages as MOQ objects.
  */
 export class ControlTrackPublisher extends TrackPublisher {
   constructor(config: TrackPublisherConfig) {
