@@ -83,8 +83,35 @@ struct FPanaudiaConnectionConfig
     bool bSkipCertValidation = true;
 };
 
+// Blueprint-friendly per-key value surfaced by the merged attributes callback.
+// Value is the JSON-serialised representation: "\"alice\"" / "42" / "true" / "null".
+USTRUCT(BlueprintType)
+struct FPanaudiaAttributeValue
+{
+    GENERATED_BODY()
+
+    UPROPERTY(BlueprintReadOnly, Category = "Panaudia")
+    FString Key;
+
+    UPROPERTY(BlueprintReadOnly, Category = "Panaudia")
+    FString Value;
+
+    // Monotonic op id assigned by the server bouncer. Useful for debugging.
+    UPROPERTY(BlueprintReadOnly, Category = "Panaudia")
+    int64 OpId = 0;
+};
+
 // Blueprint-compatible dynamic delegates
 DECLARE_DYNAMIC_MULTICAST_DELEGATE_TwoParams(FOnConnectionStatusChanged, EPanaudiaConnectionStatus, Status, const FString&, Message);
 DECLARE_DYNAMIC_MULTICAST_DELEGATE_OneParam(FOnNodeStateReceived, const FPanaudiaNodeState&, State);
-DECLARE_DYNAMIC_MULTICAST_DELEGATE_OneParam(FOnAttributesReceived, const FString&, JsonData);
 DECLARE_DYNAMIC_MULTICAST_DELEGATE_TwoParams(FOnDataTrackReceived, const FString&, TrackName, const TArray<uint8>&, Data);
+
+// Cache-aware attribute delegates. Fired once per envelope so callers can
+// react atomically to each batch (a node-join batch arrives as one broadcast).
+DECLARE_DYNAMIC_MULTICAST_DELEGATE_OneParam(
+    FOnAttributeValuesChanged,
+    const TArray<FPanaudiaAttributeValue>&, Values);
+
+DECLARE_DYNAMIC_MULTICAST_DELEGATE_OneParam(
+    FOnAttributesRemoved,
+    const TArray<FString>&, Keys);

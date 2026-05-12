@@ -4,8 +4,8 @@
   <meta charset="UTF-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1.0" />
   <title>Panaudia Client Test Page</title>
-  <script type="module" crossorigin src="/assets/index-DKHl7kd8.js"></script>
-  <link rel="stylesheet" crossorigin href="/assets/index-CrMVFgvX.css">
+  <script type="module" crossorigin src="/assets/index-CaaS2WPO.js"></script>
+  <link rel="stylesheet" crossorigin href="/assets/index-CBkUbLgT.css">
 </head>
 <body>
   <div class="container">
@@ -13,12 +13,6 @@
 
     <div class="columns">
     <div class="column">
-
-    <!-- Browser Support -->
-    <div class="panel" id="support-panel">
-      <h2>Browser Support</h2>
-      <div class="support-grid" id="support-grid"></div>
-    </div>
 
     <!-- Identity -->
     <div class="panel" id="identity-panel">
@@ -30,17 +24,17 @@
       </div>
       <div class="form-group checkbox-row">
         <input type="checkbox" id="no-ticket" />
-        <label for="no-ticket">Connect without ticket (requires server <code>PANAUDIA_UNTICKETED=1</code>)</label>
+        <label for="no-ticket">Connect without ticket</label>
       </div>
       <div class="form-group" id="ticket-group">
-        <label for="jwt-token">Ticket (JWT Token)</label>
-        <textarea id="jwt-token" rows="3" placeholder="Paste JWT token here..."></textarea>
+        <label for="jwt-token">Ticket</label>
+        <textarea id="jwt-token" rows="4" placeholder="Paste JWT token here..."></textarea>
       </div>
-      <div class="form-group" id="claims-group">
-        <span class="label">Claims</span>
+      <details class="form-group" id="claims-group">
+        <summary>Claims</summary>
         <pre id="jwt-payload" class="jwt-payload">—</pre>
-      </div>
-      <div class="form-group">
+      </details>
+      <div class="form-group" id="entity-id-group">
         <span class="label">Entity ID</span>
         <span id="entity-id" class="mono">—</span>
       </div>
@@ -49,29 +43,33 @@
     <!-- Connection -->
     <div class="panel" id="connection-panel">
       <h2>Connection</h2>
+              <details class="form-group" id="support-group">
+        <summary>Browser supports MOQ <span id="moq-support-indicator" class="support-indicator">—</span></summary>
+        <div class="support-grid" id="support-grid"></div>
+      </details>
       <div class="form-group">
         <label for="server-host">Server Host</label>
         <input type="text" id="server-host" value="dev.panaudia.com:4443" placeholder="host:port" />
       </div>
+
       <div class="form-group">
         <label for="transport-select">Transport</label>
-        <select id="transport-select">
-          <option value="auto">auto (MOQ if supported, else WebRTC)</option>
-          <option value="moq">moq</option>
-          <option value="webrtc">webrtc</option>
-        </select>
+        <div class="transport-row">
+          <select id="transport-select">
+            <option value="auto">auto</option>
+            <option value="moq">moq</option>
+            <option value="webrtc">webrtc</option>
+          </select>
+          <span id="transport-resolved" class="mono">—</span>
+        </div>
       </div>
+
       <div class="form-group">
-        <span class="label">Will use</span>
-        <span id="transport-resolved" class="mono">—</span>
-      </div>
-      <div class="form-group">
-        <span class="label">URL</span>
         <span id="resolved-url" class="mono">—</span>
       </div>
       <div class="button-group">
         <button id="connect-btn">Connect</button>
-        <button id="disconnect-btn" disabled>Disconnect</button>
+        <button id="disconnect-btn" hidden>Disconnect</button>
       </div>
       <div id="connection-status" class="status">Disconnected</div>
     </div>
@@ -84,6 +82,33 @@
 
     </div><!-- /column left -->
     <div class="column column-right">
+
+    <!-- Position -->
+    <div class="panel" id="position-panel">
+      <h2>Position</h2>
+      <div class="pad-row">
+        <div class="xy-pad" id="xy-pad">
+          <span class="pad-label top">X=1</span>
+          <span class="pad-label bottom">X=0</span>
+          <span class="pad-label left">Y=1</span>
+          <span class="pad-label right">Y=0</span>
+          <div class="xy-dot" id="xy-dot">
+            <div class="xy-dot-arrow" id="xy-dot-arrow"></div>
+          </div>
+        </div>
+        <div class="z-slider" id="z-slider">
+          <span class="pad-label top">Z=1</span>
+          <span class="pad-label bottom">Z=0</span>
+          <div class="z-thumb" id="z-thumb"></div>
+        </div>
+      </div>
+      <div class="pos-values">
+        <span>X <span class="val" id="pos-x-val">0.50</span></span>
+        <span>Y <span class="val" id="pos-y-val">0.50</span></span>
+        <span>Z <span class="val" id="pos-z-val">0.50</span></span>
+        <span>Yaw <span class="val" id="rot-yaw-val">0°</span></span>
+      </div>
+    </div>
 
     <!-- Audio -->
     <div class="panel" id="audio-panel">
@@ -107,97 +132,36 @@
       </div>
     </div>
 
-    <!-- Position -->
-    <div class="panel" id="position-panel">
-      <h2>Position</h2>
-      <div class="pad-row">
-        <div class="xy-pad" id="xy-pad">
-          <span class="pad-label top">X=1</span>
-          <span class="pad-label bottom">X=0</span>
-          <span class="pad-label left">Y=1</span>
-          <span class="pad-label right">Y=0</span>
-          <div class="xy-dot" id="xy-dot">
-            <div class="xy-dot-arrow" id="xy-dot-arrow"></div>
-          </div>
-        </div>
-        <div class="z-slider" id="z-slider">
-          <span class="pad-label top">Z=1</span>
-          <span class="pad-label bottom">Z=0</span>
-          <div class="z-thumb" id="z-thumb"></div>
-        </div>
-        <div class="yaw-wrap">
-          <div class="yaw-knob" id="yaw-knob">
-            <span class="yaw-tick top">0°</span>
-            <span class="yaw-tick right">90°</span>
-            <span class="yaw-tick bottom">±180°</span>
-            <span class="yaw-tick left">-90°</span>
-            <div class="yaw-needle" id="yaw-needle"></div>
-          </div>
-          <div class="yaw-label">Yaw</div>
-        </div>
-      </div>
-      <div class="pos-values">
-        <span>X <span class="val" id="pos-x-val">0.50</span></span>
-        <span>Y <span class="val" id="pos-y-val">0.50</span></span>
-        <span>Z <span class="val" id="pos-z-val">0.50</span></span>
-        <span>Yaw <span class="val" id="rot-yaw-val">0°</span></span>
+    </div><!-- /column middle -->
+    <div class="column column-right">
+
+    <!-- Roles — discovered dynamically from every participant's entity
+         data. Append-only: a role added once stays listed even after the
+         participant holding it leaves. Each role card carries the
+         `space.role.*` and `personal.role.*` command buttons. -->
+    <div class="panel" id="roles-panel">
+      <h2>Roles <span id="roles-count" class="badge">0</span></h2>
+      <div id="roles-list" class="roles-list">
+        <p class="placeholder" id="roles-placeholder">No roles seen yet.</p>
       </div>
     </div>
 
-    <!-- Participants -->
+    <!-- Space — space-wide role-rule record (roles-muted /
+         roles-kicked / roles-gain / roles-attenuation). Hidden until
+         data arrives, which only happens when the connected user has
+         the `space.read` read cap on their roles. -->
+    <div class="panel" id="space-panel" hidden>
+      <h2>Space</h2>
+      <pre id="space-record" class="entity-record">(no data)</pre>
+    </div>
+
+    <!-- Participants — each card includes Attributes and Entity sub-sections.
+         Entity is server-filtered to self, so non-self cards show a
+         placeholder there. -->
     <div class="panel" id="participants-panel">
       <h2>Participants <span id="participant-count" class="badge">0</span></h2>
       <div id="participants-list" class="participants-list">
         <p class="placeholder" id="participants-placeholder">Connect to see participants.</p>
-      </div>
-    </div>
-
-    <!-- Attributes -->
-    <div class="panel" id="attributes-panel">
-      <h2>Entity Attributes <span id="attributes-count" class="badge">0</span></h2>
-      <div id="attributes-list" class="attributes-list">
-        <p class="placeholder" id="attributes-placeholder">Connect to see node attributes.</p>
-      </div>
-    </div>
-
-    <!-- Commands — exercise the server's command catalog -->
-    <div class="panel" id="commands-panel">
-      <h2>Commands</h2>
-      <p class="hint">
-        Server validates against the holder's <code>roles</code> claim. The
-        op the command produces flows back via the entity stream — watch
-        the <em>Entity (self)</em> panel below for personal commands and
-        the participants list for <code>space.entity.*</code>.
-      </p>
-      <div class="form-group">
-        <label for="command-select">Command</label>
-        <select id="command-select"></select>
-      </div>
-      <div class="form-group">
-        <label for="command-args">Args (JSON)</label>
-        <textarea id="command-args" rows="3" class="mono" spellcheck="false"></textarea>
-      </div>
-      <div class="button-group">
-        <button id="command-send-btn" disabled>Send</button>
-      </div>
-    </div>
-
-    <!-- Entity (self, per-client filtered) -->
-    <div class="panel" id="entity-panel">
-      <h2>
-        Entity (self)
-        <span id="entity-uuid" class="badge mono">—</span>
-        <button id="clear-entity-ops-btn" class="small-btn">Clear ops</button>
-      </h2>
-      <div class="form-group">
-        <span class="label">Record</span>
-        <pre id="entity-record" class="entity-record">—</pre>
-      </div>
-      <div class="form-group">
-        <span class="label">Recent ops</span>
-        <div id="entity-ops" class="entity-ops">
-          <p class="placeholder" id="entity-ops-placeholder">Waiting for entity ops…</p>
-        </div>
       </div>
     </div>
 

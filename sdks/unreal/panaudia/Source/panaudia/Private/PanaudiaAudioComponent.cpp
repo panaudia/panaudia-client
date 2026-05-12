@@ -18,6 +18,10 @@
 #include "Async/Async.h"
 
 #include <panaudia/core.h>
+#include <panaudia/cache_map.h>
+
+#include <cstring>
+#include <string>
 
 #include "PanaudiaProceduralSound.h"
 
@@ -51,6 +55,22 @@ struct FPanaudiaAudioComponentPrivate
 static void PanaudiaCoreStatusChanged_Impl(panaudia::ConnectionState, const char*, void*);
 static void PanaudiaCoreDataReceived_Impl(panaudia::TrackHandle*, const uint8_t*, uint32_t, void*);
 static void PanaudiaCoreLog_Impl(panaudia::LogLevel, const char*, void*);
+static void PanaudiaCoreCacheValues_Impl(panaudia::TrackHandle*, const panaudia::CacheValueView*, uint32_t, uint64_t, void*);
+static void PanaudiaCoreCacheRemoved_Impl(panaudia::TrackHandle*, const char* const*, uint32_t, uint64_t, void*);
+
+// Helper: build an FString from a length-prefixed UTF-8 byte range. UE's
+// UTF8_TO_TCHAR macro assumes NUL termination — these views are not.
+static FString FStringFromUtf8(const char* Bytes, uint32_t Len)
+{
+    if (Len == 0 || Bytes == nullptr) return FString();
+    FUTF8ToTCHAR Conv(Bytes, static_cast<int32>(Len));
+    return FString(Conv.Length(), Conv.Get());
+}
+
+static FString FStringFromStdString(const std::string& S)
+{
+    return FStringFromUtf8(S.data(), static_cast<uint32_t>(S.size()));
+}
 
 // ============================================================================
 // Helper: Extract NodeID (jti claim) from JWT token
@@ -250,6 +270,15 @@ void UPanaudiaAudioComponent::ConfigureCore(const FString& ServerURL, const FStr
     Config.log_ctx = this;
     Config.log_level = panaudia::LogLevel::Info;
 
+    // Cache-aware callbacks for the attributes_output track (and any
+    // other cached track configured below). These do NOT replace the
+    // raw data_recv_callback above — they fire instead of it for
+    // payloads that decode as cache envelopes; raw payloads fall through.
+    Config.cache_values_callback = &PanaudiaCoreCacheValues_Impl;
+    Config.cache_values_ctx = this;
+    Config.cache_removed_callback = &PanaudiaCoreCacheRemoved_Impl;
+    Config.cache_removed_ctx = this;
+
     // --- Track definitions ---
 
     // Audio output (inbound — server's binaural mix → our speakers)
@@ -293,13 +322,17 @@ void UPanaudiaAudioComponent::ConfigureCore(const FString& ServerURL, const FStr
             Config.tracks.push_back(T);
         }
 
-        // Attributes output (inbound — remote node attributes)
+        // Attributes output (inbound — remote node attributes).
+        // Marked cached: server delivers binary cache envelopes that the
+        // core decodes + merges; values surface via OnAttributeValuesChanged
+        // / OnAttributesRemoved on the game thread.
         {
             panaudia::TrackConfig T;
             T.name = "attributes_output";
             T.moq_namespace = {"out", "attributes", NodeIdStr};
             T.direction = panaudia::TrackDirection::Inbound;
             T.type = panaudia::TrackType::Data;
+            T.cached = true;
             Config.tracks.push_back(T);
         }
     }
@@ -427,6 +460,127 @@ static void PanaudiaCoreLog_Impl(
         UE_LOG(LogPanaudia, Verbose, TEXT("[panaudia-core] %s"), *Msg);
         break;
     }
+}
+
+// ----------------------------------------------------------------------------
+// Cache-aware delivery (attributes_output and any other cached track)
+// ----------------------------------------------------------------------------
+//
+// Both callbacks fire on the core's datagram thread. The CacheValueView
+// pointers reference MergeBatchResult buffers that go out of scope as
+// soon as we return — copy into FStrings here, then marshal the TArray
+// to the game thread for delegate broadcast.
+
+static void PanaudiaCoreCacheValues_Impl(
+    panaudia::TrackHandle* /*Track*/,
+    const panaudia::CacheValueView* Values,
+    uint32_t Count,
+    uint64_t OpId,
+    void* Ctx)
+{
+    auto* Self = static_cast<UPanaudiaAudioComponent*>(Ctx);
+
+    TArray<FPanaudiaAttributeValue> Out;
+    Out.Reserve(static_cast<int32>(Count));
+    for (uint32_t i = 0; i < Count; ++i)
+    {
+        FPanaudiaAttributeValue V;
+        V.Key   = FStringFromUtf8(Values[i].key,   Values[i].key_len);
+        V.Value = FStringFromUtf8(Values[i].value, Values[i].value_len);
+        V.OpId  = static_cast<int64>(OpId);
+        Out.Add(MoveTemp(V));
+    }
+
+    AsyncTask(ENamedThreads::GameThread, [Self, Out = MoveTemp(Out)]()
+    {
+        if (!IsValid(Self)) return;
+        Self->OnAttributeValuesChanged.Broadcast(Out);
+    });
+}
+
+static void PanaudiaCoreCacheRemoved_Impl(
+    panaudia::TrackHandle* /*Track*/,
+    const char* const* Keys,
+    uint32_t Count,
+    uint64_t /*OpId*/,
+    void* Ctx)
+{
+    auto* Self = static_cast<UPanaudiaAudioComponent*>(Ctx);
+
+    TArray<FString> Out;
+    Out.Reserve(static_cast<int32>(Count));
+    for (uint32_t i = 0; i < Count; ++i)
+    {
+        const char* K = Keys[i];
+        Out.Add(FStringFromUtf8(K, K ? static_cast<uint32_t>(std::strlen(K)) : 0));
+    }
+
+    AsyncTask(ENamedThreads::GameThread, [Self, Out = MoveTemp(Out)]()
+    {
+        if (!IsValid(Self)) return;
+        Self->OnAttributesRemoved.Broadcast(Out);
+    });
+}
+
+// ============================================================================
+// Pull API (queries against the merged cache map)
+// ============================================================================
+
+bool UPanaudiaAudioComponent::GetAttribute(const FString& Key, FString& OutValue) const
+{
+    if (!P || !P->Core || !P->AttributesOutputTrack) return false;
+    const auto* Map = P->Core->get_cache_map(P->AttributesOutputTrack);
+    if (!Map) return false;
+
+    const std::string KeyStr(TCHAR_TO_UTF8(*Key));
+    auto Entry = Map->get(KeyStr);
+    if (!Entry) return false;
+
+    OutValue = FStringFromStdString(Entry->value);
+    return true;
+}
+
+TArray<FPanaudiaAttributeValue>
+UPanaudiaAudioComponent::GetAttributesForNode(const FString& InNodeId) const
+{
+    TArray<FPanaudiaAttributeValue> Result;
+    if (!P || !P->Core || !P->AttributesOutputTrack) return Result;
+    const auto* Map = P->Core->get_cache_map(P->AttributesOutputTrack);
+    if (!Map) return Result;
+
+    std::string Prefix(TCHAR_TO_UTF8(*InNodeId));
+    Prefix.push_back('.');
+
+    Map->for_each_prefix(Prefix,
+        [&Result](const std::string& K, const panaudia::CacheEntry& E)
+        {
+            FPanaudiaAttributeValue V;
+            V.Key   = FStringFromStdString(K);
+            V.Value = FStringFromStdString(E.value);
+            V.OpId  = static_cast<int64>(E.op_id);
+            Result.Add(MoveTemp(V));
+        });
+    return Result;
+}
+
+TArray<FPanaudiaAttributeValue>
+UPanaudiaAudioComponent::GetAllAttributes() const
+{
+    TArray<FPanaudiaAttributeValue> Result;
+    if (!P || !P->Core || !P->AttributesOutputTrack) return Result;
+    const auto* Map = P->Core->get_cache_map(P->AttributesOutputTrack);
+    if (!Map) return Result;
+
+    Map->for_each(
+        [&Result](const std::string& K, const panaudia::CacheEntry& E)
+        {
+            FPanaudiaAttributeValue V;
+            V.Key   = FStringFromStdString(K);
+            V.Value = FStringFromStdString(E.value);
+            V.OpId  = static_cast<int64>(E.op_id);
+            Result.Add(MoveTemp(V));
+        });
+    return Result;
 }
 
 // ============================================================================

@@ -125,6 +125,26 @@ public:
     UPROPERTY(BlueprintAssignable, Category = "Panaudia")
     FOnDataTrackReceived OnDataTrackReceived;
 
+    // Cache-aware attribute delegates. Fired once per envelope. The
+    // OnDataTrackReceived delegate above still fires for state_output
+    // (binary state) and as a fall-through for non-cache payloads on
+    // attributes_output.
+    UPROPERTY(BlueprintAssignable, Category = "Panaudia|Attributes")
+    FOnAttributeValuesChanged OnAttributeValuesChanged;
+
+    UPROPERTY(BlueprintAssignable, Category = "Panaudia|Attributes")
+    FOnAttributesRemoved OnAttributesRemoved;
+
+    // Pull API for one-shot Blueprint queries against the merged map.
+    UFUNCTION(BlueprintCallable, Category = "Panaudia|Attributes")
+    bool GetAttribute(const FString& Key, FString& OutValue) const;
+
+    UFUNCTION(BlueprintCallable, Category = "Panaudia|Attributes")
+    TArray<FPanaudiaAttributeValue> GetAttributesForNode(const FString& InNodeId) const;
+
+    UFUNCTION(BlueprintCallable, Category = "Panaudia|Attributes")
+    TArray<FPanaudiaAttributeValue> GetAllAttributes() const;
+
     // Opaque pimpl — keeps audio capture and core.h out of this header.
     // Struct defined in PanaudiaAudioComponent.cpp only.
     FPanaudiaAudioComponentPrivate* P;

@@ -935,7 +935,7 @@ function renderParticipants(): void {
       }
       log(`→ ${cmd}(${JSON.stringify(args)})`);
       try {
-        await client?.command(cmd, args);
+        if (client) await dispatchCommand(client, cmd, args);
       } catch (err: unknown) {
         const msg = err instanceof Error ? err.message : String(err);
         log(`Command send failed: ${msg}`, 'error');
@@ -997,7 +997,10 @@ function clearParticipantsAndAttributes(): void {
 // `personal.entity.*` command. `entity_id` is filled with the card's
 // uuid; commands with extra typed args render a small inline number
 // input pre-filled with the default. Clicking the button reads the
-// inputs in the same `.cmd-cell` and dispatches via `client.command()`.
+// inputs in the same `.cmd-cell` and dispatches via the typed
+// `client.commands.*` wrappers (see TYPED_INVOKERS below). The generic
+// `client.command()` is the fallback for any catalog name that's not
+// yet typed.
 //
 // The catalog mirrors `core/commands/defs.go`. Keep it in sync when new
 // per-entity commands land.
@@ -1035,6 +1038,76 @@ const PARTICIPANT_COMMAND_GROUPS: Array<{ group: string; commands: EntityCommand
 // and `personal.role.*`. The role name is filled from the card; commands
 // with extra typed args render an inline number input pre-filled with
 // the default.
+// Map of catalog command name → typed-wrapper invocation. Drives the
+// click handlers below so the page actually exercises
+// `client.commands.*` (option 3 of the SDK API). Names not present here
+// fall through to the generic `client.command()` dispatcher, which keeps
+// the page working if the server's catalog grows ahead of the SDK.
+type TypedInvoker = (
+  c: NonNullable<typeof client>,
+  args: Record<string, unknown>,
+) => Promise<void>;
+
+const TYPED_INVOKERS: Record<string, TypedInvoker> = {
+  'space.entity.mute':
+    (c, a) => c.commands.space.entity.mute(a.entity_id as string),
+  'space.entity.unmute':
+    (c, a) => c.commands.space.entity.unmute(a.entity_id as string),
+  'space.entity.kick':
+    (c, a) => c.commands.space.entity.kick(a.entity_id as string, a.mins as number),
+  'space.entity.unkick':
+    (c, a) => c.commands.space.entity.unkick(a.entity_id as string),
+  'space.entity.set_gain':
+    (c, a) => c.commands.space.entity.setGain(a.entity_id as string, a.gain as number),
+  'space.entity.set_attenuation':
+    (c, a) => c.commands.space.entity.setAttenuation(a.entity_id as string, a.attenuation as number),
+
+  'space.role.mute':
+    (c, a) => c.commands.space.role.mute(a.role as string),
+  'space.role.unmute':
+    (c, a) => c.commands.space.role.unmute(a.role as string),
+  'space.role.kick':
+    (c, a) => c.commands.space.role.kick(a.role as string, a.mins as number),
+  'space.role.unkick':
+    (c, a) => c.commands.space.role.unkick(a.role as string),
+  'space.role.set_gain':
+    (c, a) => c.commands.space.role.setGain(a.role as string, a.gain as number),
+  'space.role.unset_gain':
+    (c, a) => c.commands.space.role.unsetGain(a.role as string),
+  'space.role.set_attenuation':
+    (c, a) => c.commands.space.role.setAttenuation(a.role as string, a.attenuation as number),
+  'space.role.unset_attenuation':
+    (c, a) => c.commands.space.role.unsetAttenuation(a.role as string),
+
+  'personal.entity.mute':
+    (c, a) => c.commands.personal.entity.mute(a.entity_id as string),
+  'personal.entity.unmute':
+    (c, a) => c.commands.personal.entity.unmute(a.entity_id as string),
+  'personal.entity.solo':
+    (c, a) => c.commands.personal.entity.solo(a.entity_id as string),
+  'personal.entity.unsolo':
+    (c, a) => c.commands.personal.entity.unsolo(a.entity_id as string),
+
+  'personal.role.mute':
+    (c, a) => c.commands.personal.role.mute(a.role as string),
+  'personal.role.unmute':
+    (c, a) => c.commands.personal.role.unmute(a.role as string),
+};
+
+async function dispatchCommand(
+  c: NonNullable<typeof client>,
+  name: string,
+  args: Record<string, unknown>,
+): Promise<void> {
+  const invoker = TYPED_INVOKERS[name];
+  if (invoker) {
+    await invoker(c, args);
+  } else {
+    // Forward-compat: server has a command we haven't wrapped yet.
+    await c.command(name, args);
+  }
+}
+
 const ROLE_COMMAND_GROUPS: Array<{ group: string; commands: EntityCommand[] }> = [
   {
     group: 'space.role',
@@ -1138,7 +1211,7 @@ function renderRoles(): void {
       }
       log(`→ ${cmd}(${JSON.stringify(args)})`);
       try {
-        await client?.command(cmd, args);
+        if (client) await dispatchCommand(client, cmd, args);
       } catch (err: unknown) {
         const msg = err instanceof Error ? err.message : String(err);
         log(`Command send failed: ${msg}`, 'error');
