@@ -708,6 +708,7 @@ class PanaudiaClient {
       presence: this.config.presence,
       queryParams,
       microphoneId: this.config.microphoneId,
+      audio: this.config.audio,
       debug: this.config.debug
     });
   }

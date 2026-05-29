@@ -174,6 +174,12 @@ export declare class PanaudiaMoqClient {
      */
     isMicrophoneActive(): boolean;
     /**
+     * Enable or disable mic capture without tearing down the publisher.
+     * Disabled tracks emit silence; the encoder and track publisher stay
+     * alive so MOQ frames keep flowing as Opus DTX.
+     */
+    setMicEnabled(enabled: boolean): void;
+    /**
      * Pause microphone recording
      */
     pauseMicrophone(): void;

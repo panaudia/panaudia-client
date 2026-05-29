@@ -361,7 +361,6 @@ export class AudioPublisher {
       }
     });
 
-    // Start encoding
     this.webCodecsEncoder.start(this.mediaStream!).then(() => {
       this.setState(AudioPublisherState.RECORDING);
       this.log(`Recording started with WebCodecs, ${this.config.bitrate} bps (raw Opus)`);
@@ -380,7 +379,6 @@ export class AudioPublisher {
       throw new AudioNotSupportedError('No supported Opus MIME type found');
     }
 
-    // Create MediaRecorder with Opus encoding
     this.mediaRecorder = new MediaRecorder(this.mediaStream!, {
       mimeType,
       audioBitsPerSecond: this.config.bitrate,
@@ -474,6 +472,18 @@ export class AudioPublisher {
     }
 
     this.setState(AudioPublisherState.READY);
+  }
+
+  /**
+   * Enable or disable the mic tracks. Disabling makes the source emit
+   * silent samples — the encoder + track publisher stay alive, MOQ
+   * frames keep flowing as Opus DTX comfort-noise.
+   */
+  setMicEnabled(enabled: boolean): void {
+    if (!this.mediaStream) return;
+    for (const track of this.mediaStream.getAudioTracks()) {
+      track.enabled = enabled;
+    }
   }
 
   /**

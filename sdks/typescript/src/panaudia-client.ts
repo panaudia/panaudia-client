@@ -5,7 +5,7 @@
  */
 
 import { v4 as uuidv4 } from 'uuid';
-import type { Transport } from './transport.js';
+import type { Transport, AudioCaptureConfig } from './transport.js';
 import {
   ConnectionState,
   type Position,
@@ -54,6 +54,10 @@ export interface PanaudiaClientConfig {
   queryParams?: Record<string, string>;
   /** Microphone device ID — use listMicrophones() to get available IDs. Default: system default. */
   microphoneId?: string;
+  /** Audio capture constraints. `echoCancellation`, `noiseSuppression`,
+   *  and `autoGainControl` all default to `false`. Set any of them to
+   *  `true` to enable the browser's processing for the captured mic. */
+  audio?: AudioCaptureConfig;
   /** Enable debug logging. Default: false. */
   debug?: boolean;
   /** World bounds for position normalization. If set, setPose normalizes positions from [min,max] to [0,1]. */
@@ -324,6 +328,7 @@ export class PanaudiaClient {
       presence: this.config.presence,
       queryParams,
       microphoneId: this.config.microphoneId,
+      audio: this.config.audio,
       debug: this.config.debug,
     });
   }

@@ -1,3 +1,4 @@
+import { AudioCaptureConfig } from './transport.js';
 import { ConnectionState, Position, Rotation, ErrorEvent, WarningEvent, EntityState } from './types.js';
 import { PanaudiaPose } from './shared/coordinates.js';
 import { TopicNode } from './shared/topic-tree.js';
@@ -27,6 +28,10 @@ export interface PanaudiaClientConfig {
     queryParams?: Record<string, string>;
     /** Microphone device ID — use listMicrophones() to get available IDs. Default: system default. */
     microphoneId?: string;
+    /** Audio capture constraints. `echoCancellation`, `noiseSuppression`,
+     *  and `autoGainControl` all default to `false`. Set any of them to
+     *  `true` to enable the browser's processing for the captured mic. */
+    audio?: AudioCaptureConfig;
     /** Enable debug logging. Default: false. */
     debug?: boolean;
     /** World bounds for position normalization. If set, setPose normalizes positions from [min,max] to [0,1]. */

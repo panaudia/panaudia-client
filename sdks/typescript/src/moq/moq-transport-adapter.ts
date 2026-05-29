@@ -60,9 +60,13 @@ export class MoqTransportAdapter implements Transport {
 
     // MOQ requires explicit audio start (unlike WebRTC where audio is
     // negotiated as part of the SDP exchange during connect).
-    await this.client.startMicrophone(
-      this.microphoneId ? { deviceId: this.microphoneId } : undefined,
-    );
+    const audio = config.audio;
+    await this.client.startMicrophone({
+      ...(this.microphoneId ? { deviceId: this.microphoneId } : {}),
+      ...(audio?.echoCancellation !== undefined ? { echoCancellation: audio.echoCancellation } : {}),
+      ...(audio?.noiseSuppression !== undefined ? { noiseSuppression: audio.noiseSuppression } : {}),
+      ...(audio?.autoGainControl !== undefined ? { autoGainControl: audio.autoGainControl } : {}),
+    });
     await this.client.startPlayback();
   }
 
@@ -87,8 +91,6 @@ export class MoqTransportAdapter implements Transport {
 
   async startAudioCapture(config?: AudioCaptureConfig): Promise<void> {
     await this.requireClient().startMicrophone(config ? {
-      sampleRate: config.sampleRate,
-      channelCount: config.channelCount,
       echoCancellation: config.echoCancellation,
       noiseSuppression: config.noiseSuppression,
       autoGainControl: config.autoGainControl,
@@ -119,13 +121,11 @@ export class MoqTransportAdapter implements Transport {
   }
 
   muteMic(): void {
-    // PanaudiaMoqClient doesn't have a direct muteMic — stop microphone
-    this.requireClient().stopMicrophone();
+    this.requireClient().setMicEnabled(false);
   }
 
   unmuteMic(): void {
-    // Re-start microphone to unmute
-    this.requireClient().startMicrophone();
+    this.requireClient().setMicEnabled(true);
   }
 
   async publishState(state: EntityInfo3): Promise<void> {

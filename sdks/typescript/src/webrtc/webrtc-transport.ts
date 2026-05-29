@@ -96,13 +96,14 @@ export class WebRtcTransport implements Transport {
 
     this.setupPeerConnection();
 
-    // Capture mic BEFORE signaling — tracks must be in the SDP offer/answer
+    // Capture mic BEFORE signaling — tracks must be in the SDP offer/answer.
     // Bluetooth mic check is handled by PanaudiaClient.connect() before
     // transport setup, so both MOQ and WebRTC behave identically.
+    const audio = config.audio;
     const constraints: MediaTrackConstraints = {
-      autoGainControl: false,
-      echoCancellation: false,
-      noiseSuppression: false,
+      autoGainControl: audio?.autoGainControl ?? false,
+      echoCancellation: audio?.echoCancellation ?? false,
+      noiseSuppression: audio?.noiseSuppression ?? false,
       sampleRate: 48000,
       ...(this.microphoneId ? { deviceId: { exact: this.microphoneId } } : {}),
     };
@@ -173,7 +174,7 @@ export class WebRtcTransport implements Transport {
       autoGainControl: config?.autoGainControl ?? false,
       echoCancellation: config?.echoCancellation ?? false,
       noiseSuppression: config?.noiseSuppression ?? false,
-      sampleRate: config?.sampleRate ?? 48000,
+      sampleRate: 48000,
       ...(this.microphoneId ? { deviceId: { exact: this.microphoneId } } : {}),
     };
 

@@ -73,10 +73,11 @@ class WebRtcTransport {
       ]
     });
     this.setupPeerConnection();
+    const audio = config.audio;
     const constraints = {
-      autoGainControl: false,
-      echoCancellation: false,
-      noiseSuppression: false,
+      autoGainControl: (audio == null ? void 0 : audio.autoGainControl) ?? false,
+      echoCancellation: (audio == null ? void 0 : audio.echoCancellation) ?? false,
+      noiseSuppression: (audio == null ? void 0 : audio.noiseSuppression) ?? false,
       sampleRate: 48e3,
       ...this.microphoneId ? { deviceId: { exact: this.microphoneId } } : {}
     };
@@ -127,7 +128,7 @@ class WebRtcTransport {
       autoGainControl: (config == null ? void 0 : config.autoGainControl) ?? false,
       echoCancellation: (config == null ? void 0 : config.echoCancellation) ?? false,
       noiseSuppression: (config == null ? void 0 : config.noiseSuppression) ?? false,
-      sampleRate: (config == null ? void 0 : config.sampleRate) ?? 48e3,
+      sampleRate: 48e3,
       ...this.microphoneId ? { deviceId: { exact: this.microphoneId } } : {}
     };
     this.micStream = await navigator.mediaDevices.getUserMedia({ audio: constraints });

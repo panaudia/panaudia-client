@@ -144,6 +144,12 @@ export declare class AudioPublisher {
      */
     stop(): void;
     /**
+     * Enable or disable the mic tracks. Disabling makes the source emit
+     * silent samples — the encoder + track publisher stay alive, MOQ
+     * frames keep flowing as Opus DTX comfort-noise.
+     */
+    setMicEnabled(enabled: boolean): void;
+    /**
      * Release all resources
      */
     dispose(): void;

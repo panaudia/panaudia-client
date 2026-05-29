@@ -1054,6 +1054,17 @@ class AudioPublisher {
     );
   }
   /**
+   * Enable or disable the mic tracks. Disabling makes the source emit
+   * silent samples — the encoder + track publisher stay alive, MOQ
+   * frames keep flowing as Opus DTX comfort-noise.
+   */
+  setMicEnabled(enabled) {
+    if (!this.mediaStream) return;
+    for (const track of this.mediaStream.getAudioTracks()) {
+      track.enabled = enabled;
+    }
+  }
+  /**
    * Release all resources
    */
   dispose() {
@@ -3772,6 +3783,15 @@ class PanaudiaMoqClient {
     return ((_a = this.audioPublisher) == null ? void 0 : _a.getState()) === AudioPublisherState.RECORDING;
   }
   /**
+   * Enable or disable mic capture without tearing down the publisher.
+   * Disabled tracks emit silence; the encoder and track publisher stay
+   * alive so MOQ frames keep flowing as Opus DTX.
+   */
+  setMicEnabled(enabled) {
+    var _a;
+    (_a = this.audioPublisher) == null ? void 0 : _a.setMicEnabled(enabled);
+  }
+  /**
    * Pause microphone recording
    */
   pauseMicrophone() {
@@ -4051,9 +4071,13 @@ class MoqTransportAdapter {
     }
     this.pendingHandlers = [];
     await this.client.connect();
-    await this.client.startMicrophone(
-      this.microphoneId ? { deviceId: this.microphoneId } : void 0
-    );
+    const audio = config.audio;
+    await this.client.startMicrophone({
+      ...this.microphoneId ? { deviceId: this.microphoneId } : {},
+      ...(audio == null ? void 0 : audio.echoCancellation) !== void 0 ? { echoCancellation: audio.echoCancellation } : {},
+      ...(audio == null ? void 0 : audio.noiseSuppression) !== void 0 ? { noiseSuppression: audio.noiseSuppression } : {},
+      ...(audio == null ? void 0 : audio.autoGainControl) !== void 0 ? { autoGainControl: audio.autoGainControl } : {}
+    });
     await this.client.startPlayback();
   }
   async disconnect() {
@@ -4074,8 +4098,6 @@ class MoqTransportAdapter {
   }
   async startAudioCapture(config) {
     await this.requireClient().startMicrophone(config ? {
-      sampleRate: config.sampleRate,
-      channelCount: config.channelCount,
       echoCancellation: config.echoCancellation,
       noiseSuppression: config.noiseSuppression,
       autoGainControl: config.autoGainControl
@@ -4101,10 +4123,10 @@ class MoqTransportAdapter {
     return ((_a = this.client) == null ? void 0 : _a.getVolume()) ?? 1;
   }
   muteMic() {
-    this.requireClient().stopMicrophone();
+    this.requireClient().setMicEnabled(false);
   }
   unmuteMic() {
-    this.requireClient().startMicrophone();
+    this.requireClient().setMicEnabled(true);
   }
   async publishState(state) {
     const client = this.requireClient();

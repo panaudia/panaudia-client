@@ -29,10 +29,32 @@ new PanaudiaClient({
   entityId?: string,           // Extracted from JWT if not provided
   queryParams?: Record<string, string>,  // Additional connection URL query params
   microphoneId?: string,       // Microphone device ID (see listMicrophones())
+  audio?: AudioCaptureConfig,  // Mic capture constraints. See "Audio capture options" below.
   debug?: boolean,             // Enable debug logging. Default: false
   worldBounds?: { min: number; max: number },  // Position normalization bounds
 })
 ```
+
+#### Audio capture options
+
+The `audio` field toggles the browser's audio-processing pipeline for
+the captured microphone on both MOQ and WebRTC transports. All fields
+are optional and default to `false`.
+
+```typescript
+interface AudioCaptureConfig {
+  echoCancellation?: boolean;  // Default: false
+  noiseSuppression?: boolean;  // Default: false
+  autoGainControl?: boolean;   // Default: false
+}
+```
+
+Defaults preserve the raw mic signal for spatial mixing. Set any flag
+to `true` to opt in to the browser's built-in processing — useful for
+noisy environments or when you don't need bit-accurate audio (e.g.
+voice-only calls).
+
+Sample rate is fixed at 48 kHz and channel count is left to the browser.
 
 ### Static Methods
 

@@ -16,6 +16,9 @@ export interface TransportConfig {
     queryParams?: Record<string, string>;
     /** Microphone device ID. Default: system default. */
     microphoneId?: string;
+    /** Audio capture constraints (echoCancellation, noiseSuppression,
+     *  autoGainControl). All three flags default to false. */
+    audio?: AudioCaptureConfig;
     /** Enable debug logging. Default: false. */
     debug?: boolean;
 }
@@ -23,8 +26,6 @@ export interface TransportConfig {
  * Audio capture configuration (common subset for MOQ and WebRTC).
  */
 export interface AudioCaptureConfig {
-    sampleRate?: number;
-    channelCount?: number;
     echoCancellation?: boolean;
     noiseSuppression?: boolean;
     autoGainControl?: boolean;

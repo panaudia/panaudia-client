@@ -113,6 +113,28 @@ const mics = await PanaudiaClient.listMicrophones();
 const recommended = await PanaudiaClient.getRecommendedMicrophone();
 ```
 
+### Microphone Capture Options
+
+By default the client captures raw mic audio — no echo cancellation, no
+noise suppression, no auto gain control. This preserves the signal for
+spatial mixing. You can opt in to the browser's processing by passing
+an `audio` config:
+
+```typescript
+const client = new PanaudiaClient({
+  serverUrl,
+  ticket,
+  audio: {
+    echoCancellation: true,   // Default: false
+    noiseSuppression: true,   // Default: false
+    autoGainControl: true,    // Default: false
+  },
+});
+```
+
+These flags apply to both MOQ and WebRTC transports. Sample rate is
+fixed at 48 kHz.
+
 ### Local Development (no gateway)
 
 ```typescript
