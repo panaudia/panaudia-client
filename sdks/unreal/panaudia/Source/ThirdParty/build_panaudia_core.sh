@@ -62,8 +62,10 @@ mkdir -p "$DEST/lib/Mac"
 # Copy public headers
 cp "$CORE_SRC"/include/panaudia/*.h "$DEST/include/panaudia/"
 
-# Copy static library
+# Copy static libraries
 cp "$CORE_SRC/build/libpanaudia-core.a" "$DEST/lib/Mac/"
+# panaudia-statecache — attribute cache/merge layer above the core.
+cp "$CORE_SRC/build/libpanaudia-statecache.a" "$DEST/lib/Mac/"
 
 # Copy libopus (static — transitive dep not embedded in .a)
 cp "$CORE_SRC/build/_deps/opus-build/libopus.a" "$DEST/lib/Mac/"

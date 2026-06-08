@@ -18,10 +18,12 @@
 #include "Async/Async.h"
 
 #include <panaudia/core.h>
-#include <panaudia/cache_map.h>
+#include <panaudia/topic_merger.h>  // panaudia-statecache: attribute cache + merge
 
 #include <cstring>
+#include <memory>
 #include <string>
+#include <vector>
 
 #include "PanaudiaProceduralSound.h"
 
@@ -42,6 +44,11 @@ struct FPanaudiaAudioComponentPrivate
     panaudia::TrackHandle* StateInputTrack = nullptr;
     panaudia::TrackHandle* ControlInputTrack = nullptr;
 
+    // Attribute cache/merge (panaudia-statecache). Owns the merged CacheMap;
+    // survives reconnect so the resume-opID keeps advancing. The transport
+    // core is unaware of it — we feed it inbound envelope bytes ourselves.
+    std::unique_ptr<panaudia::TopicMerger> AttributesMerger;
+
     Audio::FAudioCapture AudioCapture;
     bool bIsCapturing = false;
 
@@ -55,8 +62,7 @@ struct FPanaudiaAudioComponentPrivate
 static void PanaudiaCoreStatusChanged_Impl(panaudia::ConnectionState, const char*, void*);
 static void PanaudiaCoreDataReceived_Impl(panaudia::TrackHandle*, const uint8_t*, uint32_t, void*);
 static void PanaudiaCoreLog_Impl(panaudia::LogLevel, const char*, void*);
-static void PanaudiaCoreCacheValues_Impl(panaudia::TrackHandle*, const panaudia::CacheValueView*, uint32_t, uint64_t, void*);
-static void PanaudiaCoreCacheRemoved_Impl(panaudia::TrackHandle*, const char* const*, uint32_t, uint64_t, void*);
+static void PanaudiaCoreSubscribeParams_Impl(panaudia::TrackHandle*, std::vector<panaudia::SubscribeParam>&, void*);
 
 // Helper: build an FString from a length-prefixed UTF-8 byte range. UE's
 // UTF8_TO_TCHAR macro assumes NUL termination — these views are not.
@@ -222,6 +228,9 @@ void UPanaudiaAudioComponent::EndPlay(const EEndPlayReason::Type EndPlayReason)
     P->StateInputTrack = nullptr;
     P->ControlInputTrack = nullptr;
 
+    // Drop the attribute cache (Core is gone; no more apply_envelope calls).
+    P->AttributesMerger.reset();
+
     Super::EndPlay(EndPlayReason);
 }
 
@@ -270,14 +279,10 @@ void UPanaudiaAudioComponent::ConfigureCore(const FString& ServerURL, const FStr
     Config.log_ctx = this;
     Config.log_level = panaudia::LogLevel::Info;
 
-    // Cache-aware callbacks for the attributes_output track (and any
-    // other cached track configured below). These do NOT replace the
-    // raw data_recv_callback above — they fire instead of it for
-    // payloads that decode as cache envelopes; raw payloads fall through.
-    Config.cache_values_callback = &PanaudiaCoreCacheValues_Impl;
-    Config.cache_values_ctx = this;
-    Config.cache_removed_callback = &PanaudiaCoreCacheRemoved_Impl;
-    Config.cache_removed_ctx = this;
+    // Lets us attach the cache-resume parameter to each (re)SUBSCRIBE. The
+    // core forwards it opaquely; the resume value comes from our own merger.
+    Config.subscribe_params_callback = &PanaudiaCoreSubscribeParams_Impl;
+    Config.subscribe_params_ctx = this;
 
     // --- Track definitions ---
 
@@ -322,19 +327,22 @@ void UPanaudiaAudioComponent::ConfigureCore(const FString& ServerURL, const FStr
             Config.tracks.push_back(T);
         }
 
-        // Attributes output (inbound — remote node attributes).
-        // Marked cached: server delivers binary cache envelopes that the
-        // core decodes + merges; values surface via OnAttributeValuesChanged
-        // / OnAttributesRemoved on the game thread.
+        // Attributes output (inbound — remote node attributes). A plain
+        // opaque data track: the server delivers binary cache envelopes that
+        // WE decode + merge via AttributesMerger (panaudia-statecache) in the
+        // data callback, surfacing values on the game thread.
         {
             panaudia::TrackConfig T;
             T.name = "attributes_output";
             T.moq_namespace = {"out", "attributes", NodeIdStr};
             T.direction = panaudia::TrackDirection::Inbound;
             T.type = panaudia::TrackType::Data;
-            T.cached = true;
             Config.tracks.push_back(T);
         }
+
+        // Merger for the attributes topic. Owns the merged cache and the
+        // resume-opID; persists across reconnects.
+        P->AttributesMerger = std::make_unique<panaudia::TopicMerger>();
     }
 
     // State input (outbound — our position → server)
@@ -422,6 +430,56 @@ static void PanaudiaCoreDataReceived_Impl(
     }
     else if (Track == Self->P->AttributesOutputTrack)
     {
+        // Attribute cache envelopes: decode + merge here (panaudia-statecache).
+        // Mirrors the old core behaviour — envelopes surface as merged
+        // attribute values/removals; non-envelope payloads fall through to the
+        // raw OnDataTrackReceived path. Runs on the core's datagram thread; the
+        // merger is internally synchronised.
+        if (Self->P->AttributesMerger)
+        {
+            auto Result = Self->P->AttributesMerger->apply_envelope(
+                Data, static_cast<size_t>(DataLen));
+            if (Result.has_value())
+            {
+                const int64 OpId =
+                    static_cast<int64>(Self->P->AttributesMerger->resume_op_id());
+
+                if (!Result->accepted.empty())
+                {
+                    TArray<FPanaudiaAttributeValue> Values;
+                    Values.Reserve(static_cast<int32>(Result->accepted.size()));
+                    for (const auto& V : Result->accepted)
+                    {
+                        FPanaudiaAttributeValue Out;
+                        Out.Key   = FStringFromStdString(V.key);
+                        Out.Value = FStringFromStdString(V.value);
+                        Out.OpId  = OpId;
+                        Values.Add(MoveTemp(Out));
+                    }
+                    AsyncTask(ENamedThreads::GameThread, [Self, Values = MoveTemp(Values)]()
+                    {
+                        if (!IsValid(Self)) return;
+                        Self->OnAttributeValuesChanged.Broadcast(Values);
+                    });
+                }
+
+                if (!Result->tombstoned.empty())
+                {
+                    TArray<FString> Removed;
+                    Removed.Reserve(static_cast<int32>(Result->tombstoned.size()));
+                    for (const auto& K : Result->tombstoned)
+                    {
+                        Removed.Add(FStringFromStdString(K));
+                    }
+                    AsyncTask(ENamedThreads::GameThread, [Self, Removed = MoveTemp(Removed)]()
+                    {
+                        if (!IsValid(Self)) return;
+                        Self->OnAttributesRemoved.Broadcast(Removed);
+                    });
+                }
+                return;  // envelope consumed
+            }
+        }
         TrackName = TEXT("attributes_output");
     }
     else
@@ -463,63 +521,33 @@ static void PanaudiaCoreLog_Impl(
 }
 
 // ----------------------------------------------------------------------------
-// Cache-aware delivery (attributes_output and any other cached track)
+// Subscribe params — attach the cache-resume parameter (panaudia-statecache)
 // ----------------------------------------------------------------------------
 //
-// Both callbacks fire on the core's datagram thread. The CacheValueView
-// pointers reference MergeBatchResult buffers that go out of scope as
-// soon as we return — copy into FStrings here, then marshal the TArray
-// to the game thread for delegate broadcast.
+// Called by the core on its session thread before each (re)SUBSCRIBE. We
+// return the opaque resume parameter (key 0xFF01, 8-byte BE op_id) computed
+// from our merger's current state, so reconnects only refetch unseen ops.
+// The core forwards it verbatim and never interprets it.
 
-static void PanaudiaCoreCacheValues_Impl(
-    panaudia::TrackHandle* /*Track*/,
-    const panaudia::CacheValueView* Values,
-    uint32_t Count,
-    uint64_t OpId,
+static void PanaudiaCoreSubscribeParams_Impl(
+    panaudia::TrackHandle* Track,
+    std::vector<panaudia::SubscribeParam>& Out,
     void* Ctx)
 {
+    // Runs on the core's session thread (not the game thread), so avoid
+    // UObject-internal checks like IsValid — Self outlives the Core, which
+    // owns this callback. The merger's resume_op_id() is thread-safe.
     auto* Self = static_cast<UPanaudiaAudioComponent*>(Ctx);
+    if (!Self || !Self->P) return;
 
-    TArray<FPanaudiaAttributeValue> Out;
-    Out.Reserve(static_cast<int32>(Count));
-    for (uint32_t i = 0; i < Count; ++i)
+    if (Track == Self->P->AttributesOutputTrack && Self->P->AttributesMerger)
     {
-        FPanaudiaAttributeValue V;
-        V.Key   = FStringFromUtf8(Values[i].key,   Values[i].key_len);
-        V.Value = FStringFromUtf8(Values[i].value, Values[i].value_len);
-        V.OpId  = static_cast<int64>(OpId);
-        Out.Add(MoveTemp(V));
+        panaudia::SubscribeParam Param;
+        Param.key = panaudia::kResumeParamKey;
+        Param.value = panaudia::encode_resume_op_id(
+            Self->P->AttributesMerger->resume_op_id());
+        Out.push_back(std::move(Param));
     }
-
-    AsyncTask(ENamedThreads::GameThread, [Self, Out = MoveTemp(Out)]()
-    {
-        if (!IsValid(Self)) return;
-        Self->OnAttributeValuesChanged.Broadcast(Out);
-    });
-}
-
-static void PanaudiaCoreCacheRemoved_Impl(
-    panaudia::TrackHandle* /*Track*/,
-    const char* const* Keys,
-    uint32_t Count,
-    uint64_t /*OpId*/,
-    void* Ctx)
-{
-    auto* Self = static_cast<UPanaudiaAudioComponent*>(Ctx);
-
-    TArray<FString> Out;
-    Out.Reserve(static_cast<int32>(Count));
-    for (uint32_t i = 0; i < Count; ++i)
-    {
-        const char* K = Keys[i];
-        Out.Add(FStringFromUtf8(K, K ? static_cast<uint32_t>(std::strlen(K)) : 0));
-    }
-
-    AsyncTask(ENamedThreads::GameThread, [Self, Out = MoveTemp(Out)]()
-    {
-        if (!IsValid(Self)) return;
-        Self->OnAttributesRemoved.Broadcast(Out);
-    });
 }
 
 // ============================================================================
@@ -528,12 +556,10 @@ static void PanaudiaCoreCacheRemoved_Impl(
 
 bool UPanaudiaAudioComponent::GetAttribute(const FString& Key, FString& OutValue) const
 {
-    if (!P || !P->Core || !P->AttributesOutputTrack) return false;
-    const auto* Map = P->Core->get_cache_map(P->AttributesOutputTrack);
-    if (!Map) return false;
+    if (!P || !P->AttributesMerger) return false;
 
     const std::string KeyStr(TCHAR_TO_UTF8(*Key));
-    auto Entry = Map->get(KeyStr);
+    auto Entry = P->AttributesMerger->get(KeyStr);
     if (!Entry) return false;
 
     OutValue = FStringFromStdString(Entry->value);
@@ -544,14 +570,12 @@ TArray<FPanaudiaAttributeValue>
 UPanaudiaAudioComponent::GetAttributesForNode(const FString& InNodeId) const
 {
     TArray<FPanaudiaAttributeValue> Result;
-    if (!P || !P->Core || !P->AttributesOutputTrack) return Result;
-    const auto* Map = P->Core->get_cache_map(P->AttributesOutputTrack);
-    if (!Map) return Result;
+    if (!P || !P->AttributesMerger) return Result;
 
     std::string Prefix(TCHAR_TO_UTF8(*InNodeId));
     Prefix.push_back('.');
 
-    Map->for_each_prefix(Prefix,
+    P->AttributesMerger->for_each_prefix(Prefix,
         [&Result](const std::string& K, const panaudia::CacheEntry& E)
         {
             FPanaudiaAttributeValue V;
@@ -567,11 +591,9 @@ TArray<FPanaudiaAttributeValue>
 UPanaudiaAudioComponent::GetAllAttributes() const
 {
     TArray<FPanaudiaAttributeValue> Result;
-    if (!P || !P->Core || !P->AttributesOutputTrack) return Result;
-    const auto* Map = P->Core->get_cache_map(P->AttributesOutputTrack);
-    if (!Map) return Result;
+    if (!P || !P->AttributesMerger) return Result;
 
-    Map->for_each(
+    P->AttributesMerger->for_each(
         [&Result](const std::string& K, const panaudia::CacheEntry& E)
         {
             FPanaudiaAttributeValue V;

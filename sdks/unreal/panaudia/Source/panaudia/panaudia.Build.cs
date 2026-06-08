@@ -45,6 +45,9 @@ public class Panaudia : ModuleRules
             string CorePath = Path.Combine(ThirdPartyPath, "panaudia-core");
             PublicIncludePaths.Add(Path.Combine(CorePath, "include"));
             PublicAdditionalLibraries.Add(Path.Combine(CorePath, "lib/Mac/libpanaudia-core.a"));
+            // panaudia-statecache — attribute cache/merge (sits above the core;
+            // owns nlohmann/json, which is header-only so no extra lib to link).
+            PublicAdditionalLibraries.Add(Path.Combine(CorePath, "lib/Mac/libpanaudia-statecache.a"));
             PublicAdditionalLibraries.Add(Path.Combine(CorePath, "lib/Mac/libopus.a"));
             PublicAdditionalLibraries.Add(Path.Combine(CorePath, "lib/Mac/libmsquic.a"));
 
