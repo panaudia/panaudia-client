@@ -1182,6 +1182,12 @@ var MoqErrorCode = /* @__PURE__ */ ((MoqErrorCode2) => {
   MoqErrorCode2[MoqErrorCode2["INVALID_TOKEN"] = 1027] = "INVALID_TOKEN";
   return MoqErrorCode2;
 })(MoqErrorCode || {});
+var MoqGroupOrder = /* @__PURE__ */ ((MoqGroupOrder2) => {
+  MoqGroupOrder2[MoqGroupOrder2["NONE"] = 0] = "NONE";
+  MoqGroupOrder2[MoqGroupOrder2["ASCENDING"] = 1] = "ASCENDING";
+  MoqGroupOrder2[MoqGroupOrder2["DESCENDING"] = 2] = "DESCENDING";
+  return MoqGroupOrder2;
+})(MoqGroupOrder || {});
 var PanaudiaTrackType = /* @__PURE__ */ ((PanaudiaTrackType2) => {
   PanaudiaTrackType2["AUDIO_INPUT"] = "in/audio/opus-mono";
   PanaudiaTrackType2["AUDIO_OUTPUT"] = "out/audio/opus-stereo";
@@ -1380,30 +1386,65 @@ function wrapWithLengthFrame(messageType, content) {
   result.set(content, typeBytes.length + 2);
   return result;
 }
-function buildClientSetup(supportedVersions, role, path, maxSubscribeId) {
-  const contentBuilder = new MessageBuilder();
-  contentBuilder.writeVarint(supportedVersions.length);
-  for (const version of supportedVersions) {
-    contentBuilder.writeVarint(version);
+function encodeParams(builder, params) {
+  const sorted = [...params].sort((a, b2) => a.type - b2.type);
+  builder.writeVarint(sorted.length);
+  let prev = 0;
+  for (const p of sorted) {
+    builder.writeVarint(p.type - prev);
+    prev = p.type;
+    if (p.type % 2 === 1) {
+      const bytes = p.value;
+      builder.writeVarint(bytes.length);
+      builder.writeRaw(bytes);
+    } else {
+      builder.writeVarint(p.value);
+    }
   }
-  let numParams = 1;
-  if (path !== void 0) numParams++;
-  if (maxSubscribeId !== void 0) numParams++;
-  contentBuilder.writeVarint(numParams);
-  contentBuilder.writeVarint(MoqSetupParameter.ROLE);
-  contentBuilder.writeVarint(role);
+}
+function decodeParams(data, offset = 0) {
+  let pos = offset;
+  const { value: count, bytesRead: countBytes } = decodeVarint(data, pos);
+  pos += countBytes;
+  const params = /* @__PURE__ */ new Map();
+  let prev = 0;
+  for (let i2 = 0; i2 < Number(count); i2++) {
+    const { value: delta, bytesRead: deltaBytes } = decodeVarint(data, pos);
+    pos += deltaBytes;
+    const type = prev + Number(delta);
+    prev = type;
+    if (type % 2 === 1) {
+      const { value: blob, bytesRead: blobBytes } = decodeBytes(data, pos);
+      pos += blobBytes;
+      params.set(type, blob);
+    } else {
+      const { value: v, bytesRead: vBytes } = decodeVarint(data, pos);
+      pos += vBytes;
+      params.set(type, v);
+    }
+  }
+  return { params, bytesRead: pos - offset };
+}
+function buildClientSetup(_supportedVersions, _role, path, maxSubscribeId) {
+  const contentBuilder = new MessageBuilder();
+  const params = [];
   if (path !== void 0) {
-    contentBuilder.writeVarint(MoqSetupParameter.PATH);
-    const pathBytes = textEncoder.encode(path);
-    contentBuilder.writeVarint(pathBytes.length);
-    contentBuilder.writeRaw(pathBytes);
+    params.push({ type: MoqSetupParameter.PATH, value: textEncoder.encode(path) });
   }
   if (maxSubscribeId !== void 0) {
-    contentBuilder.writeVarint(MoqSetupParameter.MAX_SUBSCRIBE_ID);
-    contentBuilder.writeVarint(maxSubscribeId);
+    params.push({ type: MoqSetupParameter.MAX_SUBSCRIBE_ID, value: BigInt(maxSubscribeId) });
   }
+  encodeParams(contentBuilder, params);
   return wrapWithLengthFrame(MoqMessageType.CLIENT_SETUP, contentBuilder.build());
 }
+const SUB_PARAM_FORWARD = 16;
+const SUB_PARAM_PRIORITY = 32;
+const SUB_PARAM_FILTER = 33;
+const SUB_PARAM_GROUP_ORDER = 34;
+const SUB_OK_PARAM_EXPIRES = 8;
+const SUB_OK_PARAM_LARGEST = 9;
+const PARAM_AUTHORIZATION = 3;
+const PARAM_RESUME_HLC = 65281;
 function buildSubscribe(subscription) {
   const contentBuilder = new MessageBuilder();
   contentBuilder.writeVarint(subscription.subscribeId);
@@ -1412,30 +1453,22 @@ function buildSubscribe(subscription) {
     contentBuilder.writeString(part);
   }
   contentBuilder.writeString(subscription.trackName);
-  const priority = subscription.subscriberPriority ?? 128;
-  contentBuilder.writeRaw(new Uint8Array([priority]));
-  const groupOrder = subscription.groupOrder ?? 0;
-  contentBuilder.writeRaw(new Uint8Array([groupOrder]));
-  const forward = subscription.forward ?? 0;
-  contentBuilder.writeRaw(new Uint8Array([forward]));
-  contentBuilder.writeVarint(subscription.filterType);
-  let paramCount = 0;
-  if (subscription.authorization) paramCount++;
-  if (subscription.resumeOpId !== void 0 && subscription.resumeOpId > 0n) paramCount++;
-  contentBuilder.writeVarint(paramCount);
+  const params = [];
+  params.push({ type: SUB_PARAM_PRIORITY, value: BigInt(subscription.subscriberPriority ?? 128) });
+  params.push({ type: SUB_PARAM_GROUP_ORDER, value: BigInt(subscription.groupOrder ?? MoqGroupOrder.ASCENDING) });
+  params.push({ type: SUB_PARAM_FORWARD, value: BigInt(subscription.forward ?? 1) });
+  const filterBuilder = new MessageBuilder();
+  filterBuilder.writeVarint(subscription.filterType);
+  params.push({ type: SUB_PARAM_FILTER, value: filterBuilder.build() });
   if (subscription.authorization) {
-    contentBuilder.writeVarint(3);
-    const authBytes = textEncoder.encode(subscription.authorization);
-    contentBuilder.writeVarint(authBytes.length);
-    contentBuilder.writeRaw(authBytes);
+    params.push({ type: PARAM_AUTHORIZATION, value: textEncoder.encode(subscription.authorization) });
   }
   if (subscription.resumeOpId !== void 0 && subscription.resumeOpId > 0n) {
-    contentBuilder.writeVarint(65281);
-    contentBuilder.writeVarint(8);
     const opIdBuf = new Uint8Array(8);
     new DataView(opIdBuf.buffer).setBigUint64(0, subscription.resumeOpId, false);
-    contentBuilder.writeRaw(opIdBuf);
+    params.push({ type: PARAM_RESUME_HLC, value: opIdBuf });
   }
+  encodeParams(contentBuilder, params);
   return wrapWithLengthFrame(MoqMessageType.SUBSCRIBE, contentBuilder.build());
 }
 function buildAnnounce(announcement) {
@@ -1445,15 +1478,13 @@ function buildAnnounce(announcement) {
   for (const part of announcement.namespace) {
     contentBuilder.writeString(part);
   }
-  if (announcement.parameters && announcement.parameters.size > 0) {
-    contentBuilder.writeVarint(announcement.parameters.size);
+  const params = [];
+  if (announcement.parameters) {
     for (const [key, value] of announcement.parameters) {
-      contentBuilder.writeVarint(key);
-      contentBuilder.writeBytes(value);
+      params.push({ type: key, value });
     }
-  } else {
-    contentBuilder.writeVarint(0);
   }
+  encodeParams(contentBuilder, params);
   return wrapWithLengthFrame(MoqMessageType.ANNOUNCE, contentBuilder.build());
 }
 function buildUnsubscribe(subscribeId) {
@@ -1484,29 +1515,13 @@ function parseMessageType(data) {
   return { type: Number(value), bytesRead };
 }
 function parseServerSetup(data, offset = 0) {
-  let pos = offset;
-  const { value: version, bytesRead: versionBytes } = decodeVarint(data, pos);
-  pos += versionBytes;
-  const { value: numParams, bytesRead: numParamsBytes } = decodeVarint(data, pos);
-  pos += numParamsBytes;
+  const { params } = decodeParams(data, offset);
   const parameters = /* @__PURE__ */ new Map();
-  for (let i2 = 0; i2 < Number(numParams); i2++) {
-    const { value: paramType, bytesRead: paramTypeBytes } = decodeVarint(data, pos);
-    pos += paramTypeBytes;
-    const typeNum = Number(paramType);
-    if (typeNum % 2 === 0) {
-      const { value: paramValue, bytesRead: paramValueBytes } = decodeVarint(data, pos);
-      pos += paramValueBytes;
-      const valueBytes = encodeVarint(paramValue);
-      parameters.set(typeNum, valueBytes);
-    } else {
-      const { value: paramValue, bytesRead: paramValueBytes } = decodeBytes(data, pos);
-      pos += paramValueBytes;
-      parameters.set(typeNum, paramValue);
-    }
+  for (const [type, value] of params) {
+    parameters.set(type, value instanceof Uint8Array ? value : encodeVarint(value));
   }
   return {
-    selectedVersion: Number(version),
+    selectedVersion: MOQ_TRANSPORT_VERSION,
     parameters
   };
 }
@@ -1516,32 +1531,25 @@ function parseSubscribeOk(data, offset = 0) {
   pos += subIdBytes;
   const { value: trackAlias, bytesRead: aliasBytes } = decodeVarint(data, pos);
   pos += aliasBytes;
-  const { value: expires, bytesRead: expiresBytes } = decodeVarint(data, pos);
-  pos += expiresBytes;
-  if (pos >= data.length) {
-    throw new Error("Not enough data for GroupOrder in SUBSCRIBE_OK");
-  }
-  const groupOrder = data[pos];
-  pos += 1;
-  if (pos >= data.length) {
-    throw new Error("Not enough data for ContentExists in SUBSCRIBE_OK");
-  }
-  const contentExists = data[pos] !== 0;
-  pos += 1;
+  const { params } = decodeParams(data, pos);
   const result = {
     subscribeId: Number(subscribeId),
     trackAlias: Number(trackAlias),
-    expires,
-    groupOrder,
-    contentExists
+    expires: 0n,
+    groupOrder: 0,
+    contentExists: false
   };
-  if (result.contentExists) {
-    const { value: largestGroupId, bytesRead: groupIdBytes } = decodeVarint(data, pos);
-    pos += groupIdBytes;
-    const { value: largestObjectId, bytesRead: objectIdBytes } = decodeVarint(data, pos);
-    pos += objectIdBytes;
-    result.largestGroupId = largestGroupId;
-    result.largestObjectId = largestObjectId;
+  const expires = params.get(SUB_OK_PARAM_EXPIRES);
+  if (typeof expires === "bigint") result.expires = expires;
+  const groupOrder = params.get(SUB_PARAM_GROUP_ORDER);
+  if (typeof groupOrder === "bigint") result.groupOrder = Number(groupOrder);
+  const largest = params.get(SUB_OK_PARAM_LARGEST);
+  if (largest instanceof Uint8Array) {
+    result.contentExists = true;
+    const g2 = decodeVarint(largest, 0);
+    const o = decodeVarint(largest, g2.bytesRead);
+    result.largestGroupId = g2.value;
+    result.largestObjectId = o.value;
   }
   return result;
 }
@@ -1551,15 +1559,14 @@ function parseSubscribeError(data, offset = 0) {
   pos += subIdBytes;
   const { value: errorCode, bytesRead: errorCodeBytes } = decodeVarint(data, pos);
   pos += errorCodeBytes;
-  const { value: reasonPhrase, bytesRead: reasonBytes } = decodeString(data, pos);
-  pos += reasonBytes;
-  const { value: trackAlias, bytesRead: aliasBytes } = decodeVarint(data, pos);
-  pos += aliasBytes;
+  const { bytesRead: retryBytes } = decodeVarint(data, pos);
+  pos += retryBytes;
+  const { value: reasonPhrase } = decodeString(data, pos);
   return {
     subscribeId: Number(subscribeId),
     errorCode: Number(errorCode),
     reasonPhrase,
-    trackAlias: Number(trackAlias)
+    trackAlias: 0
   };
 }
 function parseAnnounceOk(data, offset = 0) {
@@ -1610,7 +1617,7 @@ function parseObjectDatagram(data, offset = 0) {
     payload
   };
 }
-const MOQ_TRANSPORT_VERSION = 4278190080 + 11;
+const MOQ_TRANSPORT_VERSION = 4278190080 + 16;
 const PENDING_DATAGRAM_MAX_BYTES = 1 * 1024 * 1024;
 class MoqConnection {
   constructor(serverUrl) {
@@ -1669,6 +1676,9 @@ class MoqConnection {
         requireUnreliable: true,
         // We use datagrams for audio
         congestionControl: "low-latency",
+        // Negotiate the MOQ draft-16 subprotocol over WebTransport so the server
+        // selects draft-16 (it falls back to draft-14 if no subprotocol is set).
+        protocols: ["moqt-16"],
         ...options
       };
       this.transport = new WebTransport(this.serverUrl, wtOptions);

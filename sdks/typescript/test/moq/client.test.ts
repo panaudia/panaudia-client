@@ -171,23 +171,24 @@ describe('SUBSCRIBE Message Building', () => {
 // ============================================================================
 
 describe('CLIENT_SETUP Message Building', () => {
-  it('should build CLIENT_SETUP with PUBSUB role', () => {
+  it('should build CLIENT_SETUP (draft-16: no version list, body is a param list)', () => {
     const msg = buildClientSetup([MOQ_TRANSPORT_VERSION], MoqRole.PUBSUB);
 
     const { type, bytesRead } = parseMessageType(msg);
     expect(type).toBe(0x20); // CLIENT_SETUP
 
-    // Skip 2-byte length prefix, then parse number of versions
+    // draft-16 has no version list: after the 2-byte length prefix the body
+    // begins directly with the parameter count (0 when no path/maxSubscribeId).
     const contentOffset = bytesRead + 2;
-    const { value: numVersions } = decodeVarint(msg, contentOffset);
-    expect(Number(numVersions)).toBe(1);
+    const { value: numParams } = decodeVarint(msg, contentOffset);
+    expect(Number(numParams)).toBe(0);
   });
 
-  it('should include version number', () => {
+  it('should not carry an in-band version number (draft-16)', () => {
     const msg = buildClientSetup([MOQ_TRANSPORT_VERSION], MoqRole.SUBSCRIBER);
 
-    // Should contain our version
-    expect(msg.length).toBeGreaterThan(5);
+    // No version list/field on the wire; minimal CLIENT_SETUP is 4 bytes.
+    expect(msg.length).toBe(4);
   });
 
   it('should support multiple roles', () => {
@@ -263,9 +264,9 @@ describe('Error Codes', () => {
 // ============================================================================
 
 describe('Protocol Version', () => {
-  it('should be draft-11', () => {
-    // 0xff000000 is the draft marker, 11 is the draft number
-    expect(MOQ_TRANSPORT_VERSION).toBe(0xff00000b);
+  it('should be draft-16', () => {
+    // 0xff000000 is the draft marker, 0x10 (16) is the draft number
+    expect(MOQ_TRANSPORT_VERSION).toBe(0xff000010);
   });
 
   it('should encode correctly in CLIENT_SETUP', () => {

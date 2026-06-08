@@ -1,8 +1,20 @@
 /**
  * MOQ Transport Protocol Implementation
  *
- * Implements the IETF MOQ Transport protocol (draft-ietf-moq-transport-11)
+ * Implements the IETF MOQ Transport protocol (draft-ietf-moq-transport-16)
  * for use with the Panaudia spatial audio mixer.
+ *
+ * Targets the wire format emitted by github.com/Eyevinn/moqtransport (our
+ * server). See spatial-mixer/plan/moq-draft14/wire-delta-16.md for the
+ * draft-11 -> draft-16 delta and golden/draft16-vectors.json for byte-exact
+ * fixtures. Key draft-16 changes vs draft-11:
+ *   - Version 0xff000010, ALPN "moqt-16" (negotiated out-of-band, not in SETUP).
+ *   - KVP parameters are delta-encoded (sorted ascending; see encodeParams).
+ *   - CLIENT_SETUP drops the version list and the ROLE param.
+ *   - SUBSCRIBE/SUBSCRIBE_OK move priority/order/forward/filter/expires/largest
+ *     into parameters.
+ * Unchanged: OBJECT_DATAGRAM (audio path), ANNOUNCE/SUBSCRIBE_ANNOUNCES, the
+ * AuthorizationToken value (raw JWT bytes, not the spec Token struct).
  *
  * This is a minimal implementation focused on the messages needed for
  * audio streaming and state updates.
@@ -12,6 +24,7 @@ import {
   MoqMessageType,
   MoqRole,
   MoqSetupParameter,
+  MoqGroupOrder,
   MoqSubscription,
   MoqAnnouncement,
 } from './types.js';
@@ -268,75 +281,132 @@ export function wrapWithLengthFrame(messageType: number, content: Uint8Array): U
   return result;
 }
 
+// ============================================================================
+// Key-Value-Pair parameters (draft-16 delta encoding)
+// ============================================================================
+
 /**
- * Build CLIENT_SETUP message
- *
- * Per draft-ietf-moq-transport-11, setup parameter encoding depends on type:
- * - Even types (0x00, 0x02, etc.): Value is a single varint (no length prefix)
- * - Odd types (0x01, etc.): Length-prefixed bytes
+ * A MOQ key-value parameter. By convention (RFC/draft-16):
+ * - even `type` -> value is a varint (`bigint`)
+ * - odd  `type` -> value is a length-prefixed byte blob (`Uint8Array`)
  */
-export function buildClientSetup(
-  supportedVersions: number[],
-  role: MoqRole,
-  path?: string,
-  maxSubscribeId?: number
-): Uint8Array {
-  // Build the content (everything after message type and length)
-  const contentBuilder = new MessageBuilder();
-
-  // Number of supported versions
-  contentBuilder.writeVarint(supportedVersions.length);
-
-  // Supported versions
-  for (const version of supportedVersions) {
-    contentBuilder.writeVarint(version);
-  }
-
-  // Count parameters
-  let numParams = 1; // Role is required
-  if (path !== undefined) numParams++;
-  if (maxSubscribeId !== undefined) numParams++;
-
-  contentBuilder.writeVarint(numParams);
-
-  // Role parameter (type 0x00, even - just varint value, no length prefix)
-  contentBuilder.writeVarint(MoqSetupParameter.ROLE);
-  contentBuilder.writeVarint(role);
-
-  // Path parameter (type 0x01, odd - length-prefixed bytes)
-  if (path !== undefined) {
-    contentBuilder.writeVarint(MoqSetupParameter.PATH);
-    const pathBytes = textEncoder.encode(path);
-    contentBuilder.writeVarint(pathBytes.length);
-    contentBuilder.writeRaw(pathBytes);
-  }
-
-  // Max subscribe ID parameter (type 0x02, even - just varint value, no length prefix)
-  if (maxSubscribeId !== undefined) {
-    contentBuilder.writeVarint(MoqSetupParameter.MAX_SUBSCRIBE_ID);
-    contentBuilder.writeVarint(maxSubscribeId);
-  }
-
-  // Wrap with length frame
-  return wrapWithLengthFrame(MoqMessageType.CLIENT_SETUP, contentBuilder.build());
+export interface Kvp {
+  type: number;
+  value: bigint | Uint8Array;
 }
 
 /**
- * Build SUBSCRIBE message
+ * Append a parameter list using draft-16 delta encoding:
+ *   [count][ (deltaType, value) ... ]
+ * where deltaType = type - previousType (previousType starts at 0), the list is
+ * sorted ascending by type first, and the value is a bare varint for even types
+ * or length-prefixed bytes for odd types. Matches Eyevinn's KVPList.AppendNumVersioned.
+ */
+export function encodeParams(builder: MessageBuilder, params: Kvp[]): void {
+  const sorted = [...params].sort((a, b) => a.type - b.type);
+  builder.writeVarint(sorted.length);
+  let prev = 0;
+  for (const p of sorted) {
+    builder.writeVarint(p.type - prev);
+    prev = p.type;
+    if (p.type % 2 === 1) {
+      const bytes = p.value as Uint8Array;
+      builder.writeVarint(bytes.length);
+      builder.writeRaw(bytes);
+    } else {
+      builder.writeVarint(p.value as bigint);
+    }
+  }
+}
+
+/**
+ * Decode a delta-encoded parameter list into a Map keyed by absolute type.
+ * Even types map to a `bigint` (the varint value); odd types map to a
+ * `Uint8Array` (the raw blob). Mirrors Eyevinn's KVPList.ParseNumVersioned.
+ */
+export function decodeParams(
+  data: Uint8Array,
+  offset: number = 0
+): { params: Map<number, bigint | Uint8Array>; bytesRead: number } {
+  let pos = offset;
+  const { value: count, bytesRead: countBytes } = decodeVarint(data, pos);
+  pos += countBytes;
+
+  const params = new Map<number, bigint | Uint8Array>();
+  let prev = 0;
+  for (let i = 0; i < Number(count); i++) {
+    const { value: delta, bytesRead: deltaBytes } = decodeVarint(data, pos);
+    pos += deltaBytes;
+    const type = prev + Number(delta);
+    prev = type;
+
+    if (type % 2 === 1) {
+      const { value: blob, bytesRead: blobBytes } = decodeBytes(data, pos);
+      pos += blobBytes;
+      params.set(type, blob);
+    } else {
+      const { value: v, bytesRead: vBytes } = decodeVarint(data, pos);
+      pos += vBytes;
+      params.set(type, v);
+    }
+  }
+  return { params, bytesRead: pos - offset };
+}
+
+/**
+ * Build CLIENT_SETUP message (draft-16).
  *
- * Per moqtransport v0.5.1 / draft-ietf-moq-transport-11 wire format:
- * - RequestID (varint)
- * - TrackNamespace (Tuple)
- * - TrackName (varint-prefixed bytes)
- * - SubscriberPriority (1 byte)
- * - GroupOrder (1 byte)
- * - Forward (1 byte)
- * - FilterType (varint)
- * - [StartLocation if absolute]
- * - Parameters (KVPList)
+ * draft-16 differences from draft-11:
+ * - NO supported-versions list (version is negotiated out-of-band via ALPN).
+ * - NO ROLE parameter (removed from the spec).
+ * - Setup parameters are delta-encoded (see encodeParams).
  *
- * NOTE: TrackAlias is NOT in SUBSCRIBE in draft-11. It is assigned by the
- * publisher and returned in SUBSCRIBE_OK.
+ * `supportedVersions` and `role` are accepted for signature compatibility but
+ * are not written to the wire in draft-16.
+ */
+export function buildClientSetup(
+  _supportedVersions: number[],
+  _role: MoqRole,
+  path?: string,
+  maxSubscribeId?: number
+): Uint8Array {
+  const contentBuilder = new MessageBuilder();
+
+  // Setup parameters (delta-encoded). PATH is QUIC-only (odd 0x01 -> bytes);
+  // MAX_REQUEST_ID is even 0x02 -> varint. Note: this client runs over
+  // WebTransport, so `path` is normally undefined.
+  const params: Kvp[] = [];
+  if (path !== undefined) {
+    params.push({ type: MoqSetupParameter.PATH, value: textEncoder.encode(path) });
+  }
+  if (maxSubscribeId !== undefined) {
+    params.push({ type: MoqSetupParameter.MAX_SUBSCRIBE_ID, value: BigInt(maxSubscribeId) });
+  }
+  encodeParams(contentBuilder, params);
+
+  return wrapWithLengthFrame(MoqMessageType.CLIENT_SETUP, contentBuilder.build());
+}
+
+// draft-16 SUBSCRIBE/SUBSCRIBE_OK parameter keys (fields moved out of the body).
+const SUB_PARAM_FORWARD = 0x10;       // even -> varint (bool)
+const SUB_PARAM_PRIORITY = 0x20;      // even -> varint
+const SUB_PARAM_FILTER = 0x21;        // odd  -> bytes [filterType][start?][endGroup?]
+const SUB_PARAM_GROUP_ORDER = 0x22;   // even -> varint
+const SUB_OK_PARAM_EXPIRES = 0x08;    // even -> varint (ms)
+const SUB_OK_PARAM_LARGEST = 0x09;    // odd  -> bytes (Location: group, object)
+const PARAM_AUTHORIZATION = 0x03;     // odd  -> bytes (raw JWT)
+const PARAM_RESUME_HLC = 0xff01;      // odd  -> bytes (8-byte BE uint64), Panaudia custom
+
+/**
+ * Build SUBSCRIBE message (draft-16).
+ *
+ * Body: RequestID, TrackNamespace (tuple), TrackName (len-prefixed), then a
+ * delta-encoded parameter list. SubscriberPriority/GroupOrder/Forward and the
+ * Subscription Filter are now PARAMETERS (not inline fields). The custom
+ * AuthorizationToken (0x03, raw JWT) and ResumeHLC (0xFF01) ride in the same
+ * sorted, delta-encoded list.
+ *
+ * TrackAlias is NOT in SUBSCRIBE; the publisher assigns it in SUBSCRIBE_OK.
  */
 export function buildSubscribe(subscription: MoqSubscription): Uint8Array {
   const contentBuilder = new MessageBuilder();
@@ -353,51 +423,32 @@ export function buildSubscribe(subscription: MoqSubscription): Uint8Array {
   // Track name (varint-prefixed bytes)
   contentBuilder.writeString(subscription.trackName);
 
-  // Subscriber priority (1 byte, default 128)
-  const priority = subscription.subscriberPriority ?? 128;
-  contentBuilder.writeRaw(new Uint8Array([priority]));
+  // Parameters. Defaults match Eyevinn's own SUBSCRIBE defaults so a subscriber
+  // actually receives objects: priority 128, group order ascending, forward 1.
+  const params: Kvp[] = [];
+  params.push({ type: SUB_PARAM_PRIORITY, value: BigInt(subscription.subscriberPriority ?? 128) });
+  params.push({ type: SUB_PARAM_GROUP_ORDER, value: BigInt(subscription.groupOrder ?? MoqGroupOrder.ASCENDING) });
+  params.push({ type: SUB_PARAM_FORWARD, value: BigInt(subscription.forward ?? 1) });
 
-  // Group order (1 byte, default 0 = none)
-  const groupOrder = subscription.groupOrder ?? 0;
-  contentBuilder.writeRaw(new Uint8Array([groupOrder]));
-
-  // Forward (1 byte, default 0)
-  const forward = subscription.forward ?? 0;
-  contentBuilder.writeRaw(new Uint8Array([forward]));
-
-  // Filter type
-  contentBuilder.writeVarint(subscription.filterType);
-
-  // Filter-specific fields based on type
-  // For LATEST_GROUP/LATEST_OBJECT, no additional fields needed
-  // For ABSOLUTE_START and ABSOLUTE_RANGE, we would add group/object IDs
-
-  // Parameters (KVPList format: count + key-value pairs)
-  // Count how many parameters we have
-  let paramCount = 0;
-  if (subscription.authorization) paramCount++;
-  if (subscription.resumeOpId !== undefined && subscription.resumeOpId > 0n) paramCount++;
-
-  contentBuilder.writeVarint(paramCount);
+  // Subscription Filter (odd 0x21 -> bytes): [filterType][start if absolute][endGroup if range].
+  // LATEST_GROUP / LATEST_OBJECT carry no location.
+  const filterBuilder = new MessageBuilder();
+  filterBuilder.writeVarint(subscription.filterType);
+  params.push({ type: SUB_PARAM_FILTER, value: filterBuilder.build() });
 
   if (subscription.authorization) {
-    // Authorization parameter (0x03 = AuthorizationTokenParameterKey per moqtransport v0.5.1)
-    // KVP format: type (varint) + length (varint) + value (bytes)
-    contentBuilder.writeVarint(0x03);
-    const authBytes = textEncoder.encode(subscription.authorization);
-    contentBuilder.writeVarint(authBytes.length);
-    contentBuilder.writeRaw(authBytes);
+    // Raw JWT bytes (Eyevinn does NOT wrap in the spec Token struct).
+    params.push({ type: PARAM_AUTHORIZATION, value: textEncoder.encode(subscription.authorization) });
   }
 
   if (subscription.resumeOpId !== undefined && subscription.resumeOpId > 0n) {
-    // ResumeOpID parameter (0xFF01 = custom key, odd = length-prefixed bytes)
-    // Value: 8 bytes big-endian uint64
-    contentBuilder.writeVarint(0xFF01);
-    contentBuilder.writeVarint(8);
+    // ResumeHLC: 8 bytes big-endian uint64.
     const opIdBuf = new Uint8Array(8);
     new DataView(opIdBuf.buffer).setBigUint64(0, subscription.resumeOpId, false);
-    contentBuilder.writeRaw(opIdBuf);
+    params.push({ type: PARAM_RESUME_HLC, value: opIdBuf });
   }
+
+  encodeParams(contentBuilder, params);
 
   return wrapWithLengthFrame(MoqMessageType.SUBSCRIBE, contentBuilder.build());
 }
@@ -418,16 +469,15 @@ export function buildAnnounce(announcement: MoqAnnouncement): Uint8Array {
     contentBuilder.writeString(part);
   }
 
-  // Parameters
-  if (announcement.parameters && announcement.parameters.size > 0) {
-    contentBuilder.writeVarint(announcement.parameters.size);
+  // Parameters (delta-encoded). Our client sends none today, so this is an
+  // empty list (count 0); the map values are byte blobs (odd keys, e.g. auth).
+  const params: Kvp[] = [];
+  if (announcement.parameters) {
     for (const [key, value] of announcement.parameters) {
-      contentBuilder.writeVarint(key);
-      contentBuilder.writeBytes(value);
+      params.push({ type: key, value });
     }
-  } else {
-    contentBuilder.writeVarint(0);
   }
+  encodeParams(contentBuilder, params);
 
   return wrapWithLengthFrame(MoqMessageType.ANNOUNCE, contentBuilder.build());
 }
@@ -511,48 +561,24 @@ export interface ParsedServerSetup {
 }
 
 /**
- * Parse SERVER_SETUP message
+ * Parse SERVER_SETUP message (draft-16).
  *
- * Per draft-ietf-moq-transport-11, setup parameter encoding depends on type:
- * - Even types (0x00, 0x02, etc.): Value is a single varint (no length prefix)
- * - Odd types (0x01, etc.): Length-prefixed bytes
+ * draft-16 SERVER_SETUP has NO selected-version field (the version is fixed by
+ * the ALPN negotiated out-of-band); the body is just a delta-encoded parameter
+ * list. We report `selectedVersion` as the version we speak for logging.
  */
 export function parseServerSetup(data: Uint8Array, offset: number = 0): ParsedServerSetup {
-  let pos = offset;
+  const { params } = decodeParams(data, offset);
 
-  // Selected version
-  const { value: version, bytesRead: versionBytes } = decodeVarint(data, pos);
-  pos += versionBytes;
-
-  // Number of parameters
-  const { value: numParams, bytesRead: numParamsBytes } = decodeVarint(data, pos);
-  pos += numParamsBytes;
-
-  // Parameters
+  // Normalize to the legacy Map<number, Uint8Array> shape callers expect:
+  // even (varint) values are re-encoded to their varint bytes.
   const parameters = new Map<number, Uint8Array>();
-  for (let i = 0; i < Number(numParams); i++) {
-    const { value: paramType, bytesRead: paramTypeBytes } = decodeVarint(data, pos);
-    pos += paramTypeBytes;
-
-    const typeNum = Number(paramType);
-
-    if (typeNum % 2 === 0) {
-      // Even type: value is a single varint (no length prefix)
-      const { value: paramValue, bytesRead: paramValueBytes } = decodeVarint(data, pos);
-      pos += paramValueBytes;
-      // Store the varint value as bytes
-      const valueBytes = encodeVarint(paramValue);
-      parameters.set(typeNum, valueBytes);
-    } else {
-      // Odd type: length-prefixed bytes
-      const { value: paramValue, bytesRead: paramValueBytes } = decodeBytes(data, pos);
-      pos += paramValueBytes;
-      parameters.set(typeNum, paramValue);
-    }
+  for (const [type, value] of params) {
+    parameters.set(type, value instanceof Uint8Array ? value : encodeVarint(value));
   }
 
   return {
-    selectedVersion: Number(version),
+    selectedVersion: MOQ_TRANSPORT_VERSION,
     parameters,
   };
 }
@@ -571,16 +597,12 @@ export interface ParsedSubscribeOk {
 }
 
 /**
- * Parse SUBSCRIBE_OK message
+ * Parse SUBSCRIBE_OK message (draft-16).
  *
- * Per moqtransport v0.5.1 / draft-ietf-moq-transport-11 wire format:
- * - RequestID (varint)
- * - TrackAlias (varint)
- * - Expires (varint, milliseconds)
- * - GroupOrder (1 byte)
- * - ContentExists (1 byte: 0 or 1)
- * - [LargestLocation + Parameters if ContentExists=1]
- * - [Parameters if ContentExists=0]
+ * Body: RequestID, TrackAlias, then a delta-encoded parameter list. Expires
+ * (0x08), GroupOrder (0x22) and Largest Object (0x09 -> ContentExists) are now
+ * PARAMETERS, not inline fields. A trailing Track Extensions block may follow
+ * but Eyevinn emits none today, so we ignore anything after the params.
  */
 export function parseSubscribeOk(data: Uint8Array, offset: number = 0): ParsedSubscribeOk {
   let pos = offset;
@@ -593,42 +615,30 @@ export function parseSubscribeOk(data: Uint8Array, offset: number = 0): ParsedSu
   const { value: trackAlias, bytesRead: aliasBytes } = decodeVarint(data, pos);
   pos += aliasBytes;
 
-  // Expires (varint, milliseconds)
-  const { value: expires, bytesRead: expiresBytes } = decodeVarint(data, pos);
-  pos += expiresBytes;
-
-  // Group Order (1 byte, NOT varint)
-  if (pos >= data.length) {
-    throw new Error('Not enough data for GroupOrder in SUBSCRIBE_OK');
-  }
-  const groupOrder = data[pos]!;
-  pos += 1;
-
-  // Content Exists (1 byte: 0 or 1)
-  if (pos >= data.length) {
-    throw new Error('Not enough data for ContentExists in SUBSCRIBE_OK');
-  }
-  const contentExists = data[pos]! !== 0;
-  pos += 1;
+  // Parameters
+  const { params } = decodeParams(data, pos);
 
   const result: ParsedSubscribeOk = {
     subscribeId: Number(subscribeId),
     trackAlias: Number(trackAlias),
-    expires,
-    groupOrder,
-    contentExists,
+    expires: 0n,
+    groupOrder: 0,
+    contentExists: false,
   };
 
-  // If content exists, parse largest location (group + object)
-  if (result.contentExists) {
-    const { value: largestGroupId, bytesRead: groupIdBytes } = decodeVarint(data, pos);
-    pos += groupIdBytes;
+  const expires = params.get(SUB_OK_PARAM_EXPIRES);
+  if (typeof expires === 'bigint') result.expires = expires;
 
-    const { value: largestObjectId, bytesRead: objectIdBytes } = decodeVarint(data, pos);
-    pos += objectIdBytes;
+  const groupOrder = params.get(SUB_PARAM_GROUP_ORDER);
+  if (typeof groupOrder === 'bigint') result.groupOrder = Number(groupOrder);
 
-    result.largestGroupId = largestGroupId;
-    result.largestObjectId = largestObjectId;
+  const largest = params.get(SUB_OK_PARAM_LARGEST);
+  if (largest instanceof Uint8Array) {
+    result.contentExists = true;
+    const g = decodeVarint(largest, 0);
+    const o = decodeVarint(largest, g.bytesRead);
+    result.largestGroupId = g.value;
+    result.largestObjectId = o.value;
   }
 
   return result;
@@ -645,12 +655,15 @@ export interface ParsedSubscribeError {
 }
 
 /**
- * Parse SUBSCRIBE_ERROR message
+ * Parse SUBSCRIBE_ERROR message (draft-16).
+ *
+ * Body: RequestID, ErrorCode, RetryInterval (new in draft-16), ReasonPhrase.
+ * There is NO trailing TrackAlias (that was draft-11); it is reported as 0.
  */
 export function parseSubscribeError(data: Uint8Array, offset: number = 0): ParsedSubscribeError {
   let pos = offset;
 
-  // Subscribe ID
+  // Request ID
   const { value: subscribeId, bytesRead: subIdBytes } = decodeVarint(data, pos);
   pos += subIdBytes;
 
@@ -658,19 +671,18 @@ export function parseSubscribeError(data: Uint8Array, offset: number = 0): Parse
   const { value: errorCode, bytesRead: errorCodeBytes } = decodeVarint(data, pos);
   pos += errorCodeBytes;
 
-  // Reason phrase
-  const { value: reasonPhrase, bytesRead: reasonBytes } = decodeString(data, pos);
-  pos += reasonBytes;
+  // Retry interval (draft-16+): minimum ms before retry (0 = don't retry)
+  const { bytesRead: retryBytes } = decodeVarint(data, pos);
+  pos += retryBytes;
 
-  // Track alias
-  const { value: trackAlias, bytesRead: aliasBytes } = decodeVarint(data, pos);
-  pos += aliasBytes;
+  // Reason phrase
+  const { value: reasonPhrase } = decodeString(data, pos);
 
   return {
     subscribeId: Number(subscribeId),
     errorCode: Number(errorCode),
     reasonPhrase,
-    trackAlias: Number(trackAlias),
+    trackAlias: 0,
   };
 }
 
@@ -792,6 +804,8 @@ export function parseObjectDatagram(data: Uint8Array, offset: number = 0): Parse
 // ============================================================================
 
 /**
- * MOQ Transport version we support (draft-ietf-moq-transport-11)
+ * MOQ Transport version we support (draft-ietf-moq-transport-16).
+ * Not sent in-band (draft-16 negotiates via the "moqt-16" ALPN); kept for
+ * logging and to report a selected version from SERVER_SETUP.
  */
-export const MOQ_TRANSPORT_VERSION = 0xff000000 + 11; // Draft version marker + draft number
+export const MOQ_TRANSPORT_VERSION = 0xff000000 + 0x10; // 0xff000010

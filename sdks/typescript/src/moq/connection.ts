@@ -101,6 +101,9 @@ export class MoqConnection {
         allowPooling: false,
         requireUnreliable: true, // We use datagrams for audio
         congestionControl: 'low-latency',
+        // Negotiate the MOQ draft-16 subprotocol over WebTransport so the server
+        // selects draft-16 (it falls back to draft-14 if no subprotocol is set).
+        protocols: ['moqt-16'],
         ...options,
       };
 

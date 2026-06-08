@@ -11,6 +11,8 @@ declare global {
     requireUnreliable?: boolean;
     serverCertificateHashes?: WebTransportHash[];
     congestionControl?: 'default' | 'throughput' | 'low-latency';
+    /** Subprotocols offered via WT-Available-Protocols (e.g. ["moqt-16"]). */
+    protocols?: string[];
   }
 
   interface WebTransportHash {

@@ -67,29 +67,53 @@ export declare class MessageBuilder {
  */
 export declare function wrapWithLengthFrame(messageType: number, content: Uint8Array): Uint8Array;
 /**
- * Build CLIENT_SETUP message
- *
- * Per draft-ietf-moq-transport-11, setup parameter encoding depends on type:
- * - Even types (0x00, 0x02, etc.): Value is a single varint (no length prefix)
- * - Odd types (0x01, etc.): Length-prefixed bytes
+ * A MOQ key-value parameter. By convention (RFC/draft-16):
+ * - even `type` -> value is a varint (`bigint`)
+ * - odd  `type` -> value is a length-prefixed byte blob (`Uint8Array`)
  */
-export declare function buildClientSetup(supportedVersions: number[], role: MoqRole, path?: string, maxSubscribeId?: number): Uint8Array;
+export interface Kvp {
+    type: number;
+    value: bigint | Uint8Array;
+}
 /**
- * Build SUBSCRIBE message
+ * Append a parameter list using draft-16 delta encoding:
+ *   [count][ (deltaType, value) ... ]
+ * where deltaType = type - previousType (previousType starts at 0), the list is
+ * sorted ascending by type first, and the value is a bare varint for even types
+ * or length-prefixed bytes for odd types. Matches Eyevinn's KVPList.AppendNumVersioned.
+ */
+export declare function encodeParams(builder: MessageBuilder, params: Kvp[]): void;
+/**
+ * Decode a delta-encoded parameter list into a Map keyed by absolute type.
+ * Even types map to a `bigint` (the varint value); odd types map to a
+ * `Uint8Array` (the raw blob). Mirrors Eyevinn's KVPList.ParseNumVersioned.
+ */
+export declare function decodeParams(data: Uint8Array, offset?: number): {
+    params: Map<number, bigint | Uint8Array>;
+    bytesRead: number;
+};
+/**
+ * Build CLIENT_SETUP message (draft-16).
  *
- * Per moqtransport v0.5.1 / draft-ietf-moq-transport-11 wire format:
- * - RequestID (varint)
- * - TrackNamespace (Tuple)
- * - TrackName (varint-prefixed bytes)
- * - SubscriberPriority (1 byte)
- * - GroupOrder (1 byte)
- * - Forward (1 byte)
- * - FilterType (varint)
- * - [StartLocation if absolute]
- * - Parameters (KVPList)
+ * draft-16 differences from draft-11:
+ * - NO supported-versions list (version is negotiated out-of-band via ALPN).
+ * - NO ROLE parameter (removed from the spec).
+ * - Setup parameters are delta-encoded (see encodeParams).
  *
- * NOTE: TrackAlias is NOT in SUBSCRIBE in draft-11. It is assigned by the
- * publisher and returned in SUBSCRIBE_OK.
+ * `supportedVersions` and `role` are accepted for signature compatibility but
+ * are not written to the wire in draft-16.
+ */
+export declare function buildClientSetup(_supportedVersions: number[], _role: MoqRole, path?: string, maxSubscribeId?: number): Uint8Array;
+/**
+ * Build SUBSCRIBE message (draft-16).
+ *
+ * Body: RequestID, TrackNamespace (tuple), TrackName (len-prefixed), then a
+ * delta-encoded parameter list. SubscriberPriority/GroupOrder/Forward and the
+ * Subscription Filter are now PARAMETERS (not inline fields). The custom
+ * AuthorizationToken (0x03, raw JWT) and ResumeHLC (0xFF01) ride in the same
+ * sorted, delta-encoded list.
+ *
+ * TrackAlias is NOT in SUBSCRIBE; the publisher assigns it in SUBSCRIBE_OK.
  */
 export declare function buildSubscribe(subscription: MoqSubscription): Uint8Array;
 /**
@@ -124,11 +148,11 @@ export interface ParsedServerSetup {
     parameters: Map<number, Uint8Array>;
 }
 /**
- * Parse SERVER_SETUP message
+ * Parse SERVER_SETUP message (draft-16).
  *
- * Per draft-ietf-moq-transport-11, setup parameter encoding depends on type:
- * - Even types (0x00, 0x02, etc.): Value is a single varint (no length prefix)
- * - Odd types (0x01, etc.): Length-prefixed bytes
+ * draft-16 SERVER_SETUP has NO selected-version field (the version is fixed by
+ * the ALPN negotiated out-of-band); the body is just a delta-encoded parameter
+ * list. We report `selectedVersion` as the version we speak for logging.
  */
 export declare function parseServerSetup(data: Uint8Array, offset?: number): ParsedServerSetup;
 /**
@@ -144,16 +168,12 @@ export interface ParsedSubscribeOk {
     largestObjectId?: bigint;
 }
 /**
- * Parse SUBSCRIBE_OK message
+ * Parse SUBSCRIBE_OK message (draft-16).
  *
- * Per moqtransport v0.5.1 / draft-ietf-moq-transport-11 wire format:
- * - RequestID (varint)
- * - TrackAlias (varint)
- * - Expires (varint, milliseconds)
- * - GroupOrder (1 byte)
- * - ContentExists (1 byte: 0 or 1)
- * - [LargestLocation + Parameters if ContentExists=1]
- * - [Parameters if ContentExists=0]
+ * Body: RequestID, TrackAlias, then a delta-encoded parameter list. Expires
+ * (0x08), GroupOrder (0x22) and Largest Object (0x09 -> ContentExists) are now
+ * PARAMETERS, not inline fields. A trailing Track Extensions block may follow
+ * but Eyevinn emits none today, so we ignore anything after the params.
  */
 export declare function parseSubscribeOk(data: Uint8Array, offset?: number): ParsedSubscribeOk;
 /**
@@ -166,7 +186,10 @@ export interface ParsedSubscribeError {
     trackAlias: number;
 }
 /**
- * Parse SUBSCRIBE_ERROR message
+ * Parse SUBSCRIBE_ERROR message (draft-16).
+ *
+ * Body: RequestID, ErrorCode, RetryInterval (new in draft-16), ReasonPhrase.
+ * There is NO trailing TrackAlias (that was draft-11); it is reported as 0.
  */
 export declare function parseSubscribeError(data: Uint8Array, offset?: number): ParsedSubscribeError;
 /**
@@ -208,7 +231,9 @@ export interface ParsedObjectDatagram {
  */
 export declare function parseObjectDatagram(data: Uint8Array, offset?: number): ParsedObjectDatagram;
 /**
- * MOQ Transport version we support (draft-ietf-moq-transport-11)
+ * MOQ Transport version we support (draft-ietf-moq-transport-16).
+ * Not sent in-band (draft-16 negotiates via the "moqt-16" ALPN); kept for
+ * logging and to report a selected version from SERVER_SETUP.
  */
 export declare const MOQ_TRANSPORT_VERSION: number;
 //# sourceMappingURL=moq-transport.d.ts.map

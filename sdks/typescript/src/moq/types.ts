@@ -263,4 +263,11 @@ export interface WebTransportOptions {
 
   /** Congestion control algorithm */
   congestionControl?: 'default' | 'throughput' | 'low-latency';
+
+  /**
+   * Application (sub)protocols to offer via WT-Available-Protocols. Used to
+   * negotiate the MOQ draft over WebTransport — we offer ["moqt-16"] so the
+   * server selects draft-16. Browsers without subprotocol support ignore this.
+   */
+  protocols?: string[];
 }

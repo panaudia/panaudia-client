@@ -172,11 +172,13 @@ describe('CLIENT_SETUP message', () => {
     expect(Number(msgType)).toBe(0x20);
   });
 
-  it('should include role parameter', () => {
+  it('should not include a role parameter or version list (draft-16)', () => {
+    // draft-16 removed the ROLE setup parameter and the in-band version list.
+    // With no path/maxSubscribeId the body is just an empty param list:
+    // [type 0x20][len 0x0001][count 0x00] = 4 bytes.
     const msg = buildClientSetup([MOQ_TRANSPORT_VERSION], MoqRole.SUBSCRIBER);
-
-    // Message should include the role parameter
-    expect(msg.length).toBeGreaterThan(5);
+    expect(msg.length).toBe(4);
+    expect(msg[3]).toBe(0x00); // parameter count = 0
   });
 
   it('should include path parameter when provided', () => {
@@ -188,8 +190,8 @@ describe('CLIENT_SETUP message', () => {
 });
 
 describe('MOQ Protocol Version', () => {
-  it('should be draft-11', () => {
-    // Draft marker (0xff000000) + draft number (11)
-    expect(MOQ_TRANSPORT_VERSION).toBe(0xff000000 + 11);
+  it('should be draft-16', () => {
+    // Draft marker (0xff000000) + draft number (0x10 = 16)
+    expect(MOQ_TRANSPORT_VERSION).toBe(0xff000010);
   });
 });
