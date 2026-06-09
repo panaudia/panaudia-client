@@ -51,5 +51,11 @@ export { AudioSubscriber, AudioSubscriberState, isAudioDecoderSupported, getAudi
 export type { ReceivedAudioFrame, AudioFrameReceivedHandler, AudioSubscriberStats, } from './audio-subscriber.js';
 export { AudioPlayer, AudioPlayerState, AudioDecoderNotSupportedError, isAudioPlaybackSupported, getAudioPlaybackCapabilities, } from './audio-player.js';
 export type { AudioPlayerConfig, AudioPlayerStats, } from './audio-player.js';
+export { JitterBufferCore, PLAYOUT_TUNING, computeJitterCapacity } from './jitter-buffer-core.js';
+export type { JitterBufferCoreConfig, JitterBufferSnapshot, Levels } from './jitter-buffer-core.js';
+export { PLAYOUT_PROCESSOR_NAME, buildPlayoutWorkletCode, createPlayoutWorkletUrl, } from './playout-worklet.js';
+export type { PlayoutProcessorOptions, PlayoutStatsMessage, PlayoutPcmPortMessage } from './playout-worklet.js';
+export { buildReceiveWorkerCode, createReceiveWorkerUrl, audioReceiveWorkerSupported, routeDatagram, } from './audio-receive-worker.js';
+export type { ReceiveWorkerDecoderConfig, ReceiveWorkerInitMessage, ReceiveWorkerAudioMessage, ReceiveWorkerStopMessage, ReceiveWorkerInbound, ForwardedDatagramMessage, ReceiveWorkerNoticeMessage, ReceiveWorkerOutbound, } from './audio-receive-worker.js';
 export { MoqTransportAdapter } from './moq-transport-adapter.js';
 //# sourceMappingURL=index.d.ts.map

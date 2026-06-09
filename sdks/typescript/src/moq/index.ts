@@ -252,5 +252,33 @@ export type {
   AudioPlayerStats,
 } from './audio-player.js';
 
+// v3 adaptive jitter buffer (ring-in-worklet playout)
+export { JitterBufferCore, PLAYOUT_TUNING, computeJitterCapacity } from './jitter-buffer-core.js';
+export type { JitterBufferCoreConfig, JitterBufferSnapshot, Levels } from './jitter-buffer-core.js';
+export {
+  PLAYOUT_PROCESSOR_NAME,
+  buildPlayoutWorkletCode,
+  createPlayoutWorkletUrl,
+} from './playout-worklet.js';
+export type { PlayoutProcessorOptions, PlayoutStatsMessage, PlayoutPcmPortMessage } from './playout-worklet.js';
+
+// Receive Worker (off-main-thread datagram read + Opus decode — design §11)
+export {
+  buildReceiveWorkerCode,
+  createReceiveWorkerUrl,
+  audioReceiveWorkerSupported,
+  routeDatagram,
+} from './audio-receive-worker.js';
+export type {
+  ReceiveWorkerDecoderConfig,
+  ReceiveWorkerInitMessage,
+  ReceiveWorkerAudioMessage,
+  ReceiveWorkerStopMessage,
+  ReceiveWorkerInbound,
+  ForwardedDatagramMessage,
+  ReceiveWorkerNoticeMessage,
+  ReceiveWorkerOutbound,
+} from './audio-receive-worker.js';
+
 // Transport adapter (for use with PanaudiaClient)
 export { MoqTransportAdapter } from './moq-transport-adapter.js';

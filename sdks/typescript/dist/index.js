@@ -1,6 +1,3 @@
-var __defProp = Object.defineProperty;
-var __defNormalProp = (obj, key, value) => key in obj ? __defProp(obj, key, { enumerable: true, configurable: true, writable: true, value }) : obj[key] = value;
-var __publicField = (obj, key, value) => __defNormalProp(obj, typeof key !== "symbol" ? key + "" : key, value);
 import { C as ConnectionState, c as createEntityInfo3 } from "./topic-merger.js";
 import { E, T, b, e, a, i, u } from "./topic-merger.js";
 import { isWebTransportSupported, MoqTransportAdapter, BluetoothMicDefaultError } from "./moq/index.js";
@@ -202,8 +199,8 @@ async function selectBestMicrophone(debug = false) {
 }
 const DEFAULT_GATEWAY_URL = "https://panaudia.com/gateway";
 async function resolveServer(ticket, options) {
-  const gatewayUrl = (options == null ? void 0 : options.gatewayUrl) ?? DEFAULT_GATEWAY_URL;
-  let protocol = (options == null ? void 0 : options.protocol) ?? "auto";
+  const gatewayUrl = options?.gatewayUrl ?? DEFAULT_GATEWAY_URL;
+  let protocol = options?.protocol ?? "auto";
   if (protocol === "auto") {
     protocol = isWebTransportSupported() ? "moq" : "webrtc";
   }
@@ -256,12 +253,11 @@ function rng() {
 const randomUUID = typeof crypto !== "undefined" && crypto.randomUUID && crypto.randomUUID.bind(crypto);
 const native = { randomUUID };
 function v4(options, buf, offset) {
-  var _a;
   if (native.randomUUID && true && !options) {
     return native.randomUUID();
   }
   options = options || {};
-  const rnds = options.random ?? ((_a = options.rng) == null ? void 0 : _a.call(options)) ?? rng();
+  const rnds = options.random ?? options.rng?.() ?? rng();
   if (rnds.length < 16) {
     throw new Error("Random bytes length must be >= 16");
   }
@@ -270,9 +266,7 @@ function v4(options, buf, offset) {
   return unsafeStringify(rnds);
 }
 class TopicTree {
-  constructor() {
-    __publicField(this, "records", /* @__PURE__ */ new Map());
-  }
+  records = /* @__PURE__ */ new Map();
   /**
    * Apply a batch of values from one envelope.
    * Existing uuids are mutated in place; new uuids are built fully then
@@ -391,9 +385,7 @@ class TopicTree {
   }
 }
 class SingleRecordTree {
-  constructor() {
-    __publicField(this, "record", {});
-  }
+  record = {};
   /**
    * Apply a batch of values from one envelope. Existing leaves are
    * overwritten; intermediate path segments are created on demand.
@@ -514,33 +506,60 @@ function createCommandsAPI(client) {
   };
 }
 class PanaudiaClient {
+  /**
+   * List available microphone devices with type classification.
+   * Requests mic permission if not already granted (one prompt, briefly opens default mic).
+   */
+  static async listMicrophones() {
+    let stream = null;
+    try {
+      stream = await navigator.mediaDevices.getUserMedia({ audio: true, video: false });
+    } finally {
+      if (stream) {
+        for (const track of stream.getTracks()) {
+          track.stop();
+        }
+      }
+    }
+    const devices = await navigator.mediaDevices.enumerateDevices();
+    return devices.filter((d) => d.kind === "audioinput").map((d) => ({
+      deviceId: d.deviceId,
+      label: d.label,
+      type: classifyByLabel(d.label)
+    }));
+  }
+  /**
+   * Get the recommended non-Bluetooth microphone.
+   * Use this to pre-select a device in a mic picker UI.
+   * The user should confirm the selection before connecting.
+   */
+  static getRecommendedMicrophone = selectBestMicrophone;
+  transport;
+  transportType;
+  config;
+  position;
+  rotation;
+  statePublishTimer = null;
+  statePublishPending = false;
+  stateThrottleMs = 50;
+  // 20Hz
+  muted = false;
+  // Event emitter
+  handlers = /* @__PURE__ */ new Map();
+  // Structured per-participant view of attribute state, kept in sync with
+  // the flat values/removed events from the transport.
+  attributeTree = new TopicTree();
+  // Structured per-entity view of server-internal entity state, kept in
+  // sync with the flat entity values/removed events. The server filters
+  // the stream so only this client's own entity record arrives.
+  entityTree = new TopicTree();
+  // Space-wide role-rule record (roles-muted, roles-kicked,
+  // roles-gain, roles-attenuation). Single nested object — no
+  // per-uuid grouping since the topic's keys are uuid-less. Stays
+  // empty for connections without the `space.read` cap (no envelopes
+  // arrive). See plan/commands/space-read-path-plan.md.
+  spaceTree = new SingleRecordTree();
   constructor(config) {
-    __publicField(this, "transport");
-    __publicField(this, "transportType");
-    __publicField(this, "config");
-    __publicField(this, "position");
-    __publicField(this, "rotation");
-    __publicField(this, "statePublishTimer", null);
-    __publicField(this, "statePublishPending", false);
-    __publicField(this, "stateThrottleMs", 50);
-    // 20Hz
-    __publicField(this, "muted", false);
-    // Event emitter
-    __publicField(this, "handlers", /* @__PURE__ */ new Map());
-    // Structured per-participant view of attribute state, kept in sync with
-    // the flat values/removed events from the transport.
-    __publicField(this, "attributeTree", new TopicTree());
-    // Structured per-entity view of server-internal entity state, kept in
-    // sync with the flat entity values/removed events. The server filters
-    // the stream so only this client's own entity record arrives.
-    __publicField(this, "entityTree", new TopicTree());
-    // Space-wide role-rule record (roles-muted, roles-kicked,
-    // roles-gain, roles-attenuation). Single nested object — no
-    // per-uuid grouping since the topic's keys are uuid-less. Stays
-    // empty for connections without the `space.read` cap (no envelopes
-    // arrive). See plan/commands/space-read-path-plan.md.
-    __publicField(this, "spaceTree", new SingleRecordTree());
-    __publicField(this, "_commands");
     this.config = config;
     this.position = config.initialPosition ?? { x: 0.5, y: 0.5, z: 0.5 };
     this.rotation = config.initialRotation ?? { yaw: 0, pitch: 0, roll: 0 };
@@ -642,33 +661,10 @@ class PanaudiaClient {
       this.emit("cacheDebug", info);
     });
   }
-  /**
-   * List available microphone devices with type classification.
-   * Requests mic permission if not already granted (one prompt, briefly opens default mic).
-   */
-  static async listMicrophones() {
-    let stream = null;
-    try {
-      stream = await navigator.mediaDevices.getUserMedia({ audio: true, video: false });
-    } finally {
-      if (stream) {
-        for (const track of stream.getTracks()) {
-          track.stop();
-        }
-      }
-    }
-    const devices = await navigator.mediaDevices.enumerateDevices();
-    return devices.filter((d) => d.kind === "audioinput").map((d) => ({
-      deviceId: d.deviceId,
-      label: d.label,
-      type: classifyByLabel(d.label)
-    }));
-  }
   // ── Connection lifecycle ─────────────────────────────────────────────
   async connect() {
-    var _a;
     const microphoneId = this.config.microphoneId;
-    if ((_a = navigator.mediaDevices) == null ? void 0 : _a.getUserMedia) {
+    if (navigator.mediaDevices?.getUserMedia) {
       try {
         const permStream = await navigator.mediaDevices.getUserMedia({ audio: true, video: false });
         for (const track of permStream.getTracks()) track.stop();
@@ -809,6 +805,7 @@ class PanaudiaClient {
     }
     return this._commands;
   }
+  _commands;
   // ── Events ───────────────────────────────────────────────────────────
   on(event, handler) {
     let set = this.handlers.get(event);
@@ -906,12 +903,6 @@ class PanaudiaClient {
     this.statePublishPending = false;
   }
 }
-/**
- * Get the recommended non-Bluetooth microphone.
- * Use this to pre-select a device in a mic picker UI.
- * The user should confirm the selection before connecting.
- */
-__publicField(PanaudiaClient, "getRecommendedMicrophone", selectBestMicrophone);
 export {
   BluetoothMicDefaultError,
   ConnectionState,

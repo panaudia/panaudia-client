@@ -62,6 +62,7 @@ import { AudioTrackPublisher, StateTrackPublisher } from './track-publisher.js';
 import { entityInfo3ToBytes, createEntityInfo3 } from '../shared/encoding.js';
 import { AudioSubscriber, AudioSubscriberStats } from './audio-subscriber.js';
 import { AudioPlayer, AudioPlayerState, AudioPlayerConfig, AudioPlayerStats } from './audio-player.js';
+import { createReceiveWorkerUrl, audioReceiveWorkerSupported, type ReceiveWorkerOutbound } from './audio-receive-worker.js';
 import { StateSubscriber, EntityState, EntityStateHandler } from './state-subscriber.js';
 import { ControlTrackPublisher } from './control-publisher.js';
 import {
@@ -681,6 +682,9 @@ export class PanaudiaMoqClient {
   // Audio playback
   private audioSubscriber: AudioSubscriber | null = null;
   private audioPlayer: AudioPlayer | null = null;
+  // Receive Worker: owns the datagram read loop + Opus decode off the main
+  // thread (design §11). Null when unsupported/failed ⇒ main-thread fallback.
+  private receiveWorker: Worker | null = null;
 
   // State tracking
   private stateSubscriber: StateSubscriber | null = null;
@@ -817,6 +821,11 @@ export class PanaudiaMoqClient {
       await this.connection.connect(options);
       this.setState(ConnectionState.CONNECTED);
       this.log('WebTransport connected, initializing MOQ session...');
+
+      // Move the datagram read loop + Opus decode off the main thread (design
+      // §11). MUST happen before any subscriber registers a datagram handler
+      // (which would start — and lock — the main-thread dispatcher).
+      this.setupReceiveWorker();
 
       // Initialize MOQ session
       this.session = new MoqSession(this.connection, this.config.debug);
@@ -1067,6 +1076,8 @@ export class PanaudiaMoqClient {
       this.spaceSubscriber.stop();
       this.spaceSubscriber = null;
     }
+
+    this.teardownReceiveWorker();
 
     if (this.session) {
       await this.session.close();
@@ -1404,6 +1415,40 @@ export class PanaudiaMoqClient {
 
     // Start playback
     this.audioPlayer.start();
+
+    // Worker mode (design §11.3): hand the worklet's PCM port + audio config to
+    // the receive Worker so it decodes the audio track off-thread straight into
+    // the ring. The main-thread audioSubscriber handler above stays registered
+    // but is inert (the worker never forwards audio); decodeFrame is a no-op in
+    // worker mode. In fallback mode (no worker) the audioSubscriber path drives
+    // the main-thread decoder as before.
+    if (this.receiveWorker && this.audioPlayer) {
+      const handoff = this.audioPlayer.prepareForWorker();
+      if (handoff?.mode === 'sab') {
+        // SAB shared by reference — NOT in the transfer list (it stays usable here).
+        this.receiveWorker.postMessage({
+          type: 'audio',
+          audioTrackAlias: this.audioOutputTrackAlias,
+          decoderConfig: this.audioPlayer.getDecoderConfig(),
+          jbufConfig: handoff.jbufConfig,
+          sharedStorage: handoff.sharedStorage,
+          sharedWritePos: handoff.sharedWritePos,
+        });
+        this.log(`receive worker decoding audio trackAlias=${this.audioOutputTrackAlias} via SAB ring`);
+      } else if (handoff?.mode === 'port') {
+        this.receiveWorker.postMessage(
+          {
+            type: 'audio',
+            audioTrackAlias: this.audioOutputTrackAlias,
+            decoderConfig: this.audioPlayer.getDecoderConfig(),
+            pcmPort: handoff.pcmPort,
+          },
+          [handoff.pcmPort]
+        );
+        this.log(`receive worker decoding audio trackAlias=${this.audioOutputTrackAlias} via pcmPort (fallback)`);
+      }
+    }
+
     await this.audioSubscriber.start();
 
     this.log('Playback started');
@@ -1572,6 +1617,73 @@ export class PanaudiaMoqClient {
   }
 
   /**
+   * Move datagram receive + Opus decode off the main thread into the receive
+   * Worker (design §11). Best-effort: if the worker can't be created the
+   * connection stays in main-thread mode and the worklet is fed by the
+   * main-thread decoder (fallback, design §11.8) — audio still plays. MUST run
+   * after connect() and BEFORE any subscriber starts (which would lock the
+   * datagram stream on the main thread).
+   */
+  private setupReceiveWorker(): void {
+    if (!this.connection) return;
+    if (!audioReceiveWorkerSupported()) {
+      this.log('receive worker unsupported — main-thread decode (fallback)');
+      return;
+    }
+    let url: string | null = null;
+    try {
+      url = createReceiveWorkerUrl();
+      const worker = new Worker(url);
+      worker.onmessage = (e: MessageEvent) => {
+        const msg = e.data as ReceiveWorkerOutbound;
+        if (!msg) return;
+        if (msg.type === 'datagram') {
+          this.connection?.ingestForwardedDatagram(msg.trackAlias, msg.payload, msg.groupId, msg.objectId);
+        } else if (msg.type === 'notice') {
+          this.log(`[receive-worker] ${msg.event}${msg.detail ? ': ' + msg.detail : ''}`);
+        }
+      };
+      worker.onerror = (e) => this.log('[receive-worker] error', e.message);
+      // Hand the datagram readable to the worker (switches connection to worker
+      // mode). Done last so a failure above leaves main mode intact.
+      const readable = this.connection.takeDatagramReadableForWorker();
+      if (!readable) {
+        worker.terminate();
+        return;
+      }
+      worker.postMessage({ type: 'init', readable }, [readable as unknown as Transferable]);
+      this.receiveWorker = worker;
+      // Loud on purpose (not debug-gated): which producer path is live is the
+      // single most important fact when diagnosing crackle (design §11.8).
+      console.info('[panaudia] receive worker ACTIVE — datagram read + decode OFF the main thread');
+    } catch (err) {
+      console.warn(
+        '[panaudia] receive worker setup FAILED — falling back to MAIN-THREAD decode ' +
+          '(audio will be coupled to main-thread jank). Cause:',
+        err
+      );
+      this.receiveWorker?.terminate();
+      this.receiveWorker = null;
+      this.connection?.revertToMainDatagramMode();
+    } finally {
+      if (url) URL.revokeObjectURL(url);
+    }
+  }
+
+  /** Stop and release the receive Worker, if any. */
+  private teardownReceiveWorker(): void {
+    if (this.receiveWorker) {
+      try {
+        this.receiveWorker.postMessage({ type: 'stop' });
+      } catch {
+        // worker may already be gone
+      }
+      this.receiveWorker.terminate();
+      this.receiveWorker = null;
+    }
+  }
+
+  /**
    * Handle connection error
    */
   private handleError(code: string, message: string): void {
@@ -1583,6 +1695,7 @@ export class PanaudiaMoqClient {
    * Handle disconnection
    */
   private handleDisconnect(): void {
+    this.teardownReceiveWorker();
     this.session = null;
     this.connection = null;
     this.setState(ConnectionState.DISCONNECTED);

@@ -1,6 +1,3 @@
-var __defProp = Object.defineProperty;
-var __defNormalProp = (obj, key, value) => key in obj ? __defProp(obj, key, { enumerable: true, configurable: true, writable: true, value }) : obj[key] = value;
-var __publicField = (obj, key, value) => __defNormalProp(obj, typeof key !== "symbol" ? key + "" : key, value);
 import { C as ConnectionState, E as ENTITY_INFO3_SIZE, e as entityInfo3FromBytes, T as TopicMerger, d as CacheMap, c as createEntityInfo3, a as entityInfo3ToBytes } from "../topic-merger.js";
 import { b, f, g, h, i, u } from "../topic-merger.js";
 function clamp(value, min, max) {
@@ -448,11 +445,11 @@ function isWebCodecsOpusSupported() {
   return typeof AudioEncoder !== "undefined";
 }
 class OpusEncoder {
+  encoder = null;
+  config;
+  frameCallback = null;
+  isInitialized = false;
   constructor(config = {}) {
-    __publicField(this, "encoder", null);
-    __publicField(this, "config");
-    __publicField(this, "frameCallback", null);
-    __publicField(this, "isInitialized", false);
     this.config = {
       sampleRate: config.sampleRate ?? 48e3,
       channels: config.channels ?? 1,
@@ -574,8 +571,7 @@ class OpusEncoder {
    * Get encoder state
    */
   getState() {
-    var _a;
-    return ((_a = this.encoder) == null ? void 0 : _a.state) ?? "closed";
+    return this.encoder?.state ?? "closed";
   }
 }
 const WORKLET_PROCESSOR_CODE = `
@@ -591,18 +587,18 @@ class AudioCaptureProcessor extends AudioWorkletProcessor {
 registerProcessor('audio-capture-processor', AudioCaptureProcessor);
 `;
 class AudioCaptureEncoder {
+  audioContext = null;
+  sourceNode = null;
+  workletNode = null;
+  encoder;
+  config;
+  sampleBuffer = [];
+  bufferSize = 0;
+  samplesPerFrame;
+  frameDurationUs;
+  timestampUs = 0;
+  isRunning = false;
   constructor(config = {}) {
-    __publicField(this, "audioContext", null);
-    __publicField(this, "sourceNode", null);
-    __publicField(this, "workletNode", null);
-    __publicField(this, "encoder");
-    __publicField(this, "config");
-    __publicField(this, "sampleBuffer", []);
-    __publicField(this, "bufferSize", 0);
-    __publicField(this, "samplesPerFrame");
-    __publicField(this, "frameDurationUs");
-    __publicField(this, "timestampUs", 0);
-    __publicField(this, "isRunning", false);
     this.config = {
       sampleRate: config.sampleRate ?? 48e3,
       channels: config.channels ?? 1,
@@ -735,13 +731,13 @@ class AudioNotSupportedError extends MoqClientError {
   }
 }
 class BluetoothMicDefaultError extends MoqClientError {
+  availableDevices;
   constructor(defaultLabel, availableDevices) {
     super(
       `Default microphone is Bluetooth (${defaultLabel}). Please select a non-Bluetooth microphone to preserve stereo audio.`,
       "BLUETOOTH_MIC_DEFAULT",
       { defaultLabel, availableDevices }
     );
-    __publicField(this, "availableDevices");
     this.name = "BluetoothMicDefaultError";
     this.availableDevices = availableDevices;
   }
@@ -779,18 +775,24 @@ function getBestOpusMimeType() {
   return null;
 }
 class AudioPublisher {
+  config;
+  state = "idle";
+  mediaStream = null;
+  mediaRecorder = null;
+  frameHandler = null;
+  // WebCodecs encoder (preferred - produces raw Opus)
+  webCodecsEncoder = null;
+  useWebCodecs = false;
+  // Timing
+  startTime = 0;
+  frameSequence = 0;
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  log(...args) {
+    if (this.config.debug) {
+      console.log("[AudioPublisher]", ...args);
+    }
+  }
   constructor(config = {}) {
-    __publicField(this, "config");
-    __publicField(this, "state", "idle");
-    __publicField(this, "mediaStream", null);
-    __publicField(this, "mediaRecorder", null);
-    __publicField(this, "frameHandler", null);
-    // WebCodecs encoder (preferred - produces raw Opus)
-    __publicField(this, "webCodecsEncoder", null);
-    __publicField(this, "useWebCodecs", false);
-    // Timing
-    __publicField(this, "startTime", 0);
-    __publicField(this, "frameSequence", 0);
     this.config = {
       sampleRate: config.sampleRate ?? 48e3,
       channelCount: config.channelCount ?? 1,
@@ -807,12 +809,6 @@ class AudioPublisher {
       this.log("Using WebCodecs for raw Opus encoding");
     } else {
       this.log("WebCodecs not available, using MediaRecorder (WebM container)");
-    }
-  }
-  // eslint-disable-next-line @typescript-eslint/no-explicit-any
-  log(...args) {
-    if (this.config.debug) {
-      console.log("[AudioPublisher]", ...args);
     }
   }
   /**
@@ -1322,10 +1318,8 @@ function decodeBytes(data, offset = 0) {
   return { value, bytesRead: lengthBytes + bytesLength };
 }
 class MessageBuilder {
-  constructor() {
-    __publicField(this, "chunks", []);
-    __publicField(this, "totalLength", 0);
-  }
+  chunks = [];
+  totalLength = 0;
   /**
    * Append a varint to the message
    */
@@ -1619,31 +1613,102 @@ function parseObjectDatagram(data, offset = 0) {
 }
 const MOQ_TRANSPORT_VERSION = 4278190080 + 16;
 const PENDING_DATAGRAM_MAX_BYTES = 1 * 1024 * 1024;
+class DatagramRouter {
+  handlers = /* @__PURE__ */ new Map();
+  // Pre-handler buffer, FIFO across all aliases; oldest dropped when the byte cap
+  // is exceeded. Cleared on clear().
+  pending = [];
+  pendingBytes = 0;
+  /**
+   * Register a handler for a track alias and drain any datagrams that arrived for
+   * it before registration (the SUBSCRIBE_OK race), in arrival order.
+   */
+  register(trackAlias, handler) {
+    this.handlers.set(trackAlias, handler);
+    if (this.pending.length > 0) this.drainForAlias(trackAlias, handler);
+  }
+  /** Unregister a handler and discard any still-buffered datagrams for its alias. */
+  unregister(trackAlias) {
+    this.handlers.delete(trackAlias);
+    if (this.pending.length > 0) this.discardForAlias(trackAlias);
+  }
+  /** Route a parsed datagram to its handler, or buffer it if none is registered yet. */
+  ingest(d) {
+    const handler = this.handlers.get(d.trackAlias);
+    if (handler) {
+      handler(d.payload, d.trackAlias, d.groupId, d.objectId);
+    } else {
+      this.bufferUnknown(d);
+    }
+  }
+  /** Number of buffered pre-handler datagrams (tests/diagnostics). */
+  pendingCount() {
+    return this.pending.length;
+  }
+  /** Drop all handlers + buffered datagrams (connection close). */
+  clear() {
+    this.handlers.clear();
+    this.pending = [];
+    this.pendingBytes = 0;
+  }
+  drainForAlias(trackAlias, handler) {
+    const remaining = [];
+    let drainedBytes = 0;
+    for (const d of this.pending) {
+      if (d.trackAlias === trackAlias) {
+        try {
+          handler(d.payload, d.trackAlias, d.groupId, d.objectId);
+        } catch {
+        }
+        drainedBytes += d.payload.length;
+      } else {
+        remaining.push(d);
+      }
+    }
+    this.pending = remaining;
+    this.pendingBytes -= drainedBytes;
+  }
+  discardForAlias(trackAlias) {
+    const remaining = [];
+    let discardedBytes = 0;
+    for (const d of this.pending) {
+      if (d.trackAlias === trackAlias) {
+        discardedBytes += d.payload.length;
+      } else {
+        remaining.push(d);
+      }
+    }
+    this.pending = remaining;
+    this.pendingBytes -= discardedBytes;
+  }
+  bufferUnknown(d) {
+    this.pending.push(d);
+    this.pendingBytes += d.payload.length;
+    while (this.pendingBytes > PENDING_DATAGRAM_MAX_BYTES && this.pending.length > 0) {
+      const dropped = this.pending.shift();
+      this.pendingBytes -= dropped.payload.length;
+    }
+  }
+}
 class MoqConnection {
   constructor(serverUrl) {
-    __publicField(this, "transport", null);
-    __publicField(this, "state", ConnectionState.DISCONNECTED);
-    __publicField(this, "handlers", {});
-    __publicField(this, "datagramWriter", null);
-    // Datagram dispatcher
-    __publicField(this, "datagramHandlers", /* @__PURE__ */ new Map());
-    __publicField(this, "datagramDispatcherRunning", false);
-    // Pre-handler datagram buffer. The server's MOQ AddPublisher writes
-    // SUBSCRIBE_OK on the bidi control stream and then immediately
-    // SendDatagram's any backfilled / pre-buffered objects via the
-    // unreliable QUIC datagram channel. Datagrams can race ahead of the
-    // SUBSCRIBE_OK on the wire (the streams have independent flow), so a
-    // datagram for a freshly-assigned trackAlias can arrive at the
-    // dispatcher *before* the await session.subscribe() resolves and
-    // registerDatagramHandler is called. We buffer those here in arrival
-    // order and drain them when the handler is registered.
-    //
-    // FIFO across all aliases; oldest dropped when the byte cap is
-    // exceeded. Cleared on close().
-    __publicField(this, "pendingDatagrams", []);
-    __publicField(this, "pendingDatagramBytes", 0);
     this.serverUrl = serverUrl;
   }
+  transport = null;
+  state = ConnectionState.DISCONNECTED;
+  handlers = {};
+  datagramWriter = null;
+  // Datagram dispatcher: the read loop lives here (transport concern); the
+  // trackAlias→handler routing + SUBSCRIBE_OK race buffer live in the router
+  // (Phase 1 extraction — worker-transport-plan.md).
+  router = new DatagramRouter();
+  datagramDispatcherRunning = false;
+  // 'main' = this class reads the datagram readable directly (default/fallback).
+  // 'worker' = the receive Worker owns the read loop (design §11.4); the main
+  // dispatcher is suppressed and parsed non-audio datagrams arrive via
+  // ingestForwardedDatagram(), still routed through the same DatagramRouter
+  // (handler map + SUBSCRIBE_OK race buffer), unchanged.
+  datagramMode = "main";
   /**
    * Get current connection state
    */
@@ -1699,9 +1764,8 @@ class MoqConnection {
    */
   close(closeInfo) {
     this.datagramDispatcherRunning = false;
-    this.datagramHandlers.clear();
-    this.pendingDatagrams = [];
-    this.pendingDatagramBytes = 0;
+    this.datagramMode = "main";
+    this.router.clear();
     if (this.datagramWriter) {
       this.datagramWriter.releaseLock();
       this.datagramWriter = null;
@@ -1779,93 +1843,65 @@ class MoqConnection {
     }
   }
   /**
-   * Register a datagram handler for a specific track alias.
-   * Starts the dispatcher on first registration. Drains any datagrams
-   * that arrived for this alias before the handler was registered (the
-   * SUBSCRIBE_OK / first-datagram race — see `pendingDatagrams`).
+   * Switch to worker datagram mode (design §11.4): the receive Worker reads the
+   * datagram readable, so the main dispatcher must NOT. Returns the unlocked
+   * `datagrams.readable` for transfer into the worker. Must be called before any
+   * `registerDatagramHandler` (which would otherwise start the main dispatcher
+   * and lock the stream). Returns null if not connected.
+   */
+  takeDatagramReadableForWorker() {
+    if (!this.transport) return null;
+    if (this.datagramDispatcherRunning) {
+      throw new Error("Cannot switch to worker datagram mode: main dispatcher already reading");
+    }
+    this.datagramMode = "worker";
+    return this.transport.datagrams.readable;
+  }
+  /**
+   * Revert to main datagram mode if worker setup failed before locking the
+   * stream (so a later registerDatagramHandler starts the main dispatcher).
+   */
+  revertToMainDatagramMode() {
+    this.datagramMode = "main";
+  }
+  /**
+   * Feed a parsed datagram forwarded from the receive Worker through the normal
+   * dispatch path (handlers map + SUBSCRIBE_OK pending buffer). The worker only
+   * forwards non-audio tracks; audio is decoded in the worker and never arrives
+   * here.
+   */
+  ingestForwardedDatagram(trackAlias, payload, groupId, objectId) {
+    this.router.ingest({ trackAlias, payload, groupId, objectId });
+  }
+  /**
+   * Register a datagram handler for a specific track alias. Starts the dispatcher
+   * on first registration (transport concern); the router drains any datagrams
+   * that arrived for this alias before registration (the SUBSCRIBE_OK race).
    */
   registerDatagramHandler(trackAlias, handler) {
-    this.datagramHandlers.set(trackAlias, handler);
     if (!this.datagramDispatcherRunning) {
       this.startDatagramDispatcher();
     }
-    if (this.pendingDatagrams.length > 0) {
-      this.drainPendingForAlias(trackAlias, handler);
-    }
+    this.router.register(trackAlias, handler);
   }
-  /**
-   * Unregister a datagram handler for a track alias. Discards any
-   * still-buffered pre-handler datagrams for that alias.
-   */
+  /** Unregister a datagram handler; the router discards any still-buffered datagrams for it. */
   unregisterDatagramHandler(trackAlias) {
-    this.datagramHandlers.delete(trackAlias);
-    if (this.pendingDatagrams.length > 0) {
-      this.discardPendingForAlias(trackAlias);
-    }
+    this.router.unregister(trackAlias);
   }
   /**
-   * Number of buffered pre-handler datagrams currently held. Exposed
-   * for tests and diagnostics; production callers shouldn't need it.
+   * Number of buffered pre-handler datagrams currently held. Exposed for tests and
+   * diagnostics; production callers shouldn't need it.
    */
   getPendingDatagramCount() {
-    return this.pendingDatagrams.length;
-  }
-  /**
-   * Drain any datagrams that arrived for `trackAlias` before its
-   * handler was registered, in arrival order. Called from
-   * registerDatagramHandler.
-   */
-  drainPendingForAlias(trackAlias, handler) {
-    const remaining = [];
-    let drainedBytes = 0;
-    for (const d of this.pendingDatagrams) {
-      if (d.trackAlias === trackAlias) {
-        try {
-          handler(d.payload, d.trackAlias, d.groupId, d.objectId);
-        } catch {
-        }
-        drainedBytes += d.payload.length;
-      } else {
-        remaining.push(d);
-      }
-    }
-    this.pendingDatagrams = remaining;
-    this.pendingDatagramBytes -= drainedBytes;
-  }
-  /**
-   * Drop any buffered datagrams for `trackAlias` (called on
-   * unregister so we don't keep stale bytes around).
-   */
-  discardPendingForAlias(trackAlias) {
-    const remaining = [];
-    let discardedBytes = 0;
-    for (const d of this.pendingDatagrams) {
-      if (d.trackAlias === trackAlias) {
-        discardedBytes += d.payload.length;
-      } else {
-        remaining.push(d);
-      }
-    }
-    this.pendingDatagrams = remaining;
-    this.pendingDatagramBytes -= discardedBytes;
-  }
-  /**
-   * Buffer a datagram whose trackAlias has no registered handler yet.
-   * FIFO across all aliases; oldest entries are dropped when the byte
-   * cap is exceeded. Called from the dispatcher loop.
-   */
-  bufferUnknownDatagram(d) {
-    this.pendingDatagrams.push(d);
-    this.pendingDatagramBytes += d.payload.length;
-    while (this.pendingDatagramBytes > PENDING_DATAGRAM_MAX_BYTES && this.pendingDatagrams.length > 0) {
-      const dropped = this.pendingDatagrams.shift();
-      this.pendingDatagramBytes -= dropped.payload.length;
-    }
+    return this.router.pendingCount();
   }
   /**
    * Start the single datagram reader loop that dispatches to handlers by track alias
    */
   startDatagramDispatcher() {
+    if (this.datagramMode === "worker") {
+      return;
+    }
     if (this.datagramDispatcherRunning || !this.transport) {
       return;
     }
@@ -1879,7 +1915,7 @@ class MoqConnection {
           if (!value) continue;
           try {
             const parsed = parseObjectDatagram(value);
-            this.dispatchOrBuffer(parsed);
+            this.router.ingest(parsed);
           } catch {
           }
         }
@@ -1892,19 +1928,6 @@ class MoqConnection {
       }
     };
     loop();
-  }
-  /**
-   * Route a parsed datagram to its handler, or buffer it if the
-   * handler hasn't been registered yet. Extracted from the dispatcher
-   * loop so unit tests can drive it without a real WebTransport.
-   */
-  dispatchOrBuffer(parsed) {
-    const handler = this.datagramHandlers.get(parsed.trackAlias);
-    if (handler) {
-      handler(parsed.payload, parsed.trackAlias, parsed.groupId, parsed.objectId);
-    } else {
-      this.bufferUnknownDatagram(parsed);
-    }
   }
   /**
    * Update connection state and notify handlers
@@ -1961,24 +1984,24 @@ function getWebTransportSupport() {
   };
 }
 class TrackPublisher {
+  trackAlias;
+  publisherPriority;
+  connection = null;
+  // Group/Object tracking
+  currentGroupId = 0n;
+  currentObjectId = 0n;
+  lastGroupTimestamp = 0;
+  groupDurationMs = 1e3;
+  // Start new group every second
+  // Statistics
+  stats = {
+    objectsPublished: 0,
+    bytesPublished: 0,
+    errors: 0,
+    currentGroupId: 0n,
+    currentObjectId: 0n
+  };
   constructor(config) {
-    __publicField(this, "trackAlias");
-    __publicField(this, "publisherPriority");
-    __publicField(this, "connection", null);
-    // Group/Object tracking
-    __publicField(this, "currentGroupId", 0n);
-    __publicField(this, "currentObjectId", 0n);
-    __publicField(this, "lastGroupTimestamp", 0);
-    __publicField(this, "groupDurationMs", 1e3);
-    // Start new group every second
-    // Statistics
-    __publicField(this, "stats", {
-      objectsPublished: 0,
-      bytesPublished: 0,
-      errors: 0,
-      currentGroupId: 0n,
-      currentObjectId: 0n
-    });
     this.trackAlias = config.trackAlias;
     this.publisherPriority = config.publisherPriority ?? 0;
   }
@@ -2107,10 +2130,10 @@ class TrackPublisher {
   }
 }
 class AudioTrackPublisher extends TrackPublisher {
+  frameSequence = 0n;
+  sessionStartTime = 0;
   constructor(config) {
     super(config);
-    __publicField(this, "frameSequence", 0n);
-    __publicField(this, "sessionStartTime", 0);
     this.setGroupDuration(20);
   }
   /**
@@ -2135,9 +2158,9 @@ class AudioTrackPublisher extends TrackPublisher {
   }
 }
 class StateTrackPublisher extends TrackPublisher {
+  updateSequence = 0n;
   constructor(config) {
     super(config);
-    __publicField(this, "updateSequence", 0n);
     this.setGroupDuration(1e3);
   }
   /**
@@ -2166,21 +2189,19 @@ var AudioSubscriberState = /* @__PURE__ */ ((AudioSubscriberState2) => {
   return AudioSubscriberState2;
 })(AudioSubscriberState || {});
 class AudioSubscriber {
-  constructor() {
-    __publicField(this, "connection", null);
-    __publicField(this, "state", "idle");
-    __publicField(this, "frameHandler", null);
-    __publicField(this, "trackAlias", 0);
-    __publicField(this, "isListening", false);
-    // Statistics
-    __publicField(this, "stats", {
-      framesReceived: 0,
-      bytesReceived: 0,
-      framesDropped: 0,
-      currentGroupId: 0n,
-      lastFrameTime: 0
-    });
-  }
+  connection = null;
+  state = "idle";
+  frameHandler = null;
+  trackAlias = 0;
+  isListening = false;
+  // Statistics
+  stats = {
+    framesReceived: 0,
+    bytesReceived: 0,
+    framesDropped: 0,
+    currentGroupId: 0n,
+    lastFrameTime: 0
+  };
   /**
    * Get current state
    */
@@ -2285,6 +2306,447 @@ async function getAudioDecoderCapabilities() {
     return { supported: true, opusSupported: false };
   }
 }
+const PLAYOUT_TUNING = {
+  safetyMs: 1,
+  // S — floor pad above the underrun edge
+  lowInitMs: 5,
+  // warm-start L (server output is low-jitter MOQ datagrams)
+  lowMinMs: 2,
+  // baseline late cushion
+  lowMaxMs: 30,
+  // latency ceiling
+  highMaxMultiple: 3,
+  // H_max = 3·W
+  windowReads: 750,
+  // N — 2.0s at the 2.667ms worklet cadence (Go uses 400 = 2.0s at 5ms)
+  widenThreshold: 5,
+  // corrections/side/window to call it jitter
+  widenStepMs: 2,
+  // eager up
+  narrowStepMicros: 500
+  // 0.5ms — reluctant down (¼ of widen)
+};
+function computeJitterCapacity(cfg = {}) {
+  const sr = cfg.sampleRate ?? 48e3;
+  const nc = cfg.numChannels ?? 1;
+  const f2 = (ms) => Math.floor(sr * ms / 1e3);
+  const W = cfg.writerFrame ?? f2(20);
+  const R = cfg.readerFrame ?? f2(5);
+  const S = cfg.safety ?? f2(1);
+  const lMax = cfg.lowMax ?? f2(30);
+  const hMax = cfg.highMax ?? 3 * W;
+  const maxWR = Math.max(W, R);
+  const bandTopMax = R + S + lMax + 2 * W + hMax;
+  return { capacity: 2 * bandTopMax + 2 * maxWR, nc };
+}
+class JitterBufferCore {
+  // ---- immutable geometry (frames) ----
+  capacity;
+  floor;
+  w;
+  nc;
+  sampleRate;
+  lMin;
+  lMax;
+  hMin;
+  hMax;
+  // ---- immutable controller constants ----
+  windowReads;
+  widenThreshold;
+  widenStep;
+  narrowStep;
+  // ---- storage: capacity * nc interleaved floats ----
+  data;
+  // ---- SPSC heads — cumulative (never wrap). Index via (pos % capacity) * nc. ----
+  // writePos crosses the writer→reader thread boundary in SAB mode, so it is
+  // backed by an atomic cell when `sharedWritePos` is given; otherwise a plain
+  // number. The Atomics.store/load act as the release/acquire fence pairing the
+  // ring writes (writer) with the ring reads (reader) — the Go SPSC contract.
+  // readPos is reader-owned (the writer never touches it), so it stays plain.
+  _writePos = 0;
+  wpCell = null;
+  get writePos() {
+    return this.wpCell ? Number(Atomics.load(this.wpCell, 0)) : this._writePos;
+  }
+  set writePos(v) {
+    if (this.wpCell) Atomics.store(this.wpCell, 0, BigInt(v));
+    else this._writePos = v;
+  }
+  readPos = 0;
+  // ---- live adaptive window ----
+  currentL;
+  currentH;
+  // ---- tumbling-window controller state (reader-owned) ----
+  insertCount = 0;
+  dropCount = 0;
+  readsThisWindow = 0;
+  // ---- last completed window's counts, for observation ----
+  lastWinInserts = 0;
+  lastWinDrops = 0;
+  // ---- cumulative stats ----
+  underruns = 0;
+  overruns = 0;
+  laps = 0;
+  samplesDropped = 0;
+  samplesInserted = 0;
+  constructor(cfg = {}) {
+    const sr = cfg.sampleRate ?? 48e3;
+    const nc = cfg.numChannels ?? 1;
+    const f2 = (ms) => Math.floor(sr * ms / 1e3);
+    const W = cfg.writerFrame ?? f2(20);
+    const R = cfg.readerFrame ?? f2(5);
+    const S = cfg.safety ?? f2(1);
+    const lInit = cfg.lowInit ?? f2(5);
+    const lMin = cfg.lowMin ?? f2(2);
+    const lMax = cfg.lowMax ?? f2(30);
+    const hInit = cfg.highInit ?? W;
+    const hMin = cfg.highMin ?? W;
+    const hMax = cfg.highMax ?? 3 * W;
+    if (R <= 0 || W <= 0) {
+      throw new Error("JitterBufferCore: readerFrame and writerFrame must be > 0");
+    }
+    if (S < 0) {
+      throw new Error("JitterBufferCore: safety must be >= 0");
+    }
+    if (!(0 <= lMin && lMin <= lInit && lInit <= lMax)) {
+      throw new Error("JitterBufferCore: require 0 <= lowMin <= lowInit <= lowMax");
+    }
+    if (!(0 <= hMin && hMin <= hInit && hInit <= hMax)) {
+      throw new Error("JitterBufferCore: require 0 <= highMin <= highInit <= highMax");
+    }
+    const floor = R + S;
+    const maxWR = Math.max(W, R);
+    const bandTopMax = R + S + lMax + 2 * W + hMax;
+    const capacity = 2 * bandTopMax + 2 * maxWR;
+    this.capacity = capacity;
+    this.floor = floor;
+    this.w = W;
+    this.nc = nc;
+    this.sampleRate = sr;
+    this.lMin = lMin;
+    this.lMax = lMax;
+    this.hMin = hMin;
+    this.hMax = hMax;
+    this.windowReads = cfg.windowReads ?? 750;
+    this.widenThreshold = cfg.widenThreshold ?? 5;
+    this.widenStep = cfg.widenStep ?? f2(2);
+    this.narrowStep = cfg.narrowStep ?? Math.floor(sr * 500 / 1e6);
+    if (cfg.sharedStorage) {
+      if (cfg.sharedStorage.length !== capacity * nc) {
+        throw new Error(
+          `JitterBufferCore: sharedStorage length ${cfg.sharedStorage.length} != capacity*nc ${capacity * nc} (size it with computeJitterCapacity using the same config)`
+        );
+      }
+      this.data = cfg.sharedStorage;
+    } else {
+      this.data = new Float32Array(capacity * nc);
+    }
+    if (cfg.sharedWritePos) {
+      if (cfg.sharedWritePos.length < 1) {
+        throw new Error("JitterBufferCore: sharedWritePos must be a length-1 BigInt64Array");
+      }
+      this.wpCell = cfg.sharedWritePos;
+    }
+    this.currentL = lInit;
+    this.currentH = hInit;
+  }
+  /**
+   * Derive the operating thresholds from the (loaded-once) window allowances
+   * `l`, `h` plus the immutable floor and writer frame. Pure function; all
+   * branches of {@link read} use one consistent snapshot.
+   */
+  levels(l, h2) {
+    const t = this.floor + l;
+    return { t, snapTarget: t + this.w, dropLine: t + this.w + h2, overrunAt: t + 2 * this.w + h2 };
+  }
+  /**
+   * Copy `src` (interleaved, length a multiple of `nc`) into the ring. Never
+   * blocks. Writes longer than capacity are clipped to the most-recent
+   * `capacity` frames.
+   */
+  write(src) {
+    let nFrames = Math.floor(src.length / this.nc);
+    if (nFrames === 0) return;
+    if (nFrames > this.capacity) {
+      const skip = nFrames - this.capacity;
+      src = src.subarray(skip * this.nc);
+      nFrames = this.capacity;
+    }
+    const wp = this.writePos;
+    this.writeToRing(src, wp, nFrames);
+    this.writePos = wp + nFrames;
+  }
+  /**
+   * Copy up to `dst.length` interleaved samples from the ring into `dst`.
+   * Returns true when audio was produced, false on silence. See design §4. The
+   * window allowances L and H are read exactly once at the top so every branch
+   * sees consistent geometry. No debounce: corrections fire on the first
+   * out-of-band read.
+   */
+  read(dst) {
+    const nc = this.nc;
+    const nFrames = Math.floor(dst.length / nc);
+    if (nFrames === 0) return true;
+    let wp = this.writePos;
+    let rp = this.readPos;
+    let fill = wp - rp;
+    const { snapTarget, dropLine, overrunAt } = this.levels(this.currentL, this.currentH);
+    if (rp === 0) {
+      if (fill < snapTarget) {
+        dst.fill(0);
+        this.adapt();
+        return false;
+      }
+      rp = wp - snapTarget;
+      this.readPos = rp;
+      fill = snapTarget;
+    }
+    if (fill >= this.capacity) {
+      rp = wp - snapTarget;
+      this.readPos = rp;
+      fill = snapTarget;
+      this.laps++;
+    } else if (fill > overrunAt) {
+      rp = wp - snapTarget;
+      this.readPos = rp;
+      fill = snapTarget;
+      this.overruns++;
+    }
+    if (fill < nFrames) {
+      dst.fill(0);
+      this.underruns++;
+      this.adapt();
+      return false;
+    }
+    let corr = 0;
+    if (fill > dropLine && fill >= nFrames + 1) {
+      corr = 1;
+    } else if (fill < this.floor && nFrames >= 2) {
+      corr = -1;
+    }
+    if (corr === 1) {
+      this.readFromRing(dst, rp, nFrames);
+      const skipBase = (rp + nFrames) % this.capacity * nc;
+      const dstBase = (nFrames - 1) * nc;
+      for (let ch = 0; ch < nc; ch++) {
+        const a = dst[dstBase + ch];
+        const b2 = this.data[skipBase + ch];
+        dst[dstBase + ch] = (a + b2) * 0.5;
+      }
+      this.readPos = rp + nFrames + 1;
+      this.samplesDropped++;
+      this.dropCount++;
+    } else if (corr === -1) {
+      const realFrames = nFrames - 1;
+      this.readFromRing(dst.subarray(0, realFrames * nc), rp, realFrames);
+      const peekBase = (rp + realFrames) % this.capacity * nc;
+      const lastBase = (realFrames - 1) * nc;
+      const tailBase = realFrames * nc;
+      for (let ch = 0; ch < nc; ch++) {
+        const a = dst[lastBase + ch];
+        const b2 = this.data[peekBase + ch];
+        dst[tailBase + ch] = (a + b2) * 0.5;
+      }
+      this.readPos = rp + realFrames;
+      this.samplesInserted++;
+      this.insertCount++;
+    } else {
+      this.readFromRing(dst, rp, nFrames);
+      this.readPos = rp + nFrames;
+    }
+    this.adapt();
+    return true;
+  }
+  /**
+   * Tick the tumbling window once per Read and, every `windowReads`, run the
+   * decision off the accumulated correction counts, then reset them. No
+   * wall-clock: the window is a read count, the inputs are correction counts.
+   */
+  adapt() {
+    if (this.windowReads <= 0) return;
+    this.readsThisWindow++;
+    if (this.readsThisWindow < this.windowReads) return;
+    this.lastWinInserts = this.insertCount;
+    this.lastWinDrops = this.dropCount;
+    this.decide(this.insertCount, this.dropCount);
+    this.insertCount = 0;
+    this.dropCount = 0;
+    this.readsThisWindow = 0;
+  }
+  /**
+   * Move the window allowances from one window's correction counts (design §6):
+   *   - both sides breached (min ≥ threshold) ⇒ jitter ⇒ widen the breaching
+   *     side(s) by widenStep, capped at max (eager);
+   *   - otherwise a fully-calm side (count 0) narrows by narrowStep, floored at
+   *     min; a side that is lit but un-gated is drift — left to the ±1 corrector.
+   * `narrowStep < widenStep` makes it eager-up / reluctant-down — the stability
+   * guarantee.
+   */
+  decide(insertCount, dropCount) {
+    if (Math.min(insertCount, dropCount) >= this.widenThreshold) {
+      if (insertCount >= this.widenThreshold && this.currentL < this.lMax) {
+        this.currentL = Math.min(this.currentL + this.widenStep, this.lMax);
+      }
+      if (dropCount >= this.widenThreshold && this.currentH < this.hMax) {
+        this.currentH = Math.min(this.currentH + this.widenStep, this.hMax);
+      }
+      return;
+    }
+    if (insertCount === 0 && this.currentL > this.lMin) {
+      this.currentL = Math.max(this.currentL - this.narrowStep, this.lMin);
+    }
+    if (dropCount === 0 && this.currentH > this.hMin) {
+      this.currentH = Math.max(this.currentH - this.narrowStep, this.hMin);
+    }
+  }
+  /** Current fill in frames. */
+  fillFrames() {
+    return this.writePos - this.readPos;
+  }
+  /** Fill in interleaved floats (matching the Go ICircularBuffer convention). */
+  getBehind() {
+    return this.fillFrames() * this.nc;
+  }
+  /** Rich snapshot for tuning/observability. */
+  snapshot() {
+    const fill = this.fillFrames();
+    const l = this.currentL;
+    const h2 = this.currentH;
+    const srMs = this.sampleRate / 1e3;
+    const { dropLine } = this.levels(l, h2);
+    let zone = 0;
+    if (fill < this.floor) zone = -1;
+    else if (fill > dropLine) zone = 1;
+    return {
+      fillFrames: fill,
+      fillMs: fill / srMs,
+      floorFrames: this.floor,
+      lowAllowanceFrames: l,
+      lowAllowanceMs: l / srMs,
+      highAllowanceFrames: h2,
+      highAllowanceMs: h2 / srMs,
+      targetFrames: this.floor + l,
+      started: this.readPos > 0,
+      underruns: this.underruns,
+      overruns: this.overruns,
+      laps: this.laps,
+      samplesDropped: this.samplesDropped,
+      samplesInserted: this.samplesInserted,
+      lastWindowInserts: this.lastWinInserts,
+      lastWindowDrops: this.lastWinDrops,
+      zone
+    };
+  }
+  /**
+   * Copy `nFrames` frames from `src` into the ring at frame position `wp`,
+   * handling wraparound. Caller guarantees `nFrames <= capacity`.
+   */
+  writeToRing(src, wp, nFrames) {
+    const cap = this.capacity;
+    const nc = this.nc;
+    const startFrame = wp % cap;
+    if (startFrame + nFrames <= cap) {
+      this.data.set(src.subarray(0, nFrames * nc), startFrame * nc);
+      return;
+    }
+    const first = cap - startFrame;
+    this.data.set(src.subarray(0, first * nc), startFrame * nc);
+    this.data.set(src.subarray(first * nc, nFrames * nc), 0);
+  }
+  /**
+   * Copy `nFrames` frames from the ring at frame position `rp` into `dst`,
+   * handling wraparound. Caller guarantees `nFrames <= capacity`.
+   */
+  readFromRing(dst, rp, nFrames) {
+    const cap = this.capacity;
+    const nc = this.nc;
+    const startFrame = rp % cap;
+    if (startFrame + nFrames <= cap) {
+      dst.set(this.data.subarray(startFrame * nc, (startFrame + nFrames) * nc));
+      return;
+    }
+    const first = cap - startFrame;
+    dst.set(this.data.subarray(startFrame * nc, cap * nc), 0);
+    dst.set(this.data.subarray(0, (nFrames - first) * nc), first * nc);
+  }
+}
+const PLAYOUT_PROCESSOR_NAME = "playout-processor";
+const PLAYOUT_PROCESSOR_SOURCE = `
+class PlayoutRingProcessor extends AudioWorkletProcessor {
+  constructor(options) {
+    super();
+    const opts = (options && options.processorOptions) || {};
+    this.core = new JitterBufferCore(opts.config || {});
+    this.nc = this.core.nc;
+    this.statsEvery = opts.statsEvery || 94;
+    this.readsSinceStats = 0;
+    this.scratch = new Float32Array(128 * this.nc);
+    this.pcmPort = null;
+    // WRITER inputs arrive on this.port:
+    //   • {type:'pcmPort', port} — a transferred MessagePort whose other end is
+    //     held by the receive Worker (worker mode, design §11.3); PCM flows
+    //     worker → worklet directly, never touching the main thread.
+    //   • a Float32Array — decoded PCM posted directly from the main thread
+    //     (fallback path when the receive Worker is unavailable, design §11.8).
+    // this.port stays the OUTBOUND stats channel either way.
+    const onPcm = (pcm) => { if (pcm && pcm.length) this.core.write(pcm); };
+    this.port.onmessage = (e) => {
+      const d = e.data;
+      if (d && d.type === 'pcmPort' && d.port) {
+        this.pcmPort = d.port;
+        this.pcmPort.onmessage = (ev) => onPcm(ev.data);
+        if (this.pcmPort.start) this.pcmPort.start();
+        return;
+      }
+      onPcm(d);
+    };
+  }
+
+  // READER: pull one render quantum from the ring, deinterleave to outputs.
+  process(_inputs, outputs) {
+    const out = outputs[0];
+    if (!out || out.length === 0 || !out[0]) return true;
+    const nFrames = out[0].length;
+    const nc = this.nc;
+    const need = nFrames * nc;
+    if (this.scratch.length < need) this.scratch = new Float32Array(need);
+    const block = this.scratch.subarray(0, need);
+    // core.read zeroes the block on startup/underrun, so silence falls through.
+    this.core.read(block);
+    for (let ch = 0; ch < out.length; ch++) {
+      const dst = out[ch];
+      const srcCh = ch < nc ? ch : nc - 1;
+      for (let i = 0; i < nFrames; i++) dst[i] = block[i * nc + srcCh];
+    }
+    if (++this.readsSinceStats >= this.statsEvery) {
+      this.readsSinceStats = 0;
+      this.port.postMessage({ type: 'stats', snapshot: this.core.snapshot() });
+    }
+    return true;
+  }
+}
+registerProcessor(${JSON.stringify(PLAYOUT_PROCESSOR_NAME)}, PlayoutRingProcessor);
+`;
+function buildPlayoutWorkletCode() {
+  const coreSource = JitterBufferCore.toString();
+  if (!coreSource.startsWith("class")) {
+    throw new Error("playout-worklet: JitterBufferCore.toString() is not a class declaration");
+  }
+  const helper = /\b__(publicField|privateField|decorateClass|decorateParam|name|esDecorate)\b/.exec(coreSource);
+  if (helper) {
+    throw new Error(
+      `playout-worklet: serialized JitterBufferCore references the bundler helper "${helper[0]}" — it would be undefined in the worklet. Ensure the build target keeps native class fields (es2022+).`
+    );
+  }
+  return `const JitterBufferCore = ${coreSource};
+${PLAYOUT_PROCESSOR_SOURCE}`;
+}
+function createPlayoutWorkletUrl() {
+  const blob = new Blob([buildPlayoutWorkletCode()], { type: "application/javascript" });
+  return URL.createObjectURL(blob);
+}
+const RENDER_QUANTUM = 128;
+const DEFAULT_WRITER_FRAME = 240;
 var AudioPlayerState = /* @__PURE__ */ ((AudioPlayerState2) => {
   AudioPlayerState2["IDLE"] = "idle";
   AudioPlayerState2["INITIALIZING"] = "initializing";
@@ -2294,32 +2756,40 @@ var AudioPlayerState = /* @__PURE__ */ ((AudioPlayerState2) => {
   return AudioPlayerState2;
 })(AudioPlayerState || {});
 class AudioPlayer {
+  config;
+  state = "idle";
+  // Web Audio API
+  audioContext = null;
+  gainNode = null;
+  workletNode = null;
+  // WebCodecs decoder
+  decoder = null;
+  // Latest stats snapshot pushed from the worklet.
+  lastSnapshot = null;
+  // Main-thread decode counters (the worklet owns playout/buffer stats).
+  decodeStats = { framesDecoded: 0, samplesPlayed: 0, decodeErrors: 0 };
+  // Throttle counter for the [JBUF] observation log.
+  jbufLogCount = 0;
+  // Worker mode: when the receive Worker decodes (design §11), AudioPlayer's own
+  // main-thread AudioDecoder is bypassed (decodeFrame becomes a no-op) and PCM
+  // reaches the worklet ring via the SAB (or the pcmPort fallback).
+  workerDecodeMode = false;
+  // SAB ring (design §11.3, set in initialize() when the page is cross-origin
+  // isolated). The worklet reads this shared ring; the writer (worker, or the
+  // main-thread decoder in fallback) writes it. Null ⇒ postMessage path.
+  sharedStorage = null;
+  sharedWritePos = null;
+  jbConfigBase = null;
   constructor(config = {}) {
-    __publicField(this, "config");
-    __publicField(this, "state", "idle");
-    // Web Audio API
-    __publicField(this, "audioContext", null);
-    __publicField(this, "gainNode", null);
-    // WebCodecs decoder
-    __publicField(this, "decoder", null);
-    // Playback scheduling
-    __publicField(this, "nextPlayTime", 0);
-    __publicField(this, "scheduledBuffers", []);
-    // Statistics
-    __publicField(this, "stats", {
-      framesDecoded: 0,
-      samplesPlayed: 0,
-      underruns: 0,
-      bufferLevel: 0,
-      decodeErrors: 0
-    });
     this.config = {
       sampleRate: config.sampleRate ?? 48e3,
       channelCount: config.channelCount ?? 2,
       bufferSize: config.bufferSize ?? 0.03,
       maxBufferSize: config.maxBufferSize ?? 0.15,
       latencyHint: config.latencyHint ?? "interactive",
-      debug: config.debug ?? false
+      debug: config.debug ?? false,
+      writerFrameSamples: config.writerFrameSamples ?? DEFAULT_WRITER_FRAME,
+      jitterConfig: config.jitterConfig ?? {}
     };
   }
   // eslint-disable-next-line @typescript-eslint/no-explicit-any
@@ -2338,13 +2808,59 @@ class AudioPlayer {
    * Get statistics
    */
   getStats() {
-    return { ...this.stats };
+    const snap = this.lastSnapshot;
+    return {
+      framesDecoded: this.decodeStats.framesDecoded,
+      samplesPlayed: this.decodeStats.samplesPlayed,
+      underruns: snap ? snap.underruns : 0,
+      bufferLevel: snap ? snap.fillMs / 1e3 : 0,
+      decodeErrors: this.decodeStats.decodeErrors
+    };
+  }
+  /**
+   * Get the rich v3 jitter-buffer snapshot (live L/H, fill, corrections, …) for
+   * tuning/observability, or null if no snapshot has arrived yet.
+   */
+  getJitterStats() {
+    return this.lastSnapshot ? { ...this.lastSnapshot } : null;
+  }
+  /** The decoder config the receive Worker should use (mirrors this player's config). */
+  getDecoderConfig() {
+    return { codec: "opus", sampleRate: this.config.sampleRate, numberOfChannels: this.config.channelCount };
+  }
+  /**
+   * Prepare to hand decode off to the receive Worker (design §11.3) and flip this
+   * player into worker-decode mode (its own `decodeFrame` becomes a no-op).
+   * Returns how the worker should deliver PCM:
+   *  - **`sab`**: the worklet already reads a SharedArrayBuffer ring (cross-origin
+   *    isolated); the worker constructs a writer view of the same ring and writes
+   *    directly — real-time-safe, no `postMessage`.
+   *  - **`port`**: fallback — a MessageChannel whose worklet end is handed to the
+   *    worklet here; the worker posts PCM frames over it.
+   * Must be called after {@link initialize}. Returns null if the worklet isn't ready.
+   */
+  prepareForWorker() {
+    if (!this.workletNode) return null;
+    this.workerDecodeMode = true;
+    if (this.sharedStorage && this.sharedWritePos && this.jbConfigBase) {
+      this.log("worker-decode mode: SAB ring (no postMessage for PCM)");
+      return {
+        mode: "sab",
+        jbufConfig: this.jbConfigBase,
+        sharedStorage: this.sharedStorage,
+        sharedWritePos: this.sharedWritePos
+      };
+    }
+    const channel = new MessageChannel();
+    this.workletNode.port.postMessage({ type: "pcmPort", port: channel.port2 }, [channel.port2]);
+    this.log("worker-decode mode: pcmPort fallback (page is not cross-origin isolated)");
+    return { mode: "port", pcmPort: channel.port1 };
   }
   /**
    * Initialize the audio player
    *
-   * This creates the AudioContext and AudioDecoder.
-   * Must be called in response to a user gesture on some browsers.
+   * This creates the AudioContext, loads the playout worklet, and creates the
+   * AudioDecoder. Must be called in response to a user gesture on some browsers.
    */
   async initialize() {
     if (this.state !== "idle") {
@@ -2374,6 +2890,46 @@ class AudioPlayer {
           "Opus decoding is not supported in this browser"
         );
       }
+      const url = createPlayoutWorkletUrl();
+      try {
+        await this.audioContext.audioWorklet.addModule(url);
+      } finally {
+        URL.revokeObjectURL(url);
+      }
+      const jbConfig = {
+        sampleRate: this.audioContext.sampleRate,
+        numChannels: this.config.channelCount,
+        readerFrame: RENDER_QUANTUM,
+        writerFrame: this.config.writerFrameSamples,
+        ...this.config.jitterConfig
+      };
+      this.jbConfigBase = jbConfig;
+      let workletConfig = jbConfig;
+      if (typeof SharedArrayBuffer !== "undefined" && globalThis.crossOriginIsolated === true) {
+        const { capacity, nc } = computeJitterCapacity(jbConfig);
+        this.sharedStorage = new Float32Array(new SharedArrayBuffer(capacity * nc * 4));
+        this.sharedWritePos = new BigInt64Array(new SharedArrayBuffer(8));
+        workletConfig = { ...jbConfig, sharedStorage: this.sharedStorage, sharedWritePos: this.sharedWritePos };
+        this.log(`SAB ring active (capacity=${capacity} frames, nc=${nc})`);
+      } else {
+        this.log("SAB unavailable (not cross-origin isolated) — PCM via postMessage");
+      }
+      this.workletNode = new AudioWorkletNode(this.audioContext, PLAYOUT_PROCESSOR_NAME, {
+        numberOfInputs: 0,
+        numberOfOutputs: 1,
+        outputChannelCount: [this.config.channelCount],
+        processorOptions: { config: workletConfig }
+      });
+      this.workletNode.port.onmessage = (e) => {
+        const msg = e.data;
+        if (msg && msg.type === "stats") {
+          this.lastSnapshot = msg.snapshot;
+          this.logJitter(msg.snapshot);
+        }
+      };
+      this.gainNode = this.audioContext.createGain();
+      this.gainNode.connect(this.audioContext.destination);
+      this.workletNode.connect(this.gainNode);
       this.decoder = new AudioDecoder({
         output: (audioData) => this.handleDecodedAudio(audioData),
         error: (error) => this.handleDecodeError(error)
@@ -2381,12 +2937,13 @@ class AudioPlayer {
       this.decoder.configure({
         codec: "opus",
         sampleRate: this.config.sampleRate,
-        numberOfChannels: this.config.channelCount
+        numberOfChannels: this.config.channelCount,
+        // Real-time hint: don't batch input chunks before emitting output.
+        // (Not yet in lib.dom AudioDecoderConfig; honored at runtime, ignored if unknown.)
+        optimizeForLatency: true
       });
-      this.gainNode = this.audioContext.createGain();
-      this.gainNode.connect(this.audioContext.destination);
       this.state = "ready";
-      this.log("initialized");
+      this.log("initialized (v3 worklet playout)");
     } catch (error) {
       this.state = "error";
       throw error;
@@ -2396,33 +2953,23 @@ class AudioPlayer {
    * Start playback
    */
   start() {
-    var _a;
     if (this.state !== "ready" && this.state !== "playing") {
       throw new MoqClientError(
         `Cannot start: must be in READY state, currently ${this.state}`,
         "INVALID_STATE"
       );
     }
-    if (((_a = this.audioContext) == null ? void 0 : _a.state) === "suspended") {
+    if (this.audioContext?.state === "suspended") {
       this.audioContext.resume();
-    }
-    if (this.audioContext) {
-      this.nextPlayTime = this.audioContext.currentTime + this.config.bufferSize;
     }
     this.state = "playing";
     this.log("started");
   }
   /**
-   * Stop playback
+   * Stop playback. The worklet keeps running (and drains to silence); no new
+   * frames are written until PLAYING resumes.
    */
   stop() {
-    for (const source of this.scheduledBuffers) {
-      try {
-        source.stop();
-      } catch {
-      }
-    }
-    this.scheduledBuffers = [];
     this.state = "ready";
     this.log("stopped");
   }
@@ -2430,8 +2977,7 @@ class AudioPlayer {
    * Pause playback
    */
   pause() {
-    var _a;
-    if (((_a = this.audioContext) == null ? void 0 : _a.state) === "running") {
+    if (this.audioContext?.state === "running") {
       this.audioContext.suspend();
     }
   }
@@ -2439,8 +2985,7 @@ class AudioPlayer {
    * Resume playback
    */
   resume() {
-    var _a;
-    if (((_a = this.audioContext) == null ? void 0 : _a.state) === "suspended") {
+    if (this.audioContext?.state === "suspended") {
       this.audioContext.resume();
     }
   }
@@ -2457,8 +3002,7 @@ class AudioPlayer {
    * Get current playback volume.
    */
   getVolume() {
-    var _a;
-    return ((_a = this.gainNode) == null ? void 0 : _a.gain.value) ?? 1;
+    return this.gainNode?.gain.value ?? 1;
   }
   /**
    * Decode an Opus frame
@@ -2467,6 +3011,7 @@ class AudioPlayer {
    * @param timestamp - Frame timestamp in microseconds (optional)
    */
   decodeFrame(opusData, timestamp) {
+    if (this.workerDecodeMode) return;
     if (!this.decoder) {
       throw new MoqClientError("Decoder not initialized", "NOT_INITIALIZED");
     }
@@ -2492,6 +3037,14 @@ class AudioPlayer {
       }
       this.decoder = null;
     }
+    if (this.workletNode) {
+      this.workletNode.port.onmessage = null;
+      try {
+        this.workletNode.disconnect();
+      } catch {
+      }
+      this.workletNode = null;
+    }
     if (this.gainNode) {
       this.gainNode.disconnect();
       this.gainNode = null;
@@ -2500,76 +3053,48 @@ class AudioPlayer {
       await this.audioContext.close();
       this.audioContext = null;
     }
+    this.lastSnapshot = null;
     this.state = "idle";
     this.log("disposed");
   }
   /**
-   * Handle decoded audio data
+   * Handle decoded audio data: copy interleaved PCM and transfer it to the
+   * worklet ring (zero-copy). The worklet does all buffering and playout.
    */
   handleDecodedAudio(audioData) {
-    if (!this.audioContext || this.state !== "playing") {
-      audioData.close();
-      return;
-    }
     try {
-      const buffer = this.audioContext.createBuffer(
-        audioData.numberOfChannels,
-        audioData.numberOfFrames,
-        audioData.sampleRate
-      );
-      for (let channel = 0; channel < audioData.numberOfChannels; channel++) {
-        const channelData = buffer.getChannelData(channel);
-        audioData.copyTo(channelData, {
-          planeIndex: channel,
-          format: "f32-planar"
-        });
+      if (this.state !== "playing" || !this.workletNode) {
+        return;
       }
-      this.scheduleBuffer(buffer);
-      this.stats.framesDecoded++;
-      this.stats.samplesPlayed += audioData.numberOfFrames;
-      if (this.audioContext) {
-        this.stats.bufferLevel = Math.max(
-          0,
-          this.nextPlayTime - this.audioContext.currentTime
-        );
-      }
+      const frames = audioData.numberOfFrames;
+      const channels = audioData.numberOfChannels;
+      const pcm = new Float32Array(frames * channels);
+      audioData.copyTo(pcm, { planeIndex: 0, format: "f32" });
+      this.workletNode.port.postMessage(pcm, [pcm.buffer]);
+      this.decodeStats.framesDecoded++;
+      this.decodeStats.samplesPlayed += frames;
     } finally {
       audioData.close();
     }
   }
   /**
-   * Schedule an audio buffer for playback
+   * One-line [JBUF] observation log — the browser analog of the Go server's
+   * [JBUF] tuning line (design §10 / plan Phase 4). Gated by `debug`; throttled
+   * to ~1/s (the worklet posts stats ~4/s). Filter devtools by "JBUF" during soak.
    */
-  scheduleBuffer(buffer) {
-    if (!this.audioContext) {
-      return;
-    }
-    const source = this.audioContext.createBufferSource();
-    source.buffer = buffer;
-    source.connect(this.gainNode ?? this.audioContext.destination);
-    const currentTime = this.audioContext.currentTime;
-    if (this.nextPlayTime < currentTime) {
-      this.stats.underruns++;
-      this.nextPlayTime = currentTime + this.config.bufferSize;
-    } else if (this.nextPlayTime > currentTime + this.config.maxBufferSize) {
-      this.nextPlayTime = currentTime + this.config.bufferSize;
-    }
-    source.start(this.nextPlayTime);
-    this.scheduledBuffers.push(source);
-    source.onended = () => {
-      const index = this.scheduledBuffers.indexOf(source);
-      if (index > -1) {
-        this.scheduledBuffers.splice(index, 1);
-      }
-    };
-    this.nextPlayTime += buffer.duration;
+  logJitter(s) {
+    if (!this.config.debug) return;
+    if (this.jbufLogCount++ % 4 !== 0) return;
+    console.log(
+      `[JBUF] fill=${s.fillMs.toFixed(1)}ms L=${s.lowAllowanceMs.toFixed(1)} H=${s.highAllowanceMs.toFixed(1)} tgt=${s.targetFrames}fr zone=${s.zone} win=${s.lastWindowInserts}/${s.lastWindowDrops} und=${s.underruns} ovr=${s.overruns} lap=${s.laps} ins=${s.samplesInserted} drop=${s.samplesDropped}`
+    );
   }
   /**
    * Handle decode error
    */
   handleDecodeError(error) {
     console.error("Audio decode error:", error);
-    this.stats.decodeErrors++;
+    this.decodeStats.decodeErrors++;
   }
 }
 class AudioDecoderNotSupportedError extends MoqClientError {
@@ -2603,17 +3128,160 @@ async function getAudioPlaybackCapabilities() {
     opusDecoding
   };
 }
-class StateSubscriber {
-  constructor() {
-    __publicField(this, "connection", null);
-    __publicField(this, "trackAlias", 0);
-    __publicField(this, "isListening", false);
-    __publicField(this, "entities", /* @__PURE__ */ new Map());
-    __publicField(this, "stateHandler", null);
-    // Statistics
-    __publicField(this, "updatesReceived", 0);
-    __publicField(this, "errorsDropped", 0);
+function audioReceiveWorkerSupported() {
+  return typeof Worker !== "undefined" && typeof MessageChannel !== "undefined" && typeof WebTransport !== "undefined" && typeof AudioDecoder !== "undefined" && typeof Blob !== "undefined" && typeof URL !== "undefined" && typeof URL.createObjectURL === "function";
+}
+function routeDatagram(trackAlias, audioTrackAlias) {
+  return audioTrackAlias !== void 0 && trackAlias === audioTrackAlias ? "decode" : "forward";
+}
+const RECEIVE_WORKER_SOURCE = `
+'use strict';
+let reader = null;
+let pcmPort = null;     // non-isolated fallback PCM sink
+let jbuf = null;        // SAB writer-view JitterBufferCore (preferred PCM sink)
+let decoder = null;
+let audioTrackAlias = undefined;
+let running = false;
+
+function post(msg, transfer) { self.postMessage(msg, transfer || []); }
+
+function configureDecoder(cfg) {
+  if (decoder) { try { decoder.close(); } catch (e) {} decoder = null; }
+  decoder = new AudioDecoder({
+    output: (audioData) => {
+      try {
+        const frames = audioData.numberOfFrames;
+        const channels = audioData.numberOfChannels;
+        const pcm = new Float32Array(frames * channels);
+        // Interleaved single-plane copy — matches the worklet ring's interleaved layout.
+        audioData.copyTo(pcm, { planeIndex: 0, format: 'f32' });
+        // SAB mode: write straight into the shared ring (real-time-safe, no
+        // postMessage). Fallback: post to the worklet's port.
+        if (jbuf) jbuf.write(pcm);
+        else if (pcmPort) pcmPort.postMessage(pcm, [pcm.buffer]);
+      } catch (e) {
+        post({ type: 'notice', event: 'decode-error', detail: String(e) });
+      } finally {
+        audioData.close();
+      }
+    },
+    error: (e) => post({ type: 'notice', event: 'decode-error', detail: String(e) }),
+  });
+  // optimizeForLatency: minimise how many input chunks the decoder buffers before
+  // emitting output (WebCodecs real-time hint) — without it some decoders batch
+  // several frames, adding burstiness on top of the transport.
+  decoder.configure({ codec: cfg.codec, sampleRate: cfg.sampleRate, numberOfChannels: cfg.numberOfChannels, optimizeForLatency: true });
+}
+
+async function readLoop() {
+  if (!reader || running) return;
+  running = true;
+  try {
+    while (running) {
+      const { value, done } = await reader.read();
+      if (done) { post({ type: 'notice', event: 'reader-done' }); break; }
+      if (!value) continue;
+      let parsed;
+      try { parsed = parseObjectDatagram(value); } catch (e) { continue; } // malformed — skip
+      const isAudio = audioTrackAlias !== undefined && parsed.trackAlias === audioTrackAlias && decoder;
+      if (isAudio) {
+        try {
+          const chunk = new EncodedAudioChunk({
+            type: 'key', // Opus frames are always key frames
+            timestamp: Number(parsed.groupId) * 1000,
+            data: parsed.payload,
+          });
+          decoder.decode(chunk);
+        } catch (e) {
+          post({ type: 'notice', event: 'decode-error', detail: String(e) });
+        }
+      } else {
+        // Forward non-audio to the main thread. Copy the payload (it is a
+        // subarray of the read chunk) into its own buffer so it can be transferred.
+        const copy = parsed.payload.slice();
+        post({
+          type: 'datagram',
+          trackAlias: parsed.trackAlias,
+          groupId: parsed.groupId,
+          objectId: parsed.objectId,
+          publisherPriority: parsed.publisherPriority,
+          payload: copy,
+        }, [copy.buffer]);
+      }
+    }
+  } catch (e) {
+    if (running) post({ type: 'notice', event: 'reader-error', detail: String(e) });
+  } finally {
+    running = false;
   }
+}
+
+self.onmessage = (e) => {
+  const msg = e.data || {};
+  if (msg.type === 'init') {
+    if (msg.pcmPort) pcmPort = msg.pcmPort;
+    if (msg.readable) { reader = msg.readable.getReader(); readLoop(); }
+  } else if (msg.type === 'audio') {
+    if (msg.pcmPort) pcmPort = msg.pcmPort;
+    if (msg.sharedStorage && msg.sharedWritePos && msg.jbufConfig) {
+      // SAB mode: writer-view core over the shared ring (same config the worklet
+      // reader uses, plus the shared arrays).
+      const c = Object.assign({}, msg.jbufConfig, {
+        sharedStorage: msg.sharedStorage,
+        sharedWritePos: msg.sharedWritePos,
+      });
+      jbuf = new JitterBufferCore(c);
+    }
+    configureDecoder(msg.decoderConfig);
+    audioTrackAlias = msg.audioTrackAlias;
+  } else if (msg.type === 'stop') {
+    running = false;
+    if (decoder) { try { decoder.close(); } catch (e2) {} decoder = null; }
+    if (reader) { try { reader.cancel(); } catch (e2) {} reader = null; }
+  }
+};
+`;
+function buildReceiveWorkerCode() {
+  const coreSrc = JitterBufferCore.toString();
+  const varintSrc = decodeVarint.toString();
+  const parseSrc = parseObjectDatagram.toString();
+  if (!coreSrc.startsWith("class")) {
+    throw new Error("audio-receive-worker: JitterBufferCore.toString() is not a class declaration");
+  }
+  for (const [name, src] of [
+    ["decodeVarint", varintSrc],
+    ["parseObjectDatagram", parseSrc]
+  ]) {
+    if (!src.startsWith("function")) {
+      throw new Error(`audio-receive-worker: ${name}.toString() is not a function declaration`);
+    }
+  }
+  const helper = /\b__(publicField|privateField|decorateClass|decorateParam|name|esDecorate)\b/.exec(
+    coreSrc + varintSrc + parseSrc
+  );
+  if (helper) {
+    throw new Error(
+      `audio-receive-worker: serialized source references bundler helper "${helper[0]}" — it would be undefined in the worker. Keep native output (es2022+).`
+    );
+  }
+  return `const JitterBufferCore = ${coreSrc};
+${varintSrc}
+${parseSrc}
+${RECEIVE_WORKER_SOURCE}`;
+}
+function createReceiveWorkerUrl() {
+  const blob = new Blob([buildReceiveWorkerCode()], { type: "application/javascript" });
+  return URL.createObjectURL(blob);
+}
+class StateSubscriber {
+  connection = null;
+  trackAlias = 0;
+  isListening = false;
+  entities = /* @__PURE__ */ new Map();
+  stateHandler = null;
+  // Statistics
+  updatesReceived = 0;
+  errorsDropped = 0;
   /**
    * Set handler for entity state updates
    */
@@ -2709,13 +3377,13 @@ class ControlTrackPublisher extends TrackPublisher {
   }
 }
 class CacheTopicSubscriber {
+  connection = null;
+  trackAlias = 0;
+  isListening = false;
+  valuesHandler = null;
+  removedHandler = null;
+  merger;
   constructor(cache) {
-    __publicField(this, "connection", null);
-    __publicField(this, "trackAlias", 0);
-    __publicField(this, "isListening", false);
-    __publicField(this, "valuesHandler", null);
-    __publicField(this, "removedHandler", null);
-    __publicField(this, "merger");
     this.merger = new TopicMerger(cache);
   }
   /** Underlying CacheMap. Exposed so callers (PanaudiaMoqClient) can pass
@@ -2759,15 +3427,14 @@ class CacheTopicSubscriber {
     if (!this.connection || this.isListening) return;
     this.isListening = true;
     this.connection.registerDatagramHandler(this.trackAlias, (payload) => {
-      var _a, _b;
       if (!this.isListening) return;
       const result = this.merger.applyEnvelope(payload);
       if (!result) return;
       if (result.accepted.length > 0) {
-        (_a = this.valuesHandler) == null ? void 0 : _a.call(this, result.accepted);
+        this.valuesHandler?.(result.accepted);
       }
       if (result.tombstoned.length > 0) {
-        (_b = this.removedHandler) == null ? void 0 : _b.call(this, result.tombstoned);
+        this.removedHandler?.(result.tombstoned);
       }
     });
   }
@@ -2812,9 +3479,7 @@ class EntitySubscriber extends CacheTopicSubscriber {
 class SpaceSubscriber extends CacheTopicSubscriber {
 }
 class EventEmitter {
-  constructor() {
-    __publicField(this, "handlers", /* @__PURE__ */ new Map());
-  }
+  handlers = /* @__PURE__ */ new Map();
   on(event, handler) {
     if (!this.handlers.has(event)) {
       this.handlers.set(event, /* @__PURE__ */ new Set());
@@ -2842,24 +3507,24 @@ class EventEmitter {
 }
 class MoqSession {
   constructor(connection, debug = false) {
-    __publicField(this, "controlStream", null);
-    __publicField(this, "writer", null);
-    __publicField(this, "reader", null);
-    __publicField(this, "readBuffer", new Uint8Array(0));
-    __publicField(this, "nextSubscribeId", 1);
-    __publicField(this, "nextTrackAlias", 1);
-    __publicField(this, "nextAnnounceRequestId", 2);
-    // Client uses even IDs for announces (to avoid collisions with server)
-    // Track state
-    __publicField(this, "subscriptions", /* @__PURE__ */ new Map());
-    __publicField(this, "announcements", /* @__PURE__ */ new Map());
-    __publicField(this, "incomingSubscriptions", /* @__PURE__ */ new Map());
-    // Callbacks for when server subscribes to our tracks
-    __publicField(this, "onIncomingSubscribeCallback", null);
-    __publicField(this, "debug");
     this.connection = connection;
     this.debug = debug;
   }
+  controlStream = null;
+  writer = null;
+  reader = null;
+  readBuffer = new Uint8Array(0);
+  nextSubscribeId = 1;
+  nextTrackAlias = 1;
+  nextAnnounceRequestId = 2;
+  // Client uses even IDs for announces (to avoid collisions with server)
+  // Track state
+  subscriptions = /* @__PURE__ */ new Map();
+  announcements = /* @__PURE__ */ new Map();
+  incomingSubscriptions = /* @__PURE__ */ new Map();
+  // Callbacks for when server subscribes to our tracks
+  onIncomingSubscribeCallback = null;
+  debug;
   // eslint-disable-next-line @typescript-eslint/no-explicit-any
   log(...args) {
     if (this.debug) {
@@ -3149,8 +3814,7 @@ class MoqSession {
    * Get track alias for a subscription
    */
   getTrackAlias(subscribeId) {
-    var _a;
-    return (_a = this.subscriptions.get(subscribeId)) == null ? void 0 : _a.alias;
+    return this.subscriptions.get(subscribeId)?.alias;
   }
   /**
    * Start background message processing loop
@@ -3259,55 +3923,58 @@ class MoqSession {
   }
 }
 class PanaudiaMoqClient {
+  config;
+  events = new EventEmitter();
+  connection = null;
+  session = null;
+  state = ConnectionState.DISCONNECTED;
+  // Audio publishing
+  audioPublisher = null;
+  audioTrackPublisher = null;
+  // State publishing
+  stateTrackPublisher = null;
+  statePublishPending = false;
+  statePublishThrottleMs = 50;
+  // Throttle state updates to 20Hz max
+  lastStatePublishTime = 0;
+  // Audio playback
+  audioSubscriber = null;
+  audioPlayer = null;
+  // Receive Worker: owns the datagram read loop + Opus decode off the main
+  // thread (design §11). Null when unsupported/failed ⇒ main-thread fallback.
+  receiveWorker = null;
+  // State tracking
+  stateSubscriber = null;
+  // Control publishing
+  controlTrackPublisher = null;
+  controlTrackAlias = 3;
+  // Attributes tracking
+  attributesSubscriber = null;
+  attributesOutputTrackAlias = 0;
+  attributesCache = new CacheMap();
+  // Entity tracking (per-client filtered: only this client's own uuid keys)
+  entitySubscriber = null;
+  entityOutputTrackAlias = 0;
+  entityCache = new CacheMap();
+  // Space tracking (gated server-side by commands.ReadCapSpaceRead).
+  // The server only announces the space output track to holders with
+  // the cap; if the announce never arrives we leave the subscriber
+  // null and never subscribe. Cache is persistent across subscriber
+  // lifetimes to support resume HLC on reconnect.
+  spaceSubscriber = null;
+  spaceOutputTrackAlias = 0;
+  spaceCache = new CacheMap();
+  // Track aliases (assigned after announcement/subscription)
+  audioInputTrackAlias = 1;
+  stateTrackAlias = 2;
+  audioOutputTrackAlias = 0;
+  // Assigned by server
+  stateOutputTrackAlias = 0;
+  // Assigned by server
+  // Node state
+  position;
+  rotation;
   constructor(config) {
-    __publicField(this, "config");
-    __publicField(this, "events", new EventEmitter());
-    __publicField(this, "connection", null);
-    __publicField(this, "session", null);
-    __publicField(this, "state", ConnectionState.DISCONNECTED);
-    // Audio publishing
-    __publicField(this, "audioPublisher", null);
-    __publicField(this, "audioTrackPublisher", null);
-    // State publishing
-    __publicField(this, "stateTrackPublisher", null);
-    __publicField(this, "statePublishPending", false);
-    __publicField(this, "statePublishThrottleMs", 50);
-    // Throttle state updates to 20Hz max
-    __publicField(this, "lastStatePublishTime", 0);
-    // Audio playback
-    __publicField(this, "audioSubscriber", null);
-    __publicField(this, "audioPlayer", null);
-    // State tracking
-    __publicField(this, "stateSubscriber", null);
-    // Control publishing
-    __publicField(this, "controlTrackPublisher", null);
-    __publicField(this, "controlTrackAlias", 3);
-    // Attributes tracking
-    __publicField(this, "attributesSubscriber", null);
-    __publicField(this, "attributesOutputTrackAlias", 0);
-    __publicField(this, "attributesCache", new CacheMap());
-    // Entity tracking (per-client filtered: only this client's own uuid keys)
-    __publicField(this, "entitySubscriber", null);
-    __publicField(this, "entityOutputTrackAlias", 0);
-    __publicField(this, "entityCache", new CacheMap());
-    // Space tracking (gated server-side by commands.ReadCapSpaceRead).
-    // The server only announces the space output track to holders with
-    // the cap; if the announce never arrives we leave the subscriber
-    // null and never subscribe. Cache is persistent across subscriber
-    // lifetimes to support resume HLC on reconnect.
-    __publicField(this, "spaceSubscriber", null);
-    __publicField(this, "spaceOutputTrackAlias", 0);
-    __publicField(this, "spaceCache", new CacheMap());
-    // Track aliases (assigned after announcement/subscription)
-    __publicField(this, "audioInputTrackAlias", 1);
-    __publicField(this, "stateTrackAlias", 2);
-    __publicField(this, "audioOutputTrackAlias", 0);
-    // Assigned by server
-    __publicField(this, "stateOutputTrackAlias", 0);
-    // Assigned by server
-    // Node state
-    __publicField(this, "position");
-    __publicField(this, "rotation");
     if (!config.serverUrl) {
       throw new Error("serverUrl is required");
     }
@@ -3380,7 +4047,7 @@ class PanaudiaMoqClient {
       this.connection.setHandlers({
         onStateChange: (connState, error) => {
           if (connState === ConnectionState.ERROR) {
-            this.handleError("connection_error", (error == null ? void 0 : error.message) ?? "Connection failed");
+            this.handleError("connection_error", error?.message ?? "Connection failed");
           } else if (connState === ConnectionState.DISCONNECTED) {
             this.handleDisconnect();
           }
@@ -3389,6 +4056,7 @@ class PanaudiaMoqClient {
       await this.connection.connect(options);
       this.setState(ConnectionState.CONNECTED);
       this.log("WebTransport connected, initializing MOQ session...");
+      this.setupReceiveWorker();
       this.session = new MoqSession(this.connection, this.config.debug);
       this.session.onIncomingSubscribe((namespace, trackAlias) => {
         const nsPath = namespace.join("/");
@@ -3594,6 +4262,7 @@ class PanaudiaMoqClient {
       this.spaceSubscriber.stop();
       this.spaceSubscriber = null;
     }
+    this.teardownReceiveWorker();
     if (this.session) {
       await this.session.close();
       this.session = null;
@@ -3661,15 +4330,13 @@ class PanaudiaMoqClient {
    * Get all known entities (not gone)
    */
   getEntities() {
-    var _a;
-    return ((_a = this.stateSubscriber) == null ? void 0 : _a.getEntities()) ?? /* @__PURE__ */ new Map();
+    return this.stateSubscriber?.getEntities() ?? /* @__PURE__ */ new Map();
   }
   /**
    * Get a specific entity by UUID
    */
   getEntity(uuid) {
-    var _a;
-    return (_a = this.stateSubscriber) == null ? void 0 : _a.getEntity(uuid);
+    return this.stateSubscriber?.getEntity(uuid);
   }
   /**
    * Register a handler for entity state updates (Panaudia coordinates)
@@ -3681,8 +4348,7 @@ class PanaudiaMoqClient {
    * Get the attributes cache containing all current key-value entries.
    */
   getAttributesCache() {
-    var _a;
-    return ((_a = this.attributesSubscriber) == null ? void 0 : _a.getAll()) ?? /* @__PURE__ */ new Map();
+    return this.attributesSubscriber?.getAll() ?? /* @__PURE__ */ new Map();
   }
   /**
    * Register a handler for batches of attribute values.
@@ -3789,8 +4455,7 @@ class PanaudiaMoqClient {
    * Check if microphone is currently recording
    */
   isMicrophoneActive() {
-    var _a;
-    return ((_a = this.audioPublisher) == null ? void 0 : _a.getState()) === AudioPublisherState.RECORDING;
+    return this.audioPublisher?.getState() === AudioPublisherState.RECORDING;
   }
   /**
    * Enable or disable mic capture without tearing down the publisher.
@@ -3798,22 +4463,19 @@ class PanaudiaMoqClient {
    * alive so MOQ frames keep flowing as Opus DTX.
    */
   setMicEnabled(enabled) {
-    var _a;
-    (_a = this.audioPublisher) == null ? void 0 : _a.setMicEnabled(enabled);
+    this.audioPublisher?.setMicEnabled(enabled);
   }
   /**
    * Pause microphone recording
    */
   pauseMicrophone() {
-    var _a;
-    (_a = this.audioPublisher) == null ? void 0 : _a.pause();
+    this.audioPublisher?.pause();
   }
   /**
    * Resume microphone recording
    */
   resumeMicrophone() {
-    var _a;
-    (_a = this.audioPublisher) == null ? void 0 : _a.resume();
+    this.audioPublisher?.resume();
   }
   /**
    * Publish the current state immediately
@@ -3879,6 +4541,31 @@ class PanaudiaMoqClient {
       }
     });
     this.audioPlayer.start();
+    if (this.receiveWorker && this.audioPlayer) {
+      const handoff = this.audioPlayer.prepareForWorker();
+      if (handoff?.mode === "sab") {
+        this.receiveWorker.postMessage({
+          type: "audio",
+          audioTrackAlias: this.audioOutputTrackAlias,
+          decoderConfig: this.audioPlayer.getDecoderConfig(),
+          jbufConfig: handoff.jbufConfig,
+          sharedStorage: handoff.sharedStorage,
+          sharedWritePos: handoff.sharedWritePos
+        });
+        this.log(`receive worker decoding audio trackAlias=${this.audioOutputTrackAlias} via SAB ring`);
+      } else if (handoff?.mode === "port") {
+        this.receiveWorker.postMessage(
+          {
+            type: "audio",
+            audioTrackAlias: this.audioOutputTrackAlias,
+            decoderConfig: this.audioPlayer.getDecoderConfig(),
+            pcmPort: handoff.pcmPort
+          },
+          [handoff.pcmPort]
+        );
+        this.log(`receive worker decoding audio trackAlias=${this.audioOutputTrackAlias} via pcmPort (fallback)`);
+      }
+    }
     await this.audioSubscriber.start();
     this.log("Playback started");
   }
@@ -3898,37 +4585,32 @@ class PanaudiaMoqClient {
    * Check if audio playback is currently active
    */
   isPlaybackActive() {
-    var _a;
-    return ((_a = this.audioPlayer) == null ? void 0 : _a.getState()) === AudioPlayerState.PLAYING;
+    return this.audioPlayer?.getState() === AudioPlayerState.PLAYING;
   }
   /**
    * Pause audio playback
    */
   pausePlayback() {
-    var _a;
-    (_a = this.audioPlayer) == null ? void 0 : _a.pause();
+    this.audioPlayer?.pause();
   }
   /**
    * Resume audio playback
    */
   resumePlayback() {
-    var _a;
-    (_a = this.audioPlayer) == null ? void 0 : _a.resume();
+    this.audioPlayer?.resume();
   }
   /**
    * Set playback volume.
    * @param volume - Volume level from 0.0 (silent) to 1.0 (full volume).
    */
   setVolume(volume) {
-    var _a;
-    (_a = this.audioPlayer) == null ? void 0 : _a.setVolume(volume);
+    this.audioPlayer?.setVolume(volume);
   }
   /**
    * Get current playback volume.
    */
   getVolume() {
-    var _a;
-    return ((_a = this.audioPlayer) == null ? void 0 : _a.getVolume()) ?? 1;
+    return this.audioPlayer?.getVolume() ?? 1;
   }
   /**
    * Get audio playback statistics
@@ -3974,7 +4656,6 @@ class PanaudiaMoqClient {
    * Extract node ID from JWT token
    */
   extractEntityIdFromJwt(token) {
-    var _a;
     try {
       const parts = token.split(".");
       if (parts.length !== 3) {
@@ -3993,7 +4674,7 @@ class PanaudiaMoqClient {
       } catch {
         throw new JwtParseError("Invalid JWT format: payload is not valid JSON");
       }
-      const entityId = claims.jti || ((_a = claims.panaudia) == null ? void 0 : _a.uuid);
+      const entityId = claims.jti || claims.panaudia?.uuid;
       if (!entityId) {
         throw new JwtParseError("No entity ID found in JWT: missing jti or panaudia.uuid claim");
       }
@@ -4020,6 +4701,65 @@ class PanaudiaMoqClient {
     });
   }
   /**
+   * Move datagram receive + Opus decode off the main thread into the receive
+   * Worker (design §11). Best-effort: if the worker can't be created the
+   * connection stays in main-thread mode and the worklet is fed by the
+   * main-thread decoder (fallback, design §11.8) — audio still plays. MUST run
+   * after connect() and BEFORE any subscriber starts (which would lock the
+   * datagram stream on the main thread).
+   */
+  setupReceiveWorker() {
+    if (!this.connection) return;
+    if (!audioReceiveWorkerSupported()) {
+      this.log("receive worker unsupported — main-thread decode (fallback)");
+      return;
+    }
+    let url = null;
+    try {
+      url = createReceiveWorkerUrl();
+      const worker = new Worker(url);
+      worker.onmessage = (e) => {
+        const msg = e.data;
+        if (!msg) return;
+        if (msg.type === "datagram") {
+          this.connection?.ingestForwardedDatagram(msg.trackAlias, msg.payload, msg.groupId, msg.objectId);
+        } else if (msg.type === "notice") {
+          this.log(`[receive-worker] ${msg.event}${msg.detail ? ": " + msg.detail : ""}`);
+        }
+      };
+      worker.onerror = (e) => this.log("[receive-worker] error", e.message);
+      const readable = this.connection.takeDatagramReadableForWorker();
+      if (!readable) {
+        worker.terminate();
+        return;
+      }
+      worker.postMessage({ type: "init", readable }, [readable]);
+      this.receiveWorker = worker;
+      console.info("[panaudia] receive worker ACTIVE — datagram read + decode OFF the main thread");
+    } catch (err) {
+      console.warn(
+        "[panaudia] receive worker setup FAILED — falling back to MAIN-THREAD decode (audio will be coupled to main-thread jank). Cause:",
+        err
+      );
+      this.receiveWorker?.terminate();
+      this.receiveWorker = null;
+      this.connection?.revertToMainDatagramMode();
+    } finally {
+      if (url) URL.revokeObjectURL(url);
+    }
+  }
+  /** Stop and release the receive Worker, if any. */
+  teardownReceiveWorker() {
+    if (this.receiveWorker) {
+      try {
+        this.receiveWorker.postMessage({ type: "stop" });
+      } catch {
+      }
+      this.receiveWorker.terminate();
+      this.receiveWorker = null;
+    }
+  }
+  /**
    * Handle connection error
    */
   handleError(code, message) {
@@ -4030,6 +4770,7 @@ class PanaudiaMoqClient {
    * Handle disconnection
    */
   handleDisconnect() {
+    this.teardownReceiveWorker();
     this.session = null;
     this.connection = null;
     this.setState(ConnectionState.DISCONNECTED);
@@ -4037,13 +4778,8 @@ class PanaudiaMoqClient {
   }
 }
 class MoqTransportAdapter {
-  constructor() {
-    __publicField(this, "client", null);
-    __publicField(this, "microphoneId");
-    // Event registration — buffer handlers if client not yet created
-    // eslint-disable-next-line @typescript-eslint/no-explicit-any
-    __publicField(this, "pendingHandlers", []);
-  }
+  client = null;
+  microphoneId;
   async connect(config) {
     this.microphoneId = config.microphoneId;
     let serverUrl = config.serverUrl;
@@ -4084,9 +4820,9 @@ class MoqTransportAdapter {
     const audio = config.audio;
     await this.client.startMicrophone({
       ...this.microphoneId ? { deviceId: this.microphoneId } : {},
-      ...(audio == null ? void 0 : audio.echoCancellation) !== void 0 ? { echoCancellation: audio.echoCancellation } : {},
-      ...(audio == null ? void 0 : audio.noiseSuppression) !== void 0 ? { noiseSuppression: audio.noiseSuppression } : {},
-      ...(audio == null ? void 0 : audio.autoGainControl) !== void 0 ? { autoGainControl: audio.autoGainControl } : {}
+      ...audio?.echoCancellation !== void 0 ? { echoCancellation: audio.echoCancellation } : {},
+      ...audio?.noiseSuppression !== void 0 ? { noiseSuppression: audio.noiseSuppression } : {},
+      ...audio?.autoGainControl !== void 0 ? { autoGainControl: audio.autoGainControl } : {}
     });
     await this.client.startPlayback();
   }
@@ -4129,8 +4865,7 @@ class MoqTransportAdapter {
     this.requireClient().setVolume(volume);
   }
   getVolume() {
-    var _a;
-    return ((_a = this.client) == null ? void 0 : _a.getVolume()) ?? 1;
+    return this.client?.getVolume() ?? 1;
   }
   muteMic() {
     this.requireClient().setMicEnabled(false);
@@ -4150,6 +4885,9 @@ class MoqTransportAdapter {
       await client.command(msg.message.command, msg.message.args);
     }
   }
+  // Event registration — buffer handlers if client not yet created
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  pendingHandlers = [];
   onEntityState(handler) {
     this.registerHandler("entityState", handler);
   }
@@ -4225,6 +4963,7 @@ export {
   ENTITY_INFO3_SIZE,
   EntitySubscriber,
   InvalidStateError,
+  JitterBufferCore,
   JwtParseError,
   MOQ_TRANSPORT_VERSION,
   MessageBuilder,
@@ -4236,6 +4975,8 @@ export {
   MoqMessageType,
   MoqRole,
   MoqTransportAdapter,
+  PLAYOUT_PROCESSOR_NAME,
+  PLAYOUT_TUNING,
   PanaudiaMoqClient,
   PanaudiaTrackType,
   ProtocolError,
@@ -4248,15 +4989,21 @@ export {
   aframeToPanaudia,
   ambisonicToWebglPosition,
   ambisonicToWebglRotation,
+  audioReceiveWorkerSupported,
   babylonToPanaudia,
   buildAnnounce,
   buildClientSetup,
   buildObjectDatagram,
+  buildPlayoutWorkletCode,
+  buildReceiveWorkerCode,
   buildSubscribe,
   buildUnannounce,
   buildUnsubscribe,
   b as bytesToUuid,
+  computeJitterCapacity,
   createEntityInfo3,
+  createPlayoutWorkletUrl,
+  createReceiveWorkerUrl,
   decodeBytes,
   f as decodeCacheOp,
   decodeString,
@@ -4296,6 +5043,7 @@ export {
   parseSubscribeOk,
   pixiToPanaudia,
   playcanvasToPanaudia,
+  routeDatagram,
   threejsToPanaudia,
   unityToPanaudia,
   unrealToPanaudia,

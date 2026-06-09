@@ -1,4 +1,6 @@
 import { ConnectionState, WebTransportOptions } from './types.js';
+import { DatagramHandler } from './datagram-router.js';
+export type { DatagramHandler };
 /**
  * Connection event handlers
  */
@@ -9,20 +11,15 @@ export interface ConnectionEventHandlers {
 /**
  * Manages a WebTransport connection to an MOQ server
  */
-/**
- * Handler for datagrams dispatched by track alias
- */
-export type DatagramHandler = (payload: Uint8Array, trackAlias: number, groupId: bigint, objectId: bigint) => void;
 export declare class MoqConnection {
     private readonly serverUrl;
     private transport;
     private state;
     private handlers;
     private datagramWriter;
-    private datagramHandlers;
+    private router;
     private datagramDispatcherRunning;
-    private pendingDatagrams;
-    private pendingDatagramBytes;
+    private datagramMode;
     constructor(serverUrl: string);
     /**
      * Get current connection state
@@ -69,49 +66,42 @@ export declare class MoqConnection {
      */
     sendDatagram(data: Uint8Array): Promise<void>;
     /**
-     * Register a datagram handler for a specific track alias.
-     * Starts the dispatcher on first registration. Drains any datagrams
-     * that arrived for this alias before the handler was registered (the
-     * SUBSCRIBE_OK / first-datagram race — see `pendingDatagrams`).
+     * Switch to worker datagram mode (design §11.4): the receive Worker reads the
+     * datagram readable, so the main dispatcher must NOT. Returns the unlocked
+     * `datagrams.readable` for transfer into the worker. Must be called before any
+     * `registerDatagramHandler` (which would otherwise start the main dispatcher
+     * and lock the stream). Returns null if not connected.
+     */
+    takeDatagramReadableForWorker(): ReadableStream<Uint8Array> | null;
+    /**
+     * Revert to main datagram mode if worker setup failed before locking the
+     * stream (so a later registerDatagramHandler starts the main dispatcher).
+     */
+    revertToMainDatagramMode(): void;
+    /**
+     * Feed a parsed datagram forwarded from the receive Worker through the normal
+     * dispatch path (handlers map + SUBSCRIBE_OK pending buffer). The worker only
+     * forwards non-audio tracks; audio is decoded in the worker and never arrives
+     * here.
+     */
+    ingestForwardedDatagram(trackAlias: number, payload: Uint8Array, groupId: bigint, objectId: bigint): void;
+    /**
+     * Register a datagram handler for a specific track alias. Starts the dispatcher
+     * on first registration (transport concern); the router drains any datagrams
+     * that arrived for this alias before registration (the SUBSCRIBE_OK race).
      */
     registerDatagramHandler(trackAlias: number, handler: DatagramHandler): void;
-    /**
-     * Unregister a datagram handler for a track alias. Discards any
-     * still-buffered pre-handler datagrams for that alias.
-     */
+    /** Unregister a datagram handler; the router discards any still-buffered datagrams for it. */
     unregisterDatagramHandler(trackAlias: number): void;
     /**
-     * Number of buffered pre-handler datagrams currently held. Exposed
-     * for tests and diagnostics; production callers shouldn't need it.
+     * Number of buffered pre-handler datagrams currently held. Exposed for tests and
+     * diagnostics; production callers shouldn't need it.
      */
     getPendingDatagramCount(): number;
-    /**
-     * Drain any datagrams that arrived for `trackAlias` before its
-     * handler was registered, in arrival order. Called from
-     * registerDatagramHandler.
-     */
-    private drainPendingForAlias;
-    /**
-     * Drop any buffered datagrams for `trackAlias` (called on
-     * unregister so we don't keep stale bytes around).
-     */
-    private discardPendingForAlias;
-    /**
-     * Buffer a datagram whose trackAlias has no registered handler yet.
-     * FIFO across all aliases; oldest entries are dropped when the byte
-     * cap is exceeded. Called from the dispatcher loop.
-     */
-    private bufferUnknownDatagram;
     /**
      * Start the single datagram reader loop that dispatches to handlers by track alias
      */
     private startDatagramDispatcher;
-    /**
-     * Route a parsed datagram to its handler, or buffer it if the
-     * handler hasn't been registered yet. Extracted from the dispatcher
-     * loop so unit tests can drive it without a real WebTransport.
-     */
-    private dispatchOrBuffer;
     /**
      * Update connection state and notify handlers
      */

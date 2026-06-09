@@ -9,6 +9,11 @@ export default defineConfig({
     }),
   ],
   build: {
+    // es2022 keeps native class fields (no `__publicField` helper), which the
+    // playout worklet relies on: it serializes JitterBufferCore via .toString()
+    // and that must be self-contained. Safe — this lib already requires
+    // WebCodecs/WebTransport/AudioWorklet, all newer than es2022.
+    target: 'es2022',
     lib: {
       entry: {
         index: resolve(__dirname, 'src/index.ts'),
@@ -25,6 +30,12 @@ export default defineConfig({
     },
     sourcemap: true,
     minify: false,
+  },
+  // Bundled module workers (the receive/transport worker uses `?worker&inline`,
+  // design §11.9 / worker-transport-design §8) must be emitted as ES — Vite's
+  // default worker format is 'iife', incompatible with `type: 'module'`.
+  worker: {
+    format: 'es',
   },
   server: {
     https: true,

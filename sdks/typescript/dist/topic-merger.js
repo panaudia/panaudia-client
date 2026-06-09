@@ -1,6 +1,3 @@
-var __defProp = Object.defineProperty;
-var __defNormalProp = (obj, key, value) => key in obj ? __defProp(obj, key, { enumerable: true, configurable: true, writable: true, value }) : obj[key] = value;
-var __publicField = (obj, key, value) => __defNormalProp(obj, typeof key !== "symbol" ? key + "" : key, value);
 var ConnectionState = /* @__PURE__ */ ((ConnectionState2) => {
   ConnectionState2["DISCONNECTED"] = "disconnected";
   ConnectionState2["CONNECTING"] = "connecting";
@@ -83,14 +80,14 @@ function createEntityInfo3(entityId, position, rotation, volume) {
   return {
     uuid: entityId,
     position: {
-      x: (position == null ? void 0 : position.x) ?? 0.5,
-      y: (position == null ? void 0 : position.y) ?? 0.5,
-      z: (position == null ? void 0 : position.z) ?? 0.5
+      x: position?.x ?? 0.5,
+      y: position?.y ?? 0.5,
+      z: position?.z ?? 0.5
     },
     rotation: {
-      yaw: (rotation == null ? void 0 : rotation.yaw) ?? 0,
-      pitch: (rotation == null ? void 0 : rotation.pitch) ?? 0,
-      roll: (rotation == null ? void 0 : rotation.roll) ?? 0
+      yaw: rotation?.yaw ?? 0,
+      pitch: rotation?.pitch ?? 0,
+      roll: rotation?.roll ?? 0
     },
     volume: volume ?? 1,
     gone: false
@@ -101,11 +98,9 @@ function isValidUuid(uuid) {
   return uuidRegex.test(uuid);
 }
 class CacheMap {
-  constructor() {
-    __publicField(this, "entries", /* @__PURE__ */ new Map());
-    __publicField(this, "highestOpId", 0n);
-    __publicField(this, "changeHandler", null);
-  }
+  entries = /* @__PURE__ */ new Map();
+  highestOpId = 0n;
+  changeHandler = null;
   /**
    * Register a handler called on every state change (add, update, remove).
    */
@@ -119,7 +114,6 @@ class CacheMap {
    * was removed, or 'rejected' if the incoming opId was not higher.
    */
   merge(op) {
-    var _a, _b;
     if (op.opId > this.highestOpId) {
       this.highestOpId = op.opId;
     }
@@ -130,7 +124,7 @@ class CacheMap {
     if (op.tombstone) {
       if (existing) {
         this.entries.delete(op.key);
-        (_a = this.changeHandler) == null ? void 0 : _a.call(this, op.key, null, "tombstoned");
+        this.changeHandler?.(op.key, null, "tombstoned");
       }
       return "tombstoned";
     }
@@ -140,7 +134,7 @@ class CacheMap {
       nodeId: op.nodeId
     };
     this.entries.set(op.key, entry);
-    (_b = this.changeHandler) == null ? void 0 : _b.call(this, op.key, entry, "accepted");
+    this.changeHandler?.(op.key, entry, "accepted");
     return "accepted";
   }
   /**
@@ -285,11 +279,11 @@ function parseJsonOps(payload) {
   }
 }
 class TopicMerger {
+  cache;
+  updatesReceived = 0;
+  errorsDropped = 0;
+  debugHandler = null;
   constructor(cache) {
-    __publicField(this, "cache");
-    __publicField(this, "updatesReceived", 0);
-    __publicField(this, "errorsDropped", 0);
-    __publicField(this, "debugHandler", null);
     this.cache = cache ?? new CacheMap();
   }
   /** Install a per-envelope diagnostic callback. Pass null to clear. */

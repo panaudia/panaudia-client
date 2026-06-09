@@ -1,6 +1,3 @@
-var __defProp = Object.defineProperty;
-var __defNormalProp = (obj, key, value) => key in obj ? __defProp(obj, key, { enumerable: true, configurable: true, writable: true, value }) : obj[key] = value;
-var __publicField = (obj, key, value) => __defNormalProp(obj, typeof key !== "symbol" ? key + "" : key, value);
 import { C as ConnectionState, T as TopicMerger, a as entityInfo3ToBytes, E as ENTITY_INFO3_SIZE, e as entityInfo3FromBytes } from "../topic-merger.js";
 function extractEntityIdFromJwt(token) {
   const parts = token.split(".");
@@ -11,38 +8,38 @@ function extractEntityIdFromJwt(token) {
   return payload.jti;
 }
 class WebRtcTransport {
+  ws = null;
+  pc = null;
+  dcState = null;
+  dcControl = null;
+  micStream = null;
+  micTracks = [];
+  audioElement = null;
+  incomingStream = null;
+  state = ConnectionState.DISCONNECTED;
+  entityId = "";
+  microphoneId;
+  // Event handlers
+  entityStateHandlers = [];
+  attributesHandlers = [];
+  attributesRemovedHandlers = [];
+  entityHandlers = [];
+  entityRemovedHandlers = [];
+  spaceHandlers = [];
+  spaceRemovedHandlers = [];
+  connectionStateHandlers = [];
+  errorHandlers = [];
+  warningHandlers = [];
+  // Per-topic merge gates. Without these, an out-of-order arrival on
+  // the data channel (stale backfill envelope landing after a newer
+  // live envelope for the same key) would let the older value clobber
+  // the newer one, since TopicTree.applyValues is opId-blind. The MOQ
+  // path runs the same gate inside CacheTopicSubscriber.
+  attributesMerger = new TopicMerger();
+  entityMerger = new TopicMerger();
+  spaceMerger = new TopicMerger();
+  cacheDebugHandlers = [];
   constructor() {
-    __publicField(this, "ws", null);
-    __publicField(this, "pc", null);
-    __publicField(this, "dcState", null);
-    __publicField(this, "dcControl", null);
-    __publicField(this, "micStream", null);
-    __publicField(this, "micTracks", []);
-    __publicField(this, "audioElement", null);
-    __publicField(this, "incomingStream", null);
-    __publicField(this, "state", ConnectionState.DISCONNECTED);
-    __publicField(this, "entityId", "");
-    __publicField(this, "microphoneId");
-    // Event handlers
-    __publicField(this, "entityStateHandlers", []);
-    __publicField(this, "attributesHandlers", []);
-    __publicField(this, "attributesRemovedHandlers", []);
-    __publicField(this, "entityHandlers", []);
-    __publicField(this, "entityRemovedHandlers", []);
-    __publicField(this, "spaceHandlers", []);
-    __publicField(this, "spaceRemovedHandlers", []);
-    __publicField(this, "connectionStateHandlers", []);
-    __publicField(this, "errorHandlers", []);
-    __publicField(this, "warningHandlers", []);
-    // Per-topic merge gates. Without these, an out-of-order arrival on
-    // the data channel (stale backfill envelope landing after a newer
-    // live envelope for the same key) would let the older value clobber
-    // the newer one, since TopicTree.applyValues is opId-blind. The MOQ
-    // path runs the same gate inside CacheTopicSubscriber.
-    __publicField(this, "attributesMerger", new TopicMerger());
-    __publicField(this, "entityMerger", new TopicMerger());
-    __publicField(this, "spaceMerger", new TopicMerger());
-    __publicField(this, "cacheDebugHandlers", []);
     const dispatch = (info) => {
       for (const h of this.cacheDebugHandlers) {
         try {
@@ -75,9 +72,9 @@ class WebRtcTransport {
     this.setupPeerConnection();
     const audio = config.audio;
     const constraints = {
-      autoGainControl: (audio == null ? void 0 : audio.autoGainControl) ?? false,
-      echoCancellation: (audio == null ? void 0 : audio.echoCancellation) ?? false,
-      noiseSuppression: (audio == null ? void 0 : audio.noiseSuppression) ?? false,
+      autoGainControl: audio?.autoGainControl ?? false,
+      echoCancellation: audio?.echoCancellation ?? false,
+      noiseSuppression: audio?.noiseSuppression ?? false,
       sampleRate: 48e3,
       ...this.microphoneId ? { deviceId: { exact: this.microphoneId } } : {}
     };
@@ -90,7 +87,6 @@ class WebRtcTransport {
     await this.connectWebSocket(wsUrl);
   }
   async disconnect() {
-    var _a, _b;
     for (const track of this.micTracks) {
       track.stop();
     }
@@ -101,8 +97,8 @@ class WebRtcTransport {
       this.audioElement.srcObject = null;
       this.audioElement = null;
     }
-    (_a = this.dcState) == null ? void 0 : _a.close();
-    (_b = this.dcControl) == null ? void 0 : _b.close();
+    this.dcState?.close();
+    this.dcControl?.close();
     this.dcState = null;
     this.dcControl = null;
     if (this.pc) {
@@ -125,9 +121,9 @@ class WebRtcTransport {
   async startAudioCapture(config) {
     if (!this.pc) throw new Error("Not connected");
     const constraints = {
-      autoGainControl: (config == null ? void 0 : config.autoGainControl) ?? false,
-      echoCancellation: (config == null ? void 0 : config.echoCancellation) ?? false,
-      noiseSuppression: (config == null ? void 0 : config.noiseSuppression) ?? false,
+      autoGainControl: config?.autoGainControl ?? false,
+      echoCancellation: config?.echoCancellation ?? false,
+      noiseSuppression: config?.noiseSuppression ?? false,
       sampleRate: 48e3,
       ...this.microphoneId ? { deviceId: { exact: this.microphoneId } } : {}
     };
@@ -166,8 +162,7 @@ class WebRtcTransport {
     }
   }
   getVolume() {
-    var _a;
-    return ((_a = this.audioElement) == null ? void 0 : _a.volume) ?? 1;
+    return this.audioElement?.volume ?? 1;
   }
   muteMic() {
     for (const track of this.micTracks) {
@@ -315,8 +310,7 @@ class WebRtcTransport {
       }
     };
     this.pc.onconnectionstatechange = () => {
-      var _a;
-      if (((_a = this.pc) == null ? void 0 : _a.connectionState) === "failed") {
+      if (this.pc?.connectionState === "failed") {
         this.emitError(new Error("WebRTC connection failed"));
         this.setState(ConnectionState.ERROR);
       }
@@ -328,7 +322,6 @@ class WebRtcTransport {
       this.ws.onopen = () => {
       };
       this.ws.onmessage = (evt) => {
-        var _a;
         let msg;
         try {
           msg = JSON.parse(evt.data);
@@ -340,7 +333,7 @@ class WebRtcTransport {
             this.handleOffer(JSON.parse(msg.data)).then(resolve).catch(reject);
             break;
           case "candidate":
-            (_a = this.pc) == null ? void 0 : _a.addIceCandidate(JSON.parse(msg.data)).catch(() => {
+            this.pc?.addIceCandidate(JSON.parse(msg.data)).catch(() => {
             });
             break;
           case "error": {

@@ -17,20 +17,9 @@ class MockAudioContext {
   currentTime = 0;
   state: 'running' | 'suspended' | 'closed' = 'running';
 
-  createBuffer = vi.fn().mockReturnValue({
-    duration: 0.02,
-    getChannelData: vi.fn().mockReturnValue(new Float32Array(960)),
-  });
-
-  createBufferSource = vi.fn().mockReturnValue({
-    buffer: null,
-    connect: vi.fn(),
-    start: vi.fn(),
-    stop: vi.fn(),
-    onended: null,
-  });
-
   destination = {};
+
+  audioWorklet = { addModule: vi.fn().mockResolvedValue(undefined) };
 
   createGain = vi.fn().mockReturnValue({
     gain: { value: 1 },
@@ -41,6 +30,18 @@ class MockAudioContext {
   resume = vi.fn().mockResolvedValue(undefined);
   suspend = vi.fn().mockResolvedValue(undefined);
   close = vi.fn().mockResolvedValue(undefined);
+}
+
+// Mock AudioWorkletNode (the v3 playout processor node)
+class MockAudioWorkletNode {
+  port = { postMessage: vi.fn(), onmessage: null as ((e: MessageEvent) => void) | null };
+  connect = vi.fn();
+  disconnect = vi.fn();
+  constructor(
+    public context: unknown,
+    public name: string,
+    public options?: unknown
+  ) {}
 }
 
 // Mock AudioDecoder
@@ -104,6 +105,10 @@ describe('AudioPlayer', () => {
     vi.stubGlobal('AudioContext', MockAudioContext);
     vi.stubGlobal('AudioDecoder', MockAudioDecoder);
     vi.stubGlobal('EncodedAudioChunk', MockEncodedAudioChunk);
+    vi.stubGlobal('AudioWorkletNode', MockAudioWorkletNode);
+    // Blob URL plumbing used by createPlayoutWorkletUrl (Node has Blob, not these).
+    (URL as unknown as { createObjectURL: unknown }).createObjectURL = vi.fn(() => 'blob:mock');
+    (URL as unknown as { revokeObjectURL: unknown }).revokeObjectURL = vi.fn();
 
     player = new AudioPlayer();
   });
@@ -111,6 +116,8 @@ describe('AudioPlayer', () => {
   afterEach(() => {
     vi.unstubAllGlobals();
     vi.restoreAllMocks();
+    delete (URL as unknown as { createObjectURL?: unknown }).createObjectURL;
+    delete (URL as unknown as { revokeObjectURL?: unknown }).revokeObjectURL;
   });
 
   describe('initial state', () => {

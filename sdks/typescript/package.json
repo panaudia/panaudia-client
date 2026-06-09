@@ -32,6 +32,8 @@
     "test:watch": "vitest",
     "test:coverage": "vitest --coverage",
     "typecheck": "tsc --noEmit",
+    "verify:worklet": "node scripts/verify-worklet.mjs",
+    "verify:receive-worker": "node scripts/verify-receive-worker.mjs",
     "test:integration": "npx playwright test"
   },
   "keywords": [

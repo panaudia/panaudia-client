@@ -6,6 +6,10 @@
 
 import { ConnectionState, WebTransportOptions } from './types.js';
 import { parseObjectDatagram } from './moq-transport.js';
+import { DatagramRouter, type DatagramHandler } from './datagram-router.js';
+
+// Re-exported for back-compat: subscribers import DatagramHandler from here.
+export type { DatagramHandler };
 
 /**
  * Connection event handlers
@@ -18,49 +22,23 @@ export interface ConnectionEventHandlers {
 /**
  * Manages a WebTransport connection to an MOQ server
  */
-/**
- * Handler for datagrams dispatched by track alias
- */
-export type DatagramHandler = (payload: Uint8Array, trackAlias: number, groupId: bigint, objectId: bigint) => void;
-
-interface PendingDatagram {
-  trackAlias: number;
-  payload: Uint8Array;
-  groupId: bigint;
-  objectId: bigint;
-}
-
-// Maximum bytes the pre-handler datagram buffer is allowed to hold
-// across all unknown aliases. 1 MiB is the same envelope-size budget
-// used elsewhere in the SDK and is far more than any realistic
-// SUBSCRIBE_OK race needs (typically a handful of envelopes a few
-// hundred bytes each).
-const PENDING_DATAGRAM_MAX_BYTES = 1 * 1024 * 1024;
-
 export class MoqConnection {
   private transport: WebTransport | null = null;
   private state: ConnectionState = ConnectionState.DISCONNECTED;
   private handlers: ConnectionEventHandlers = {};
   private datagramWriter: WritableStreamDefaultWriter<Uint8Array> | null = null;
 
-  // Datagram dispatcher
-  private datagramHandlers: Map<number, DatagramHandler> = new Map();
+  // Datagram dispatcher: the read loop lives here (transport concern); the
+  // trackAlias→handler routing + SUBSCRIBE_OK race buffer live in the router
+  // (Phase 1 extraction — worker-transport-plan.md).
+  private router = new DatagramRouter();
   private datagramDispatcherRunning: boolean = false;
-
-  // Pre-handler datagram buffer. The server's MOQ AddPublisher writes
-  // SUBSCRIBE_OK on the bidi control stream and then immediately
-  // SendDatagram's any backfilled / pre-buffered objects via the
-  // unreliable QUIC datagram channel. Datagrams can race ahead of the
-  // SUBSCRIBE_OK on the wire (the streams have independent flow), so a
-  // datagram for a freshly-assigned trackAlias can arrive at the
-  // dispatcher *before* the await session.subscribe() resolves and
-  // registerDatagramHandler is called. We buffer those here in arrival
-  // order and drain them when the handler is registered.
-  //
-  // FIFO across all aliases; oldest dropped when the byte cap is
-  // exceeded. Cleared on close().
-  private pendingDatagrams: PendingDatagram[] = [];
-  private pendingDatagramBytes: number = 0;
+  // 'main' = this class reads the datagram readable directly (default/fallback).
+  // 'worker' = the receive Worker owns the read loop (design §11.4); the main
+  // dispatcher is suppressed and parsed non-audio datagrams arrive via
+  // ingestForwardedDatagram(), still routed through the same DatagramRouter
+  // (handler map + SUBSCRIBE_OK race buffer), unchanged.
+  private datagramMode: 'main' | 'worker' = 'main';
 
   constructor(private readonly serverUrl: string) {}
 
@@ -134,9 +112,8 @@ export class MoqConnection {
    */
   close(closeInfo?: WebTransportCloseInfo): void {
     this.datagramDispatcherRunning = false;
-    this.datagramHandlers.clear();
-    this.pendingDatagrams = [];
-    this.pendingDatagramBytes = 0;
+    this.datagramMode = 'main';
+    this.router.clear();
     if (this.datagramWriter) {
       this.datagramWriter.releaseLock();
       this.datagramWriter = null;
@@ -219,103 +196,72 @@ export class MoqConnection {
   }
 
   /**
-   * Register a datagram handler for a specific track alias.
-   * Starts the dispatcher on first registration. Drains any datagrams
-   * that arrived for this alias before the handler was registered (the
-   * SUBSCRIBE_OK / first-datagram race — see `pendingDatagrams`).
+   * Switch to worker datagram mode (design §11.4): the receive Worker reads the
+   * datagram readable, so the main dispatcher must NOT. Returns the unlocked
+   * `datagrams.readable` for transfer into the worker. Must be called before any
+   * `registerDatagramHandler` (which would otherwise start the main dispatcher
+   * and lock the stream). Returns null if not connected.
+   */
+  takeDatagramReadableForWorker(): ReadableStream<Uint8Array> | null {
+    if (!this.transport) return null;
+    if (this.datagramDispatcherRunning) {
+      throw new Error('Cannot switch to worker datagram mode: main dispatcher already reading');
+    }
+    this.datagramMode = 'worker';
+    return this.transport.datagrams.readable;
+  }
+
+  /**
+   * Revert to main datagram mode if worker setup failed before locking the
+   * stream (so a later registerDatagramHandler starts the main dispatcher).
+   */
+  revertToMainDatagramMode(): void {
+    this.datagramMode = 'main';
+  }
+
+  /**
+   * Feed a parsed datagram forwarded from the receive Worker through the normal
+   * dispatch path (handlers map + SUBSCRIBE_OK pending buffer). The worker only
+   * forwards non-audio tracks; audio is decoded in the worker and never arrives
+   * here.
+   */
+  ingestForwardedDatagram(trackAlias: number, payload: Uint8Array, groupId: bigint, objectId: bigint): void {
+    this.router.ingest({ trackAlias, payload, groupId, objectId });
+  }
+
+  /**
+   * Register a datagram handler for a specific track alias. Starts the dispatcher
+   * on first registration (transport concern); the router drains any datagrams
+   * that arrived for this alias before registration (the SUBSCRIBE_OK race).
    */
   registerDatagramHandler(trackAlias: number, handler: DatagramHandler): void {
-    this.datagramHandlers.set(trackAlias, handler);
     if (!this.datagramDispatcherRunning) {
       this.startDatagramDispatcher();
     }
-    if (this.pendingDatagrams.length > 0) {
-      this.drainPendingForAlias(trackAlias, handler);
-    }
+    this.router.register(trackAlias, handler);
   }
 
-  /**
-   * Unregister a datagram handler for a track alias. Discards any
-   * still-buffered pre-handler datagrams for that alias.
-   */
+  /** Unregister a datagram handler; the router discards any still-buffered datagrams for it. */
   unregisterDatagramHandler(trackAlias: number): void {
-    this.datagramHandlers.delete(trackAlias);
-    if (this.pendingDatagrams.length > 0) {
-      this.discardPendingForAlias(trackAlias);
-    }
+    this.router.unregister(trackAlias);
   }
 
   /**
-   * Number of buffered pre-handler datagrams currently held. Exposed
-   * for tests and diagnostics; production callers shouldn't need it.
+   * Number of buffered pre-handler datagrams currently held. Exposed for tests and
+   * diagnostics; production callers shouldn't need it.
    */
   getPendingDatagramCount(): number {
-    return this.pendingDatagrams.length;
-  }
-
-  /**
-   * Drain any datagrams that arrived for `trackAlias` before its
-   * handler was registered, in arrival order. Called from
-   * registerDatagramHandler.
-   */
-  private drainPendingForAlias(trackAlias: number, handler: DatagramHandler): void {
-    const remaining: PendingDatagram[] = [];
-    let drainedBytes = 0;
-    for (const d of this.pendingDatagrams) {
-      if (d.trackAlias === trackAlias) {
-        try {
-          handler(d.payload, d.trackAlias, d.groupId, d.objectId);
-        } catch {
-          // Ignore handler errors; drain proceeds.
-        }
-        drainedBytes += d.payload.length;
-      } else {
-        remaining.push(d);
-      }
-    }
-    this.pendingDatagrams = remaining;
-    this.pendingDatagramBytes -= drainedBytes;
-  }
-
-  /**
-   * Drop any buffered datagrams for `trackAlias` (called on
-   * unregister so we don't keep stale bytes around).
-   */
-  private discardPendingForAlias(trackAlias: number): void {
-    const remaining: PendingDatagram[] = [];
-    let discardedBytes = 0;
-    for (const d of this.pendingDatagrams) {
-      if (d.trackAlias === trackAlias) {
-        discardedBytes += d.payload.length;
-      } else {
-        remaining.push(d);
-      }
-    }
-    this.pendingDatagrams = remaining;
-    this.pendingDatagramBytes -= discardedBytes;
-  }
-
-  /**
-   * Buffer a datagram whose trackAlias has no registered handler yet.
-   * FIFO across all aliases; oldest entries are dropped when the byte
-   * cap is exceeded. Called from the dispatcher loop.
-   */
-  private bufferUnknownDatagram(d: PendingDatagram): void {
-    this.pendingDatagrams.push(d);
-    this.pendingDatagramBytes += d.payload.length;
-    while (
-      this.pendingDatagramBytes > PENDING_DATAGRAM_MAX_BYTES &&
-      this.pendingDatagrams.length > 0
-    ) {
-      const dropped = this.pendingDatagrams.shift()!;
-      this.pendingDatagramBytes -= dropped.payload.length;
-    }
+    return this.router.pendingCount();
   }
 
   /**
    * Start the single datagram reader loop that dispatches to handlers by track alias
    */
   private startDatagramDispatcher(): void {
+    if (this.datagramMode === 'worker') {
+      // The receive Worker owns the read loop; main must not lock the stream.
+      return;
+    }
     if (this.datagramDispatcherRunning || !this.transport) {
       return;
     }
@@ -332,7 +278,7 @@ export class MoqConnection {
 
           try {
             const parsed = parseObjectDatagram(value);
-            this.dispatchOrBuffer(parsed);
+            this.router.ingest(parsed);
           } catch {
             // Malformed datagram — skip
           }
@@ -347,20 +293,6 @@ export class MoqConnection {
     };
 
     loop();
-  }
-
-  /**
-   * Route a parsed datagram to its handler, or buffer it if the
-   * handler hasn't been registered yet. Extracted from the dispatcher
-   * loop so unit tests can drive it without a real WebTransport.
-   */
-  private dispatchOrBuffer(parsed: PendingDatagram): void {
-    const handler = this.datagramHandlers.get(parsed.trackAlias);
-    if (handler) {
-      handler(parsed.payload, parsed.trackAlias, parsed.groupId, parsed.objectId);
-    } else {
-      this.bufferUnknownDatagram(parsed);
-    }
   }
 
   /**

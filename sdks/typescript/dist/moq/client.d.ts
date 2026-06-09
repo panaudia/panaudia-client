@@ -35,6 +35,7 @@ export declare class PanaudiaMoqClient {
     private lastStatePublishTime;
     private audioSubscriber;
     private audioPlayer;
+    private receiveWorker;
     private stateSubscriber;
     private controlTrackPublisher;
     private controlTrackAlias;
@@ -252,6 +253,17 @@ export declare class PanaudiaMoqClient {
      * Update internal state and emit events
      */
     private setState;
+    /**
+     * Move datagram receive + Opus decode off the main thread into the receive
+     * Worker (design §11). Best-effort: if the worker can't be created the
+     * connection stays in main-thread mode and the worklet is fed by the
+     * main-thread decoder (fallback, design §11.8) — audio still plays. MUST run
+     * after connect() and BEFORE any subscriber starts (which would lock the
+     * datagram stream on the main thread).
+     */
+    private setupReceiveWorker;
+    /** Stop and release the receive Worker, if any. */
+    private teardownReceiveWorker;
     /**
      * Handle connection error
      */

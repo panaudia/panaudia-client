@@ -348,6 +348,9 @@ connectBtn.addEventListener('click', async () => {
       transport: choice,
       initialPosition: { x: pose.x, y: pose.y, z: pose.z },
       initialRotation: { yaw: pose.yaw, pitch: 0, roll: 0 },
+      // debug enables the v3 playout [JBUF] log (filter devtools console by "JBUF")
+      // for jitter-buffer soak/tuning — see playout-v3 plan Phase 4/5.
+      debug: true,
     });
 
     client.on('connected', () => {
