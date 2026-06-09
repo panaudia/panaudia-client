@@ -1983,6 +1983,423 @@ function getWebTransportSupport() {
     serverCertificateHashes: supported
   };
 }
+class MoqSession {
+  constructor(connection, debug = false) {
+    this.connection = connection;
+    this.debug = debug;
+  }
+  controlStream = null;
+  writer = null;
+  reader = null;
+  readBuffer = new Uint8Array(0);
+  nextSubscribeId = 1;
+  nextTrackAlias = 1;
+  nextAnnounceRequestId = 2;
+  // Client uses even IDs for announces (to avoid collisions with server)
+  // Track state
+  subscriptions = /* @__PURE__ */ new Map();
+  announcements = /* @__PURE__ */ new Map();
+  incomingSubscriptions = /* @__PURE__ */ new Map();
+  // Callbacks for when server subscribes to our tracks
+  onIncomingSubscribeCallback = null;
+  debug;
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  log(...args) {
+    if (this.debug) {
+      console.log("[MOQ]", ...args);
+    }
+  }
+  /**
+   * Set callback for when server subscribes to one of our announced tracks
+   */
+  onIncomingSubscribe(callback) {
+    this.onIncomingSubscribeCallback = callback;
+  }
+  /**
+   * Initialize the MOQ session over the control stream
+   * @param role - The MOQ role (publisher, subscriber, or pubsub)
+   * @param path - Optional path parameter
+   * @param maxSubscribeId - Max number of requests server can send to client (default: 100)
+   */
+  async initialize(role, path, maxSubscribeId = 100) {
+    this.log("Creating control stream...");
+    this.controlStream = await this.connection.createControlStream();
+    this.writer = this.controlStream.writable.getWriter();
+    this.reader = this.controlStream.readable.getReader();
+    this.log("Control stream created, sending CLIENT_SETUP...");
+    const setupMsg = buildClientSetup([MOQ_TRANSPORT_VERSION], role, path, maxSubscribeId);
+    this.log("CLIENT_SETUP message size:", setupMsg.length, "bytes");
+    this.log("CLIENT_SETUP hex:", Array.from(setupMsg).map((b2) => b2.toString(16).padStart(2, "0")).join(" "));
+    await this.writer.write(setupMsg);
+    this.log("CLIENT_SETUP sent, waiting for SERVER_SETUP...");
+    const { type, content } = await this.readFramedMessage();
+    this.log("Received response type: 0x" + type.toString(16) + ", content size:", content.length, "bytes");
+    if (type !== MoqMessageType.SERVER_SETUP) {
+      throw new ProtocolError(
+        `Expected SERVER_SETUP (0x41), got message type 0x${type.toString(16)}`,
+        type
+      );
+    }
+    const serverSetup = parseServerSetup(content, 0);
+    this.log("Session established, server version:", serverSetup.selectedVersion.toString(16));
+  }
+  /**
+   * Subscribe to a track with JWT authorization
+   */
+  async subscribe(namespace, trackName, authorization, resumeOpId) {
+    const subscribeId = this.nextSubscribeId++;
+    const subscribeMsg = buildSubscribe({
+      subscribeId,
+      namespace,
+      trackName,
+      filterType: MoqFilterType.LATEST_GROUP,
+      authorization,
+      resumeOpId
+    });
+    this.log("SUBSCRIBE message size:", subscribeMsg.length, "bytes");
+    await this.writer.write(subscribeMsg);
+    const { type, content } = await this.waitForMessage([
+      MoqMessageType.SUBSCRIBE_OK,
+      MoqMessageType.SUBSCRIBE_ERROR
+    ]);
+    if (type === MoqMessageType.SUBSCRIBE_OK) {
+      const ok = parseSubscribeOk(content, 0);
+      this.log("Subscribed successfully, subscribeId:", ok.subscribeId, "trackAlias:", ok.trackAlias);
+      this.subscriptions.set(subscribeId, { namespace, trackName, alias: ok.trackAlias });
+      return subscribeId;
+    } else if (type === MoqMessageType.SUBSCRIBE_ERROR) {
+      const error = parseSubscribeError(content, 0);
+      const errorMessage = `${error.reasonPhrase} (${getMoqErrorMessage(error.errorCode)})`;
+      if (error.errorCode === 2 || error.errorCode === 1027) {
+        throw new AuthenticationError(errorMessage, error.errorCode, { namespace, trackName });
+      }
+      throw new SubscriptionError(errorMessage, error.errorCode, namespace);
+    } else {
+      throw new ProtocolError(
+        `Expected SUBSCRIBE_OK or SUBSCRIBE_ERROR, got message type 0x${type.toString(16)}`,
+        type
+      );
+    }
+  }
+  /**
+   * Wait for a specific message type, handling other messages that arrive first
+   */
+  async waitForMessage(expectedTypes) {
+    const maxAttempts = 20;
+    for (let i2 = 0; i2 < maxAttempts; i2++) {
+      const { type, content } = await this.readFramedMessage();
+      if (expectedTypes.includes(type)) {
+        return { type, content };
+      }
+      this.log(`Received unexpected message type 0x${type.toString(16)} while waiting, handling it`);
+      await this.handleUnexpectedMessage(type, content);
+    }
+    throw new ProtocolError(
+      `Timeout waiting for message types: ${expectedTypes.map((t) => "0x" + t.toString(16)).join(", ")}`,
+      0
+    );
+  }
+  /**
+   * Handle messages that arrive when we're waiting for something else
+   */
+  async handleUnexpectedMessage(type, content) {
+    switch (type) {
+      case MoqMessageType.ANNOUNCE:
+        this.log("Received ANNOUNCE from server, sending ANNOUNCE_OK");
+        await this.sendAnnounceOk(content);
+        break;
+      case 17:
+        this.log("Received SUBSCRIBE_ANNOUNCES from server, sending OK");
+        await this.sendSubscribeAnnouncesOk(content);
+        break;
+      case MoqMessageType.SUBSCRIBE:
+        this.log("Received SUBSCRIBE from server, sending SUBSCRIBE_OK");
+        await this.handleIncomingSubscribe(content);
+        break;
+      default:
+        this.log(`Skipping unhandled message type 0x${type.toString(16)}`);
+    }
+  }
+  /**
+   * Handle incoming SUBSCRIBE from server and respond with SUBSCRIBE_OK
+   *
+   * Per moqtransport v0.5.1 / draft-ietf-moq-transport-11, the SUBSCRIBE
+   * wire format does NOT include TrackAlias. The publisher (us) assigns a
+   * TrackAlias and returns it in SUBSCRIBE_OK.
+   *
+   * SUBSCRIBE wire format: RequestID, Namespace, TrackName, Priority,
+   *   GroupOrder, Forward, FilterType, Parameters
+   *
+   * SUBSCRIBE_OK wire format: RequestID, TrackAlias, Expires, GroupOrder,
+   *   ContentExists, [LargestLocation], Parameters
+   */
+  async handleIncomingSubscribe(content) {
+    let pos = 0;
+    const requestIdByte = content[pos];
+    let requestId;
+    if (requestIdByte < 64) {
+      requestId = requestIdByte;
+      pos += 1;
+    } else if ((requestIdByte & 192) === 64) {
+      requestId = (requestIdByte & 63) << 8 | content[pos + 1];
+      pos += 2;
+    } else {
+      requestId = requestIdByte & 63;
+      pos += 1;
+    }
+    const namespace = this.parseNamespaceFromContent(content, pos);
+    const trackAlias = this.nextTrackAlias++;
+    this.log(`Server subscribing to: ${namespace.join("/")}, assigning trackAlias=${trackAlias}`);
+    const builder = new MessageBuilder();
+    builder.writeVarint(requestId);
+    builder.writeVarint(trackAlias);
+    builder.writeVarint(0);
+    builder.writeRaw(new Uint8Array([1]));
+    builder.writeRaw(new Uint8Array([0]));
+    builder.writeVarint(0);
+    const msg = wrapWithLengthFrame(MoqMessageType.SUBSCRIBE_OK, builder.build());
+    await this.writer.write(msg);
+    this.log("Sent SUBSCRIBE_OK for requestId:", requestId, "trackAlias:", trackAlias);
+    this.incomingSubscriptions.set(requestId, { trackAlias, namespace });
+    if (this.onIncomingSubscribeCallback) {
+      this.onIncomingSubscribeCallback(namespace, trackAlias);
+    }
+  }
+  /**
+   * Get track alias for an incoming subscription by namespace
+   */
+  getIncomingTrackAlias(namespacePrefix) {
+    for (const [, sub] of this.incomingSubscriptions) {
+      if (sub.namespace.join("/").startsWith(namespacePrefix)) {
+        return sub.trackAlias;
+      }
+    }
+    return void 0;
+  }
+  /**
+   * Parse namespace from content starting at given position
+   */
+  parseNamespaceFromContent(content, startPos) {
+    let pos = startPos;
+    const namespace = [];
+    if (pos >= content.length) return namespace;
+    const firstByte = content[pos];
+    let nsLength;
+    if (firstByte < 64) {
+      nsLength = firstByte;
+      pos += 1;
+    } else if ((firstByte & 192) === 64) {
+      nsLength = (firstByte & 63) << 8 | content[pos + 1];
+      pos += 2;
+    } else {
+      nsLength = firstByte & 63;
+      pos += 1;
+    }
+    for (let i2 = 0; i2 < nsLength && pos < content.length; i2++) {
+      const partLenByte = content[pos];
+      let partLen;
+      if (partLenByte < 64) {
+        partLen = partLenByte;
+        pos += 1;
+      } else if ((partLenByte & 192) === 64) {
+        partLen = (partLenByte & 63) << 8 | content[pos + 1];
+        pos += 2;
+      } else {
+        partLen = partLenByte & 63;
+        pos += 1;
+      }
+      if (pos + partLen <= content.length) {
+        const part = new TextDecoder().decode(content.slice(pos, pos + partLen));
+        namespace.push(part);
+        pos += partLen;
+      }
+    }
+    return namespace;
+  }
+  /**
+   * Send ANNOUNCE_OK response
+   */
+  async sendAnnounceOk(announceContent) {
+    const requestId = this.parseRequestId(announceContent);
+    this.log("Sending ANNOUNCE_OK for requestId:", requestId);
+    const builder = new MessageBuilder();
+    builder.writeVarint(requestId);
+    const msg = wrapWithLengthFrame(MoqMessageType.ANNOUNCE_OK, builder.build());
+    this.log("ANNOUNCE_OK message size:", msg.length, "bytes");
+    await this.writer.write(msg);
+  }
+  /**
+   * Send SUBSCRIBE_ANNOUNCES_OK response
+   */
+  async sendSubscribeAnnouncesOk(subscribeAnnouncesContent) {
+    const requestId = this.parseRequestId(subscribeAnnouncesContent);
+    this.log("Sending SUBSCRIBE_ANNOUNCES_OK for requestId:", requestId);
+    const builder = new MessageBuilder();
+    builder.writeVarint(requestId);
+    const msg = wrapWithLengthFrame(18, builder.build());
+    await this.writer.write(msg);
+  }
+  /**
+   * Parse RequestID (first varint) from message content
+   */
+  parseRequestId(content) {
+    const firstByte = content[0];
+    if (firstByte < 64) {
+      return firstByte;
+    } else if ((firstByte & 192) === 64) {
+      return (firstByte & 63) << 8 | content[1];
+    } else if ((firstByte & 192) === 128) {
+      return (firstByte & 63) << 24 | content[1] << 16 | content[2] << 8 | content[3];
+    } else {
+      return content[4] << 24 | content[5] << 16 | content[6] << 8 | content[7];
+    }
+  }
+  /**
+   * Announce a track namespace
+   */
+  async announce(namespace, authorization) {
+    const requestId = this.nextAnnounceRequestId;
+    this.nextAnnounceRequestId += 2;
+    const parameters = /* @__PURE__ */ new Map();
+    if (authorization) {
+      const encoder = new TextEncoder();
+      parameters.set(3, encoder.encode(authorization));
+    }
+    const announceMsg = buildAnnounce({ requestId, namespace, parameters: parameters.size > 0 ? parameters : void 0 });
+    this.log("ANNOUNCE message size:", announceMsg.length, "bytes, requestId:", requestId);
+    await this.writer.write(announceMsg);
+    const { type, content } = await this.waitForMessage([
+      MoqMessageType.ANNOUNCE_OK,
+      MoqMessageType.ANNOUNCE_ERROR
+    ]);
+    if (type === MoqMessageType.ANNOUNCE_OK) {
+      const ok = parseAnnounceOk(content, 0);
+      const nsKey = namespace.join("/");
+      this.announcements.set(nsKey, { namespace });
+      this.log("Announced successfully:", nsKey, "requestId:", ok.requestId);
+    } else if (type === MoqMessageType.ANNOUNCE_ERROR) {
+      const error = parseAnnounceError(content, 0);
+      const errorMessage = `${error.reasonPhrase} (${getMoqErrorMessage(error.errorCode)})`;
+      throw new AnnouncementError(errorMessage, error.errorCode, namespace);
+    } else {
+      throw new ProtocolError(
+        `Expected ANNOUNCE_OK or ANNOUNCE_ERROR, got message type 0x${type.toString(16)}`,
+        type
+      );
+    }
+  }
+  /**
+   * Get track alias for a subscription
+   */
+  getTrackAlias(subscribeId) {
+    return this.subscriptions.get(subscribeId)?.alias;
+  }
+  /**
+   * Start background message processing loop
+   * This handles messages that arrive after initial connection setup
+   */
+  startMessageLoop() {
+    this.processMessages().catch((error) => {
+      this.log("Message loop ended:", error.message);
+    });
+  }
+  /**
+   * Background message processing
+   */
+  async processMessages() {
+    this.log("Starting background message processing loop");
+    while (this.reader) {
+      try {
+        const { type, content } = await this.readFramedMessage();
+        this.log(`Background received message type 0x${type.toString(16)}`);
+        await this.handleUnexpectedMessage(type, content);
+      } catch (error) {
+        this.log("Message processing stopped:", error.message);
+        break;
+      }
+    }
+  }
+  /**
+   * Close the session
+   */
+  async close() {
+    if (this.writer) {
+      try {
+        await this.writer.close();
+      } catch {
+      }
+      this.writer = null;
+    }
+    if (this.reader) {
+      try {
+        await this.reader.cancel();
+      } catch {
+      }
+      this.reader = null;
+    }
+    this.controlStream = null;
+  }
+  /**
+   * Read a complete message from the control stream with proper length framing
+   * Format: [Type varint] [Length: 2 bytes big-endian] [Content: length bytes]
+   * Returns: { type, content } where content is the message body without type/length
+   */
+  async readFramedMessage() {
+    while (this.readBuffer.length < 3) {
+      const { value, done } = await this.reader.read();
+      if (done) {
+        throw new Error("Control stream closed unexpectedly");
+      }
+      const newBuffer = new Uint8Array(this.readBuffer.length + value.length);
+      newBuffer.set(this.readBuffer);
+      newBuffer.set(value, this.readBuffer.length);
+      this.readBuffer = newBuffer;
+    }
+    let typeLength = 1;
+    const firstByte = this.readBuffer[0];
+    const prefix = firstByte >> 6;
+    if (prefix === 1) typeLength = 2;
+    else if (prefix === 2) typeLength = 4;
+    else if (prefix === 3) typeLength = 8;
+    const headerSize = typeLength + 2;
+    while (this.readBuffer.length < headerSize) {
+      const { value, done } = await this.reader.read();
+      if (done) {
+        throw new Error("Control stream closed unexpectedly");
+      }
+      const newBuffer = new Uint8Array(this.readBuffer.length + value.length);
+      newBuffer.set(this.readBuffer);
+      newBuffer.set(value, this.readBuffer.length);
+      this.readBuffer = newBuffer;
+    }
+    let type;
+    if (typeLength === 1) {
+      type = firstByte;
+    } else if (typeLength === 2) {
+      type = (firstByte & 63) << 8 | this.readBuffer[1];
+    } else {
+      throw new Error(`Unsupported varint length: ${typeLength}`);
+    }
+    const lengthOffset = typeLength;
+    const contentLength = this.readBuffer[lengthOffset] << 8 | this.readBuffer[lengthOffset + 1];
+    this.log("readFramedMessage: type=0x" + type.toString(16) + ", contentLength=" + contentLength);
+    const totalSize = headerSize + contentLength;
+    while (this.readBuffer.length < totalSize) {
+      const { value, done } = await this.reader.read();
+      if (done) {
+        throw new Error("Control stream closed unexpectedly");
+      }
+      const newBuffer = new Uint8Array(this.readBuffer.length + value.length);
+      newBuffer.set(this.readBuffer);
+      newBuffer.set(value, this.readBuffer.length);
+      this.readBuffer = newBuffer;
+    }
+    const content = this.readBuffer.slice(headerSize, totalSize);
+    this.readBuffer = this.readBuffer.slice(totalSize);
+    this.log("readFramedMessage: returning type=0x" + type.toString(16) + ", content.length=" + content.length);
+    return { type, content };
+  }
+}
 class TrackPublisher {
   trackAlias;
   publisherPriority;
@@ -3503,423 +3920,6 @@ class EventEmitter {
         }
       }
     }
-  }
-}
-class MoqSession {
-  constructor(connection, debug = false) {
-    this.connection = connection;
-    this.debug = debug;
-  }
-  controlStream = null;
-  writer = null;
-  reader = null;
-  readBuffer = new Uint8Array(0);
-  nextSubscribeId = 1;
-  nextTrackAlias = 1;
-  nextAnnounceRequestId = 2;
-  // Client uses even IDs for announces (to avoid collisions with server)
-  // Track state
-  subscriptions = /* @__PURE__ */ new Map();
-  announcements = /* @__PURE__ */ new Map();
-  incomingSubscriptions = /* @__PURE__ */ new Map();
-  // Callbacks for when server subscribes to our tracks
-  onIncomingSubscribeCallback = null;
-  debug;
-  // eslint-disable-next-line @typescript-eslint/no-explicit-any
-  log(...args) {
-    if (this.debug) {
-      console.log("[MOQ]", ...args);
-    }
-  }
-  /**
-   * Set callback for when server subscribes to one of our announced tracks
-   */
-  onIncomingSubscribe(callback) {
-    this.onIncomingSubscribeCallback = callback;
-  }
-  /**
-   * Initialize the MOQ session over the control stream
-   * @param role - The MOQ role (publisher, subscriber, or pubsub)
-   * @param path - Optional path parameter
-   * @param maxSubscribeId - Max number of requests server can send to client (default: 100)
-   */
-  async initialize(role, path, maxSubscribeId = 100) {
-    this.log("Creating control stream...");
-    this.controlStream = await this.connection.createControlStream();
-    this.writer = this.controlStream.writable.getWriter();
-    this.reader = this.controlStream.readable.getReader();
-    this.log("Control stream created, sending CLIENT_SETUP...");
-    const setupMsg = buildClientSetup([MOQ_TRANSPORT_VERSION], role, path, maxSubscribeId);
-    this.log("CLIENT_SETUP message size:", setupMsg.length, "bytes");
-    this.log("CLIENT_SETUP hex:", Array.from(setupMsg).map((b2) => b2.toString(16).padStart(2, "0")).join(" "));
-    await this.writer.write(setupMsg);
-    this.log("CLIENT_SETUP sent, waiting for SERVER_SETUP...");
-    const { type, content } = await this.readFramedMessage();
-    this.log("Received response type: 0x" + type.toString(16) + ", content size:", content.length, "bytes");
-    if (type !== MoqMessageType.SERVER_SETUP) {
-      throw new ProtocolError(
-        `Expected SERVER_SETUP (0x41), got message type 0x${type.toString(16)}`,
-        type
-      );
-    }
-    const serverSetup = parseServerSetup(content, 0);
-    this.log("Session established, server version:", serverSetup.selectedVersion.toString(16));
-  }
-  /**
-   * Subscribe to a track with JWT authorization
-   */
-  async subscribe(namespace, trackName, authorization, resumeOpId) {
-    const subscribeId = this.nextSubscribeId++;
-    const subscribeMsg = buildSubscribe({
-      subscribeId,
-      namespace,
-      trackName,
-      filterType: MoqFilterType.LATEST_GROUP,
-      authorization,
-      resumeOpId
-    });
-    this.log("SUBSCRIBE message size:", subscribeMsg.length, "bytes");
-    await this.writer.write(subscribeMsg);
-    const { type, content } = await this.waitForMessage([
-      MoqMessageType.SUBSCRIBE_OK,
-      MoqMessageType.SUBSCRIBE_ERROR
-    ]);
-    if (type === MoqMessageType.SUBSCRIBE_OK) {
-      const ok = parseSubscribeOk(content, 0);
-      this.log("Subscribed successfully, subscribeId:", ok.subscribeId, "trackAlias:", ok.trackAlias);
-      this.subscriptions.set(subscribeId, { namespace, trackName, alias: ok.trackAlias });
-      return subscribeId;
-    } else if (type === MoqMessageType.SUBSCRIBE_ERROR) {
-      const error = parseSubscribeError(content, 0);
-      const errorMessage = `${error.reasonPhrase} (${getMoqErrorMessage(error.errorCode)})`;
-      if (error.errorCode === 2 || error.errorCode === 1027) {
-        throw new AuthenticationError(errorMessage, error.errorCode, { namespace, trackName });
-      }
-      throw new SubscriptionError(errorMessage, error.errorCode, namespace);
-    } else {
-      throw new ProtocolError(
-        `Expected SUBSCRIBE_OK or SUBSCRIBE_ERROR, got message type 0x${type.toString(16)}`,
-        type
-      );
-    }
-  }
-  /**
-   * Wait for a specific message type, handling other messages that arrive first
-   */
-  async waitForMessage(expectedTypes) {
-    const maxAttempts = 20;
-    for (let i2 = 0; i2 < maxAttempts; i2++) {
-      const { type, content } = await this.readFramedMessage();
-      if (expectedTypes.includes(type)) {
-        return { type, content };
-      }
-      this.log(`Received unexpected message type 0x${type.toString(16)} while waiting, handling it`);
-      await this.handleUnexpectedMessage(type, content);
-    }
-    throw new ProtocolError(
-      `Timeout waiting for message types: ${expectedTypes.map((t) => "0x" + t.toString(16)).join(", ")}`,
-      0
-    );
-  }
-  /**
-   * Handle messages that arrive when we're waiting for something else
-   */
-  async handleUnexpectedMessage(type, content) {
-    switch (type) {
-      case MoqMessageType.ANNOUNCE:
-        this.log("Received ANNOUNCE from server, sending ANNOUNCE_OK");
-        await this.sendAnnounceOk(content);
-        break;
-      case 17:
-        this.log("Received SUBSCRIBE_ANNOUNCES from server, sending OK");
-        await this.sendSubscribeAnnouncesOk(content);
-        break;
-      case MoqMessageType.SUBSCRIBE:
-        this.log("Received SUBSCRIBE from server, sending SUBSCRIBE_OK");
-        await this.handleIncomingSubscribe(content);
-        break;
-      default:
-        this.log(`Skipping unhandled message type 0x${type.toString(16)}`);
-    }
-  }
-  /**
-   * Handle incoming SUBSCRIBE from server and respond with SUBSCRIBE_OK
-   *
-   * Per moqtransport v0.5.1 / draft-ietf-moq-transport-11, the SUBSCRIBE
-   * wire format does NOT include TrackAlias. The publisher (us) assigns a
-   * TrackAlias and returns it in SUBSCRIBE_OK.
-   *
-   * SUBSCRIBE wire format: RequestID, Namespace, TrackName, Priority,
-   *   GroupOrder, Forward, FilterType, Parameters
-   *
-   * SUBSCRIBE_OK wire format: RequestID, TrackAlias, Expires, GroupOrder,
-   *   ContentExists, [LargestLocation], Parameters
-   */
-  async handleIncomingSubscribe(content) {
-    let pos = 0;
-    const requestIdByte = content[pos];
-    let requestId;
-    if (requestIdByte < 64) {
-      requestId = requestIdByte;
-      pos += 1;
-    } else if ((requestIdByte & 192) === 64) {
-      requestId = (requestIdByte & 63) << 8 | content[pos + 1];
-      pos += 2;
-    } else {
-      requestId = requestIdByte & 63;
-      pos += 1;
-    }
-    const namespace = this.parseNamespaceFromContent(content, pos);
-    const trackAlias = this.nextTrackAlias++;
-    this.log(`Server subscribing to: ${namespace.join("/")}, assigning trackAlias=${trackAlias}`);
-    const builder = new MessageBuilder();
-    builder.writeVarint(requestId);
-    builder.writeVarint(trackAlias);
-    builder.writeVarint(0);
-    builder.writeRaw(new Uint8Array([1]));
-    builder.writeRaw(new Uint8Array([0]));
-    builder.writeVarint(0);
-    const msg = wrapWithLengthFrame(MoqMessageType.SUBSCRIBE_OK, builder.build());
-    await this.writer.write(msg);
-    this.log("Sent SUBSCRIBE_OK for requestId:", requestId, "trackAlias:", trackAlias);
-    this.incomingSubscriptions.set(requestId, { trackAlias, namespace });
-    if (this.onIncomingSubscribeCallback) {
-      this.onIncomingSubscribeCallback(namespace, trackAlias);
-    }
-  }
-  /**
-   * Get track alias for an incoming subscription by namespace
-   */
-  getIncomingTrackAlias(namespacePrefix) {
-    for (const [, sub] of this.incomingSubscriptions) {
-      if (sub.namespace.join("/").startsWith(namespacePrefix)) {
-        return sub.trackAlias;
-      }
-    }
-    return void 0;
-  }
-  /**
-   * Parse namespace from content starting at given position
-   */
-  parseNamespaceFromContent(content, startPos) {
-    let pos = startPos;
-    const namespace = [];
-    if (pos >= content.length) return namespace;
-    const firstByte = content[pos];
-    let nsLength;
-    if (firstByte < 64) {
-      nsLength = firstByte;
-      pos += 1;
-    } else if ((firstByte & 192) === 64) {
-      nsLength = (firstByte & 63) << 8 | content[pos + 1];
-      pos += 2;
-    } else {
-      nsLength = firstByte & 63;
-      pos += 1;
-    }
-    for (let i2 = 0; i2 < nsLength && pos < content.length; i2++) {
-      const partLenByte = content[pos];
-      let partLen;
-      if (partLenByte < 64) {
-        partLen = partLenByte;
-        pos += 1;
-      } else if ((partLenByte & 192) === 64) {
-        partLen = (partLenByte & 63) << 8 | content[pos + 1];
-        pos += 2;
-      } else {
-        partLen = partLenByte & 63;
-        pos += 1;
-      }
-      if (pos + partLen <= content.length) {
-        const part = new TextDecoder().decode(content.slice(pos, pos + partLen));
-        namespace.push(part);
-        pos += partLen;
-      }
-    }
-    return namespace;
-  }
-  /**
-   * Send ANNOUNCE_OK response
-   */
-  async sendAnnounceOk(announceContent) {
-    const requestId = this.parseRequestId(announceContent);
-    this.log("Sending ANNOUNCE_OK for requestId:", requestId);
-    const builder = new MessageBuilder();
-    builder.writeVarint(requestId);
-    const msg = wrapWithLengthFrame(MoqMessageType.ANNOUNCE_OK, builder.build());
-    this.log("ANNOUNCE_OK message size:", msg.length, "bytes");
-    await this.writer.write(msg);
-  }
-  /**
-   * Send SUBSCRIBE_ANNOUNCES_OK response
-   */
-  async sendSubscribeAnnouncesOk(subscribeAnnouncesContent) {
-    const requestId = this.parseRequestId(subscribeAnnouncesContent);
-    this.log("Sending SUBSCRIBE_ANNOUNCES_OK for requestId:", requestId);
-    const builder = new MessageBuilder();
-    builder.writeVarint(requestId);
-    const msg = wrapWithLengthFrame(18, builder.build());
-    await this.writer.write(msg);
-  }
-  /**
-   * Parse RequestID (first varint) from message content
-   */
-  parseRequestId(content) {
-    const firstByte = content[0];
-    if (firstByte < 64) {
-      return firstByte;
-    } else if ((firstByte & 192) === 64) {
-      return (firstByte & 63) << 8 | content[1];
-    } else if ((firstByte & 192) === 128) {
-      return (firstByte & 63) << 24 | content[1] << 16 | content[2] << 8 | content[3];
-    } else {
-      return content[4] << 24 | content[5] << 16 | content[6] << 8 | content[7];
-    }
-  }
-  /**
-   * Announce a track namespace
-   */
-  async announce(namespace, authorization) {
-    const requestId = this.nextAnnounceRequestId;
-    this.nextAnnounceRequestId += 2;
-    const parameters = /* @__PURE__ */ new Map();
-    if (authorization) {
-      const encoder = new TextEncoder();
-      parameters.set(3, encoder.encode(authorization));
-    }
-    const announceMsg = buildAnnounce({ requestId, namespace, parameters: parameters.size > 0 ? parameters : void 0 });
-    this.log("ANNOUNCE message size:", announceMsg.length, "bytes, requestId:", requestId);
-    await this.writer.write(announceMsg);
-    const { type, content } = await this.waitForMessage([
-      MoqMessageType.ANNOUNCE_OK,
-      MoqMessageType.ANNOUNCE_ERROR
-    ]);
-    if (type === MoqMessageType.ANNOUNCE_OK) {
-      const ok = parseAnnounceOk(content, 0);
-      const nsKey = namespace.join("/");
-      this.announcements.set(nsKey, { namespace });
-      this.log("Announced successfully:", nsKey, "requestId:", ok.requestId);
-    } else if (type === MoqMessageType.ANNOUNCE_ERROR) {
-      const error = parseAnnounceError(content, 0);
-      const errorMessage = `${error.reasonPhrase} (${getMoqErrorMessage(error.errorCode)})`;
-      throw new AnnouncementError(errorMessage, error.errorCode, namespace);
-    } else {
-      throw new ProtocolError(
-        `Expected ANNOUNCE_OK or ANNOUNCE_ERROR, got message type 0x${type.toString(16)}`,
-        type
-      );
-    }
-  }
-  /**
-   * Get track alias for a subscription
-   */
-  getTrackAlias(subscribeId) {
-    return this.subscriptions.get(subscribeId)?.alias;
-  }
-  /**
-   * Start background message processing loop
-   * This handles messages that arrive after initial connection setup
-   */
-  startMessageLoop() {
-    this.processMessages().catch((error) => {
-      this.log("Message loop ended:", error.message);
-    });
-  }
-  /**
-   * Background message processing
-   */
-  async processMessages() {
-    this.log("Starting background message processing loop");
-    while (this.reader) {
-      try {
-        const { type, content } = await this.readFramedMessage();
-        this.log(`Background received message type 0x${type.toString(16)}`);
-        await this.handleUnexpectedMessage(type, content);
-      } catch (error) {
-        this.log("Message processing stopped:", error.message);
-        break;
-      }
-    }
-  }
-  /**
-   * Close the session
-   */
-  async close() {
-    if (this.writer) {
-      try {
-        await this.writer.close();
-      } catch {
-      }
-      this.writer = null;
-    }
-    if (this.reader) {
-      try {
-        await this.reader.cancel();
-      } catch {
-      }
-      this.reader = null;
-    }
-    this.controlStream = null;
-  }
-  /**
-   * Read a complete message from the control stream with proper length framing
-   * Format: [Type varint] [Length: 2 bytes big-endian] [Content: length bytes]
-   * Returns: { type, content } where content is the message body without type/length
-   */
-  async readFramedMessage() {
-    while (this.readBuffer.length < 3) {
-      const { value, done } = await this.reader.read();
-      if (done) {
-        throw new Error("Control stream closed unexpectedly");
-      }
-      const newBuffer = new Uint8Array(this.readBuffer.length + value.length);
-      newBuffer.set(this.readBuffer);
-      newBuffer.set(value, this.readBuffer.length);
-      this.readBuffer = newBuffer;
-    }
-    let typeLength = 1;
-    const firstByte = this.readBuffer[0];
-    const prefix = firstByte >> 6;
-    if (prefix === 1) typeLength = 2;
-    else if (prefix === 2) typeLength = 4;
-    else if (prefix === 3) typeLength = 8;
-    const headerSize = typeLength + 2;
-    while (this.readBuffer.length < headerSize) {
-      const { value, done } = await this.reader.read();
-      if (done) {
-        throw new Error("Control stream closed unexpectedly");
-      }
-      const newBuffer = new Uint8Array(this.readBuffer.length + value.length);
-      newBuffer.set(this.readBuffer);
-      newBuffer.set(value, this.readBuffer.length);
-      this.readBuffer = newBuffer;
-    }
-    let type;
-    if (typeLength === 1) {
-      type = firstByte;
-    } else if (typeLength === 2) {
-      type = (firstByte & 63) << 8 | this.readBuffer[1];
-    } else {
-      throw new Error(`Unsupported varint length: ${typeLength}`);
-    }
-    const lengthOffset = typeLength;
-    const contentLength = this.readBuffer[lengthOffset] << 8 | this.readBuffer[lengthOffset + 1];
-    this.log("readFramedMessage: type=0x" + type.toString(16) + ", contentLength=" + contentLength);
-    const totalSize = headerSize + contentLength;
-    while (this.readBuffer.length < totalSize) {
-      const { value, done } = await this.reader.read();
-      if (done) {
-        throw new Error("Control stream closed unexpectedly");
-      }
-      const newBuffer = new Uint8Array(this.readBuffer.length + value.length);
-      newBuffer.set(this.readBuffer);
-      newBuffer.set(value, this.readBuffer.length);
-      this.readBuffer = newBuffer;
-    }
-    const content = this.readBuffer.slice(headerSize, totalSize);
-    this.readBuffer = this.readBuffer.slice(totalSize);
-    this.log("readFramedMessage: returning type=0x" + type.toString(16) + ", content.length=" + content.length);
-    return { type, content };
   }
 }
 class PanaudiaMoqClient {
