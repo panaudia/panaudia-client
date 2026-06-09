@@ -27,6 +27,17 @@ export interface ParsedDatagram {
   objectId: bigint;
 }
 
+/**
+ * The minimal receive surface a subscriber needs — register/unregister a handler
+ * by track alias. Satisfied by both `MoqConnection` (main-thread transport) and
+ * `DatagramRouter` (the main-side router fed by the worker's forwarded datagrams),
+ * so subscribers work either way without knowing which.
+ */
+export interface DatagramReceiver {
+  registerDatagramHandler(trackAlias: number, handler: DatagramHandler): void;
+  unregisterDatagramHandler(trackAlias: number): void;
+}
+
 // Max bytes the pre-handler buffer holds across all unknown aliases. 1 MiB is the
 // same envelope budget used elsewhere and far more than any real SUBSCRIBE_OK race
 // needs (a handful of envelopes a few hundred bytes each).
@@ -63,6 +74,15 @@ export class DatagramRouter {
     } else {
       this.bufferUnknown(d);
     }
+  }
+
+  // DatagramReceiver surface (same names as MoqConnection) so subscribers can take
+  // either. These are the public aliases of register()/unregister().
+  registerDatagramHandler(trackAlias: number, handler: DatagramHandler): void {
+    this.register(trackAlias, handler);
+  }
+  unregisterDatagramHandler(trackAlias: number): void {
+    this.unregister(trackAlias);
   }
 
   /** Number of buffered pre-handler datagrams (tests/diagnostics). */

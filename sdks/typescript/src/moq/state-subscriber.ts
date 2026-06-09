@@ -5,7 +5,7 @@
  * and maintains a map of known entities.
  */
 
-import { MoqConnection } from './connection.js';
+import type { DatagramReceiver } from './datagram-router.js';
 import { entityInfo3FromBytes, ENTITY_INFO3_SIZE } from '../shared/encoding.js';
 import { EntityInfo3 } from './types.js';
 
@@ -32,7 +32,7 @@ export type EntityStateHandler = (state: EntityState) => void;
  * Maintains a map of known entities and fires callbacks on state updates.
  */
 export class StateSubscriber {
-  private connection: MoqConnection | null = null;
+  private connection: DatagramReceiver | null = null;
   private trackAlias: number = 0;
   private isListening: boolean = false;
   private entities: Map<string, EntityState> = new Map();
@@ -52,7 +52,7 @@ export class StateSubscriber {
   /**
    * Attach to a connection and track alias
    */
-  attach(connection: MoqConnection, trackAlias: number): void {
+  attach(connection: DatagramReceiver, trackAlias: number): void {
     this.connection = connection;
     this.trackAlias = trackAlias;
   }

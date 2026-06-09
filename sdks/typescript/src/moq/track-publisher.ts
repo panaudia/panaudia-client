@@ -5,7 +5,7 @@
  * audio frames and state updates.
  */
 
-import { MoqConnection } from './connection.js';
+import type { DatagramSender } from './connection.js';
 import { buildObjectDatagram } from './moq-transport.js';
 import { MoqClientError } from './errors.js';
 
@@ -48,7 +48,7 @@ export interface TrackPublisherStats {
 export class TrackPublisher {
   private readonly trackAlias: number;
   private readonly publisherPriority: number;
-  private connection: MoqConnection | null = null;
+  private connection: DatagramSender | null = null;
 
   // Group/Object tracking
   private currentGroupId: bigint = 0n;
@@ -80,7 +80,7 @@ export class TrackPublisher {
   /**
    * Attach to a connection for publishing
    */
-  attach(connection: MoqConnection): void {
+  attach(connection: DatagramSender): void {
     this.connection = connection;
   }
 

@@ -5,7 +5,7 @@
  * frames via MOQ datagrams, and passes them to a decoder for playback.
  */
 
-import { MoqConnection } from './connection.js';
+import type { DatagramReceiver } from './datagram-router.js';
 import { MoqClientError } from './errors.js';
 
 /**
@@ -72,7 +72,7 @@ export interface AudioSubscriberStats {
  * Receives Opus-encoded audio frames from an MOQ track via datagrams.
  */
 export class AudioSubscriber {
-  private connection: MoqConnection | null = null;
+  private connection: DatagramReceiver | null = null;
   private state: AudioSubscriberState = AudioSubscriberState.IDLE;
   private frameHandler: AudioFrameReceivedHandler | null = null;
   private trackAlias: number = 0;
@@ -114,7 +114,7 @@ export class AudioSubscriber {
    * @param connection - MOQ connection
    * @param trackAlias - Track alias to filter frames
    */
-  attach(connection: MoqConnection, trackAlias: number): void {
+  attach(connection: DatagramReceiver, trackAlias: number): void {
     this.connection = connection;
     this.trackAlias = trackAlias;
     this.state = AudioSubscriberState.SUBSCRIBING;

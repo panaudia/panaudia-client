@@ -18,7 +18,7 @@
  *   Batch:     [{"key":"uuid.name","value":"alice"}, ...]
  */
 
-import { MoqConnection } from './connection.js';
+import type { DatagramReceiver } from './datagram-router.js';
 import { CacheMap, CacheEntry } from '../shared/cache-map.js';
 import { TopicMerger, type TopicValue, type MergeDebugHandler } from '../shared/topic-merger.js';
 
@@ -46,7 +46,7 @@ export type RemovedHandler = (keys: string[]) => void;
  * key-value pairs, with cache-aware merging (highest opId wins).
  */
 export class CacheTopicSubscriber {
-  private connection: MoqConnection | null = null;
+  private connection: DatagramReceiver | null = null;
   private trackAlias: number = 0;
   private isListening: boolean = false;
   private valuesHandler: ValuesHandler | null = null;
@@ -91,7 +91,7 @@ export class CacheTopicSubscriber {
   /**
    * Attach to a connection and track alias.
    */
-  attach(connection: MoqConnection, trackAlias: number): void {
+  attach(connection: DatagramReceiver, trackAlias: number): void {
     this.connection = connection;
     this.trackAlias = trackAlias;
   }

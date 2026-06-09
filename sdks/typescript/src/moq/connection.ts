@@ -12,6 +12,15 @@ import { DatagramRouter, type DatagramHandler } from './datagram-router.js';
 export type { DatagramHandler };
 
 /**
+ * The minimal send surface a publisher needs. Satisfied by `MoqConnection`
+ * (main-thread transport) and by a worker-backed adapter that forwards bytes to
+ * the worker's `sendDatagram` RPC — so publishers work either way.
+ */
+export interface DatagramSender {
+  sendDatagram(data: Uint8Array): Promise<void>;
+}
+
+/**
  * Connection event handlers
  */
 export interface ConnectionEventHandlers {
