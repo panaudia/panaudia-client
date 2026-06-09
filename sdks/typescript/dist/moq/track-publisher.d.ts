@@ -1,4 +1,4 @@
-import { MoqConnection } from './connection.js';
+import { DatagramSender } from './connection.js';
 /**
  * Track publisher configuration
  */
@@ -45,7 +45,7 @@ export declare class TrackPublisher {
     /**
      * Attach to a connection for publishing
      */
-    attach(connection: MoqConnection): void;
+    attach(connection: DatagramSender): void;
     /**
      * Detach from the connection
      */

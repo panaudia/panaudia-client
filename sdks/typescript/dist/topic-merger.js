@@ -372,18 +372,18 @@ class TopicMerger {
   }
 }
 export {
-  ConnectionState as C,
+  CacheMap as C,
   ENTITY_INFO3_SIZE as E,
   TopicMerger as T,
-  entityInfo3ToBytes as a,
+  ConnectionState as a,
   bytesToUuid as b,
   createEntityInfo3 as c,
-  CacheMap as d,
-  entityInfo3FromBytes as e,
-  decodeCacheOp as f,
-  encodeCacheOp as g,
-  isCacheEnvelope as h,
-  isValidUuid as i,
+  decodeCacheOp as d,
+  encodeCacheOp as e,
+  entityInfo3FromBytes as f,
+  entityInfo3ToBytes as g,
+  isValidUuid as h,
+  isCacheEnvelope as i,
   uuidToBytes as u
 };
 //# sourceMappingURL=topic-merger.js.map

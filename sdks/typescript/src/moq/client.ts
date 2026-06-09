@@ -5,8 +5,11 @@
  * via Media over QUIC (MOQ) transport.
  */
 
-import { MoqConnection, isWebTransportSupported } from './connection.js';
-import { MoqSession } from './session.js';
+import { isWebTransportSupported, type DatagramSender } from './connection.js';
+import { DatagramRouter } from './datagram-router.js';
+import { MoqWorkerClient } from './moq-worker-client.js';
+import { createMoqWorker } from './moq-worker-loader.js';
+import type { WorkerEvent } from './moq-worker-protocol.js';
 import {
   PanaudiaConfig,
   ConnectionState,
@@ -45,7 +48,6 @@ import { AudioTrackPublisher, StateTrackPublisher } from './track-publisher.js';
 import { entityInfo3ToBytes, createEntityInfo3 } from '../shared/encoding.js';
 import { AudioSubscriber, AudioSubscriberStats } from './audio-subscriber.js';
 import { AudioPlayer, AudioPlayerState, AudioPlayerConfig, AudioPlayerStats } from './audio-player.js';
-import { createReceiveWorkerUrl, audioReceiveWorkerSupported, type ReceiveWorkerOutbound } from './audio-receive-worker.js';
 import { StateSubscriber, EntityState, EntityStateHandler } from './state-subscriber.js';
 import { ControlTrackPublisher } from './control-publisher.js';
 import {
@@ -113,8 +115,13 @@ class EventEmitter {
 export class PanaudiaMoqClient {
   private readonly config: Required<PanaudiaConfig>;
   private readonly events = new EventEmitter();
-  private connection: MoqConnection | null = null;
-  private session: MoqSession | null = null;
+  // The MOQ worker hosts the WebTransport + session + datagram read loop + decode
+  // (design §11). The main thread drives it by RPC and routes its events. The
+  // main-side DatagramRouter is fed by the worker's forwarded non-audio datagrams;
+  // subscribers register on it. `sender` proxies publisher sends to the worker.
+  private workerClient: MoqWorkerClient | null = null;
+  private readonly datagramRouter = new DatagramRouter();
+  private sender: DatagramSender | null = null;
   private state: ConnectionState = ConnectionState.DISCONNECTED;
 
   // Audio publishing
@@ -130,9 +137,6 @@ export class PanaudiaMoqClient {
   // Audio playback
   private audioSubscriber: AudioSubscriber | null = null;
   private audioPlayer: AudioPlayer | null = null;
-  // Receive Worker: owns the datagram read loop + Opus decode off the main
-  // thread (design §11). Null when unsupported/failed ⇒ main-thread fallback.
-  private receiveWorker: Worker | null = null;
 
   // State tracking
   private stateSubscriber: StateSubscriber | null = null;
@@ -254,128 +258,53 @@ export class PanaudiaMoqClient {
     this.setState(ConnectionState.CONNECTING);
 
     try {
-      // Create and connect WebTransport
-      this.connection = new MoqConnection(this.config.serverUrl);
-      this.connection.setHandlers({
-        onStateChange: (connState, error) => {
-          if (connState === ConnectionState.ERROR) {
-            this.handleError('connection_error', error?.message ?? 'Connection failed');
-          } else if (connState === ConnectionState.DISCONNECTED) {
-            this.handleDisconnect();
-          }
-        },
-      });
+      // Spin up the MOQ worker — it owns the WebTransport + session + the datagram
+      // read loop + Opus decode, OFF the main thread (design §11). The main thread
+      // drives it by RPC and routes its events (handleWorkerEvent): forwarded
+      // non-audio datagrams → the main-side DatagramRouter, incoming subscribes →
+      // publishers, connection state → here. Publisher sends are proxied to the
+      // worker's transport via `sender`.
+      this.workerClient = new MoqWorkerClient(createMoqWorker(), (evt) => this.handleWorkerEvent(evt));
+      this.sender = { sendDatagram: (bytes) => this.workerClient!.call('sendDatagram', { bytes }) };
 
-      await this.connection.connect(options);
+      await this.workerClient.call('connect', { serverUrl: this.config.serverUrl, options });
       this.setState(ConnectionState.CONNECTED);
-      this.log('WebTransport connected, initializing MOQ session...');
+      this.log('WebTransport connected (worker), initializing MOQ session...');
 
-      // Move the datagram read loop + Opus decode off the main thread (design
-      // §11). MUST happen before any subscriber registers a datagram handler
-      // (which would start — and lock — the main-thread dispatcher).
-      this.setupReceiveWorker();
-
-      // Initialize MOQ session
-      this.session = new MoqSession(this.connection, this.config.debug);
-
-      // Register callback for incoming subscriptions BEFORE any subscribes,
-      // because server SUBSCRIBE messages can arrive during our subscribe calls
-      this.session.onIncomingSubscribe((namespace, trackAlias) => {
-        const nsPath = namespace.join('/');
-        this.log(`Server subscribed to ${nsPath} with trackAlias=${trackAlias}`);
-
-        // Check if this is our audio input track
-        if (nsPath.includes('in/audio')) {
-          this.audioInputTrackAlias = trackAlias;
-          this.log(`Updated audioInputTrackAlias to ${trackAlias}`);
-
-          // If audio publisher already exists, update its track alias
-          if (this.audioTrackPublisher) {
-            this.audioTrackPublisher.detach();
-            this.audioTrackPublisher = new AudioTrackPublisher({
-              trackAlias: trackAlias,
-              publisherPriority: 0,
-            });
-            this.audioTrackPublisher.attach(this.connection!);
-            this.audioTrackPublisher.startSession();
-            this.log(`Recreated audioTrackPublisher with trackAlias=${trackAlias}`);
-          }
-        }
-
-        // Check if this is our state track (but not "out/state")
-        if (nsPath.includes('state/') && !nsPath.includes('out/state')) {
-          this.stateTrackAlias = trackAlias;
-          this.log(`Updated stateTrackAlias to ${this.stateTrackAlias}`);
-
-          // Recreate state publisher with new alias
-          if (this.stateTrackPublisher) {
-            this.stateTrackPublisher.detach();
-          }
-          this.stateTrackPublisher = new StateTrackPublisher({
-            trackAlias: this.stateTrackAlias,
-            publisherPriority: 1,
-          });
-          this.stateTrackPublisher.attach(this.connection!);
-          this.log(`Recreated stateTrackPublisher with trackAlias=${this.stateTrackAlias}`);
-        }
-
-        // Check if this is our control track
-        if (nsPath.includes('in/control')) {
-          this.controlTrackAlias = trackAlias;
-          this.log(`Updated controlTrackAlias to ${this.controlTrackAlias}`);
-
-          if (this.controlTrackPublisher) {
-            this.controlTrackPublisher.detach();
-          }
-          this.controlTrackPublisher = new ControlTrackPublisher({
-            trackAlias: this.controlTrackAlias,
-            publisherPriority: 2,
-          });
-          this.controlTrackPublisher.attach(this.connection!);
-          this.log(`Created controlTrackPublisher with trackAlias=${this.controlTrackAlias}`);
-        }
-      });
-
-      await this.session.initialize(MoqRole.PUBSUB);
+      await this.workerClient.call('initSession', { role: MoqRole.PUBSUB });
       this.log('Session initialized, subscribing to output track...');
 
-      // Subscribe to output audio track with JWT authorization
-      // This is where authentication happens
+      const wc = this.workerClient;
+
+      // Audio output (JWT-authorised — this is where authentication happens).
       const outputNamespace = generateTrackNamespace(PanaudiaTrackType.AUDIO_OUTPUT, this.config.entityId);
       this.log('Subscribing to:', outputNamespace.join('/'));
-      const subscribeId = await this.session.subscribe(outputNamespace, '', this.config.ticket);
-      this.log('Subscribe successful, id:', subscribeId);
-      this.audioOutputTrackAlias = this.session.getTrackAlias(subscribeId) ?? 0;
+      const audioSub = await wc.call('subscribe', { namespace: outputNamespace, trackName: '', authorization: this.config.ticket });
+      this.audioOutputTrackAlias = audioSub.trackAlias ?? 0;
+      this.log('Audio output subscribed, trackAlias:', this.audioOutputTrackAlias);
 
-      // Subscribe to state output track
+      // State output.
       const stateOutputNamespace = generateTrackNamespace(PanaudiaTrackType.STATE_OUTPUT, this.config.entityId);
-      this.log('Subscribing to state output:', stateOutputNamespace.join('/'));
-      const stateSubscribeId = await this.session.subscribe(stateOutputNamespace, '');
-      this.stateOutputTrackAlias = this.session.getTrackAlias(stateSubscribeId) ?? 0;
+      const stateSub = await wc.call('subscribe', { namespace: stateOutputNamespace, trackName: '' });
+      this.stateOutputTrackAlias = stateSub.trackAlias ?? 0;
       this.log('State output subscribed, trackAlias:', this.stateOutputTrackAlias);
-
-      // Set up state subscriber
       this.stateSubscriber = new StateSubscriber();
-      this.stateSubscriber.attach(this.connection, this.stateOutputTrackAlias);
+      this.stateSubscriber.attach(this.datagramRouter, this.stateOutputTrackAlias);
       this.stateSubscriber.onState((state) => {
         this.events.emit<EntityState>('entityState', state);
       });
       this.stateSubscriber.start();
 
-      // Subscribe to attributes output track (with resume opID if reconnecting)
+      // Attributes output (resume opId on reconnect).
       const attributesOutputNamespace = generateTrackNamespace(PanaudiaTrackType.ATTRIBUTES_OUTPUT, this.config.entityId);
       const resumeOpId = this.attributesCache.getHighestOpId();
-      this.log('Subscribing to attributes output:', attributesOutputNamespace.join('/'),
-        resumeOpId > 0n ? `resumeOpId: ${resumeOpId}` : '');
-      const attrsSubscribeId = await this.session.subscribe(
-        attributesOutputNamespace, '', undefined, resumeOpId > 0n ? resumeOpId : undefined
-      );
-      this.attributesOutputTrackAlias = this.session.getTrackAlias(attrsSubscribeId) ?? 0;
+      const attrsSub = await wc.call('subscribe', {
+        namespace: attributesOutputNamespace, trackName: '', resumeOpId: resumeOpId > 0n ? resumeOpId : undefined,
+      });
+      this.attributesOutputTrackAlias = attrsSub.trackAlias ?? 0;
       this.log('Attributes output subscribed, trackAlias:', this.attributesOutputTrackAlias);
-
-      // Set up attributes subscriber (reuses persistent cache for resume)
       this.attributesSubscriber = new AttributesSubscriber(this.attributesCache);
-      this.attributesSubscriber.attach(this.connection, this.attributesOutputTrackAlias);
+      this.attributesSubscriber.attach(this.datagramRouter, this.attributesOutputTrackAlias);
       this.attributesSubscriber.onValues((values) => {
         this.events.emit('attributes', values);
       });
@@ -387,21 +316,16 @@ export class PanaudiaMoqClient {
       });
       this.attributesSubscriber.start();
 
-      // Subscribe to entity output track (per-client filtered).
-      // Server-side filter ensures only this client's own uuid keys flow
-      // here, so the cache stays small and safe to share globally.
+      // Entity output (per-client filtered server-side).
       const entityOutputNamespace = generateTrackNamespace(PanaudiaTrackType.ENTITY_OUTPUT, this.config.entityId);
       const entityResumeOpId = this.entityCache.getHighestOpId();
-      this.log('Subscribing to entity output:', entityOutputNamespace.join('/'),
-        entityResumeOpId > 0n ? `resumeOpId: ${entityResumeOpId}` : '');
-      const entitySubscribeId = await this.session.subscribe(
-        entityOutputNamespace, '', undefined, entityResumeOpId > 0n ? entityResumeOpId : undefined
-      );
-      this.entityOutputTrackAlias = this.session.getTrackAlias(entitySubscribeId) ?? 0;
+      const entitySub = await wc.call('subscribe', {
+        namespace: entityOutputNamespace, trackName: '', resumeOpId: entityResumeOpId > 0n ? entityResumeOpId : undefined,
+      });
+      this.entityOutputTrackAlias = entitySub.trackAlias ?? 0;
       this.log('Entity output subscribed, trackAlias:', this.entityOutputTrackAlias);
-
       this.entitySubscriber = new EntitySubscriber(this.entityCache);
-      this.entitySubscriber.attach(this.connection, this.entityOutputTrackAlias);
+      this.entitySubscriber.attach(this.datagramRouter, this.entityOutputTrackAlias);
       this.entitySubscriber.onValues((values) => {
         this.events.emit('entity', values);
       });
@@ -413,25 +337,17 @@ export class PanaudiaMoqClient {
       });
       this.entitySubscriber.start();
 
-      // Subscribe to the space output track. Gated server-side on
-      // commands.ReadCapSpaceRead — the SUBSCRIBE is accepted by the
-      // catch-all path even for unauthorised holders, but the server
-      // never installs a publisher for them so no envelopes arrive.
-      // Tolerate a subscribe error (the server may also reject) and
-      // proceed without space data.
+      // Space output (server-gated by commands.ReadCapSpaceRead; tolerate failure).
       try {
         const spaceOutputNamespace = generateTrackNamespace(PanaudiaTrackType.SPACE_OUTPUT, this.config.entityId);
         const spaceResumeOpId = this.spaceCache.getHighestOpId();
-        this.log('Subscribing to space output:', spaceOutputNamespace.join('/'),
-          spaceResumeOpId > 0n ? `resumeOpId: ${spaceResumeOpId}` : '');
-        const spaceSubscribeId = await this.session.subscribe(
-          spaceOutputNamespace, '', undefined, spaceResumeOpId > 0n ? spaceResumeOpId : undefined,
-        );
-        this.spaceOutputTrackAlias = this.session.getTrackAlias(spaceSubscribeId) ?? 0;
+        const spaceSub = await wc.call('subscribe', {
+          namespace: spaceOutputNamespace, trackName: '', resumeOpId: spaceResumeOpId > 0n ? spaceResumeOpId : undefined,
+        });
+        this.spaceOutputTrackAlias = spaceSub.trackAlias ?? 0;
         this.log('Space output subscribed, trackAlias:', this.spaceOutputTrackAlias);
-
         this.spaceSubscriber = new SpaceSubscriber(this.spaceCache);
-        this.spaceSubscriber.attach(this.connection, this.spaceOutputTrackAlias);
+        this.spaceSubscriber.attach(this.datagramRouter, this.spaceOutputTrackAlias);
         this.spaceSubscriber.onValues((values) => {
           this.events.emit('space', values);
         });
@@ -449,21 +365,17 @@ export class PanaudiaMoqClient {
       this.setState(ConnectionState.AUTHENTICATED);
       this.events.emit('authenticated');
 
-      // Announce input tracks
+      // Announce input tracks. Publishers are created when the server subscribes
+      // back to them — handleWorkerEvent('incomingSubscribe').
       const audioInputNamespace = generateTrackNamespace(PanaudiaTrackType.AUDIO_INPUT, this.config.entityId);
       const stateNamespace = generateTrackNamespace(PanaudiaTrackType.STATE, this.config.entityId);
       const controlNamespace = generateTrackNamespace(PanaudiaTrackType.CONTROL_INPUT, this.config.entityId);
+      await wc.call('announce', { namespace: audioInputNamespace, authorization: this.config.ticket });
+      await wc.call('announce', { namespace: stateNamespace, authorization: this.config.ticket });
+      await wc.call('announce', { namespace: controlNamespace, authorization: this.config.ticket });
 
-      await this.session.announce(audioInputNamespace, this.config.ticket);
-      await this.session.announce(stateNamespace, this.config.ticket);
-      await this.session.announce(controlNamespace, this.config.ticket);
-
-      // Note: Track publishers will be created in the onIncomingSubscribe callback
-      // when the server subscribes to our announced tracks
-
-      // Start background message processing to handle server's subscriptions
-      // that may arrive after connection setup
-      this.session.startMessageLoop();
+      // Start the worker's background control-stream message loop.
+      await wc.call('startMessageLoop', {});
 
       this.events.emit('connected');
 
@@ -525,17 +437,17 @@ export class PanaudiaMoqClient {
       this.spaceSubscriber = null;
     }
 
-    this.teardownReceiveWorker();
-
-    if (this.session) {
-      await this.session.close();
-      this.session = null;
+    if (this.workerClient) {
+      try {
+        await this.workerClient.call('disconnect', {});
+      } catch {
+        // worker may already be torn down
+      }
+      this.workerClient.dispose();
+      this.workerClient = null;
     }
-
-    if (this.connection) {
-      this.connection.close();
-      this.connection = null;
-    }
+    this.sender = null;
+    this.datagramRouter.clear();
 
     this.setState(ConnectionState.DISCONNECTED);
     this.events.emit('disconnected');
@@ -702,7 +614,7 @@ export class PanaudiaMoqClient {
       throw new InvalidStateError('connected or authenticated', this.state);
     }
 
-    if (!this.connection) {
+    if (!this.workerClient || !this.sender) {
       throw new MoqClientError('No connection available', 'NOT_CONNECTED');
     }
 
@@ -717,7 +629,7 @@ export class PanaudiaMoqClient {
         trackAlias: this.audioInputTrackAlias,
         publisherPriority: 0, // High priority for audio
       });
-      this.audioTrackPublisher.attach(this.connection);
+      this.audioTrackPublisher.attach(this.sender);
     }
 
     // Initialize audio publisher (requests microphone permission)
@@ -827,7 +739,7 @@ export class PanaudiaMoqClient {
       throw new InvalidStateError('connected or authenticated', this.state);
     }
 
-    if (!this.connection) {
+    if (!this.workerClient) {
       throw new MoqClientError('No connection available', 'NOT_CONNECTED');
     }
 
@@ -836,68 +748,30 @@ export class PanaudiaMoqClient {
       this.audioPlayer = new AudioPlayer({ ...config, debug: this.config.debug });
     }
 
-    // Initialize audio player (creates AudioContext and decoder)
+    // Initialize audio player (creates AudioContext + worklet + the SAB ring).
     if (this.audioPlayer.getState() === AudioPlayerState.IDLE) {
       await this.audioPlayer.initialize();
     }
-
-    // Create audio subscriber if not exists
-    if (!this.audioSubscriber) {
-      this.audioSubscriber = new AudioSubscriber();
-    }
-
-    // Attach subscriber to connection
-    this.audioSubscriber.attach(this.connection, this.audioOutputTrackAlias);
-
-    // Set up frame handler to decode and play audio
-    this.audioSubscriber.onFrame((data, groupId) => {
-      if (this.audioPlayer && this.audioPlayer.getState() === AudioPlayerState.PLAYING) {
-        try {
-          const timestamp = Number(groupId) * 1000;
-          this.audioPlayer.decodeFrame(data, timestamp);
-        } catch (error) {
-          console.error('Failed to decode audio frame:', error);
-        }
-      }
-    });
-
-    // Start playback
     this.audioPlayer.start();
 
-    // Worker mode (design §11.3): hand the worklet's PCM port + audio config to
-    // the receive Worker so it decodes the audio track off-thread straight into
-    // the ring. The main-thread audioSubscriber handler above stays registered
-    // but is inert (the worker never forwards audio); decodeFrame is a no-op in
-    // worker mode. In fallback mode (no worker) the audioSubscriber path drives
-    // the main-thread decoder as before.
-    if (this.receiveWorker && this.audioPlayer) {
-      const handoff = this.audioPlayer.prepareForWorker();
-      if (handoff?.mode === 'sab') {
-        // SAB shared by reference — NOT in the transfer list (it stays usable here).
-        this.receiveWorker.postMessage({
-          type: 'audio',
-          audioTrackAlias: this.audioOutputTrackAlias,
-          decoderConfig: this.audioPlayer.getDecoderConfig(),
-          jbufConfig: handoff.jbufConfig,
-          sharedStorage: handoff.sharedStorage,
-          sharedWritePos: handoff.sharedWritePos,
-        });
-        this.log(`receive worker decoding audio trackAlias=${this.audioOutputTrackAlias} via SAB ring`);
-      } else if (handoff?.mode === 'port') {
-        this.receiveWorker.postMessage(
-          {
-            type: 'audio',
-            audioTrackAlias: this.audioOutputTrackAlias,
-            decoderConfig: this.audioPlayer.getDecoderConfig(),
-            pcmPort: handoff.pcmPort,
-          },
-          [handoff.pcmPort]
-        );
-        this.log(`receive worker decoding audio trackAlias=${this.audioOutputTrackAlias} via pcmPort (fallback)`);
-      }
+    // Hand the audio track to the worker: it decodes that trackAlias and writes
+    // the SAB ring the worklet reads (design §11.3) — decode is off the main
+    // thread, fed by the worker-owned transport. Requires cross-origin isolation
+    // (SAB); prepareForWorker() returns the shared ring + geometry.
+    const handoff = this.audioPlayer.prepareForWorker();
+    if (handoff?.mode === 'sab') {
+      // SAB is shared by reference (NOT transferred — it stays usable here).
+      await this.workerClient.call('setAudioTrack', {
+        trackAlias: this.audioOutputTrackAlias,
+        decoderConfig: this.audioPlayer.getDecoderConfig(),
+        jbufConfig: handoff.jbufConfig,
+        sharedStorage: handoff.sharedStorage,
+        sharedWritePos: handoff.sharedWritePos,
+      });
+      this.log(`worker decoding audio trackAlias=${this.audioOutputTrackAlias} via SAB ring`);
+    } else {
+      this.logWarn('audio playback needs cross-origin isolation (SAB) — not active on this page');
     }
-
-    await this.audioSubscriber.start();
 
     this.log('Playback started');
   }
@@ -1065,69 +939,73 @@ export class PanaudiaMoqClient {
   }
 
   /**
-   * Move datagram receive + Opus decode off the main thread into the receive
-   * Worker (design §11). Best-effort: if the worker can't be created the
-   * connection stays in main-thread mode and the worklet is fed by the
-   * main-thread decoder (fallback, design §11.8) — audio still plays. MUST run
-   * after connect() and BEFORE any subscriber starts (which would lock the
-   * datagram stream on the main thread).
+   * Route an event from the MOQ worker (design §11 / worker-transport-design §4):
+   * connection-state changes, the server subscribing back to our tracks (→ create
+   * publishers), forwarded non-audio datagrams (→ the main-side DatagramRouter,
+   * where the subscribers handle them), and diagnostic notices. Audio PCM never
+   * arrives here — it goes worker → SAB ring → worklet.
    */
-  private setupReceiveWorker(): void {
-    if (!this.connection) return;
-    if (!audioReceiveWorkerSupported()) {
-      this.log('receive worker unsupported — main-thread decode (fallback)');
-      return;
-    }
-    let url: string | null = null;
-    try {
-      url = createReceiveWorkerUrl();
-      const worker = new Worker(url);
-      worker.onmessage = (e: MessageEvent) => {
-        const msg = e.data as ReceiveWorkerOutbound;
-        if (!msg) return;
-        if (msg.type === 'datagram') {
-          this.connection?.ingestForwardedDatagram(msg.trackAlias, msg.payload, msg.groupId, msg.objectId);
-        } else if (msg.type === 'notice') {
-          this.log(`[receive-worker] ${msg.event}${msg.detail ? ': ' + msg.detail : ''}`);
+  private handleWorkerEvent(evt: WorkerEvent): void {
+    switch (evt.type) {
+      case 'connectionState':
+        if (evt.state === String(ConnectionState.ERROR)) {
+          this.handleError('connection_error', evt.detail ?? 'Connection failed');
+        } else if (evt.state === String(ConnectionState.DISCONNECTED)) {
+          this.handleDisconnect();
         }
-      };
-      worker.onerror = (e) => this.log('[receive-worker] error', e.message);
-      // Hand the datagram readable to the worker (switches connection to worker
-      // mode). Done last so a failure above leaves main mode intact.
-      const readable = this.connection.takeDatagramReadableForWorker();
-      if (!readable) {
-        worker.terminate();
-        return;
-      }
-      worker.postMessage({ type: 'init', readable }, [readable as unknown as Transferable]);
-      this.receiveWorker = worker;
-      // Loud on purpose (not debug-gated): which producer path is live is the
-      // single most important fact when diagnosing crackle (design §11.8).
-      console.info('[panaudia] receive worker ACTIVE — datagram read + decode OFF the main thread');
-    } catch (err) {
-      console.warn(
-        '[panaudia] receive worker setup FAILED — falling back to MAIN-THREAD decode ' +
-          '(audio will be coupled to main-thread jank). Cause:',
-        err
-      );
-      this.receiveWorker?.terminate();
-      this.receiveWorker = null;
-      this.connection?.revertToMainDatagramMode();
-    } finally {
-      if (url) URL.revokeObjectURL(url);
+        break;
+      case 'incomingSubscribe':
+        this.handleIncomingSubscribe(evt.namespace, evt.trackAlias);
+        break;
+      case 'datagram':
+        this.datagramRouter.ingest({
+          trackAlias: evt.trackAlias,
+          payload: evt.payload,
+          groupId: evt.groupId,
+          objectId: evt.objectId,
+        });
+        break;
+      case 'notice':
+        this.log(`[moq-worker] ${evt.event}${evt.detail ? ': ' + evt.detail : ''}`);
+        break;
     }
   }
 
-  /** Stop and release the receive Worker, if any. */
-  private teardownReceiveWorker(): void {
-    if (this.receiveWorker) {
-      try {
-        this.receiveWorker.postMessage({ type: 'stop' });
-      } catch {
-        // worker may already be gone
+  /**
+   * The server subscribed to one of our announced input tracks — (re)create the
+   * matching publisher bound to the worker-backed sender. (Was the inline
+   * session.onIncomingSubscribe callback before the transport moved to the worker.)
+   */
+  private handleIncomingSubscribe(namespace: string[], trackAlias: number): void {
+    const nsPath = namespace.join('/');
+    this.log(`Server subscribed to ${nsPath} with trackAlias=${trackAlias}`);
+    if (!this.sender) return;
+
+    if (nsPath.includes('in/audio')) {
+      this.audioInputTrackAlias = trackAlias;
+      if (this.audioTrackPublisher) {
+        this.audioTrackPublisher.detach();
+        this.audioTrackPublisher = new AudioTrackPublisher({ trackAlias, publisherPriority: 0 });
+        this.audioTrackPublisher.attach(this.sender);
+        this.audioTrackPublisher.startSession();
+        this.log(`Recreated audioTrackPublisher with trackAlias=${trackAlias}`);
       }
-      this.receiveWorker.terminate();
-      this.receiveWorker = null;
+    }
+
+    if (nsPath.includes('state/') && !nsPath.includes('out/state')) {
+      this.stateTrackAlias = trackAlias;
+      if (this.stateTrackPublisher) this.stateTrackPublisher.detach();
+      this.stateTrackPublisher = new StateTrackPublisher({ trackAlias: this.stateTrackAlias, publisherPriority: 1 });
+      this.stateTrackPublisher.attach(this.sender);
+      this.log(`Recreated stateTrackPublisher with trackAlias=${this.stateTrackAlias}`);
+    }
+
+    if (nsPath.includes('in/control')) {
+      this.controlTrackAlias = trackAlias;
+      if (this.controlTrackPublisher) this.controlTrackPublisher.detach();
+      this.controlTrackPublisher = new ControlTrackPublisher({ trackAlias: this.controlTrackAlias, publisherPriority: 2 });
+      this.controlTrackPublisher.attach(this.sender);
+      this.log(`Created controlTrackPublisher with trackAlias=${this.controlTrackAlias}`);
     }
   }
 
@@ -1143,9 +1021,12 @@ export class PanaudiaMoqClient {
    * Handle disconnection
    */
   private handleDisconnect(): void {
-    this.teardownReceiveWorker();
-    this.session = null;
-    this.connection = null;
+    if (this.workerClient) {
+      this.workerClient.dispose();
+      this.workerClient = null;
+    }
+    this.sender = null;
+    this.datagramRouter.clear();
     this.setState(ConnectionState.DISCONNECTED);
     this.events.emit('disconnected');
   }

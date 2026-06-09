@@ -1,4 +1,4 @@
-import { MoqConnection } from './connection.js';
+import { DatagramReceiver } from './datagram-router.js';
 /**
  * Audio frame received from server
  */
@@ -74,7 +74,7 @@ export declare class AudioSubscriber {
      * @param connection - MOQ connection
      * @param trackAlias - Track alias to filter frames
      */
-    attach(connection: MoqConnection, trackAlias: number): void;
+    attach(connection: DatagramReceiver, trackAlias: number): void;
     /**
      * Start receiving audio frames via the connection's datagram dispatcher
      */

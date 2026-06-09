@@ -24,8 +24,9 @@ import { ValuesHandler, RemovedHandler } from './cache-topic-subscriber.js';
 export declare class PanaudiaMoqClient {
     private readonly config;
     private readonly events;
-    private connection;
-    private session;
+    private workerClient;
+    private readonly datagramRouter;
+    private sender;
     private state;
     private audioPublisher;
     private audioTrackPublisher;
@@ -35,7 +36,6 @@ export declare class PanaudiaMoqClient {
     private lastStatePublishTime;
     private audioSubscriber;
     private audioPlayer;
-    private receiveWorker;
     private stateSubscriber;
     private controlTrackPublisher;
     private controlTrackAlias;
@@ -254,16 +254,19 @@ export declare class PanaudiaMoqClient {
      */
     private setState;
     /**
-     * Move datagram receive + Opus decode off the main thread into the receive
-     * Worker (design §11). Best-effort: if the worker can't be created the
-     * connection stays in main-thread mode and the worklet is fed by the
-     * main-thread decoder (fallback, design §11.8) — audio still plays. MUST run
-     * after connect() and BEFORE any subscriber starts (which would lock the
-     * datagram stream on the main thread).
+     * Route an event from the MOQ worker (design §11 / worker-transport-design §4):
+     * connection-state changes, the server subscribing back to our tracks (→ create
+     * publishers), forwarded non-audio datagrams (→ the main-side DatagramRouter,
+     * where the subscribers handle them), and diagnostic notices. Audio PCM never
+     * arrives here — it goes worker → SAB ring → worklet.
      */
-    private setupReceiveWorker;
-    /** Stop and release the receive Worker, if any. */
-    private teardownReceiveWorker;
+    private handleWorkerEvent;
+    /**
+     * The server subscribed to one of our announced input tracks — (re)create the
+     * matching publisher bound to the worker-backed sender. (Was the inline
+     * session.onIncomingSubscribe callback before the transport moved to the worker.)
+     */
+    private handleIncomingSubscribe;
     /**
      * Handle connection error
      */

@@ -1,7 +1,7 @@
-import { C as ConnectionState, c as createEntityInfo3 } from "./topic-merger.js";
-import { E, T, b, e, a, i, u } from "./topic-merger.js";
-import { isWebTransportSupported, MoqTransportAdapter, BluetoothMicDefaultError } from "./moq/index.js";
-import { aframeToPanaudia, ambisonicToWebglPosition, ambisonicToWebglRotation, babylonToPanaudia, getWebTransportSupport, panaudiaToAframe, panaudiaToBabylon, panaudiaToPixi, panaudiaToPlaycanvas, panaudiaToThreejs, panaudiaToUnity, panaudiaToUnreal, pixiToPanaudia, playcanvasToPanaudia, threejsToPanaudia, unityToPanaudia, unrealToPanaudia, webglToAmbisonicPosition, webglToAmbisonicRotation } from "./moq/index.js";
+import { a as ConnectionState, c as createEntityInfo3 } from "./topic-merger.js";
+import { E, T, b, f, g, h, u } from "./topic-merger.js";
+import { af as isWebTransportSupported, y as MoqTransportAdapter, B as BluetoothMicDefaultError } from "./moq-transport-adapter.js";
+import { N, O, Q, R, ac, ag, ah, ai, aj, ak, al, am, at, au, av, aw, ax, ay, az } from "./moq-transport-adapter.js";
 import { WebRtcTransport } from "./webrtc/index.js";
 const BLUETOOTH_KEYWORDS = [
   "bluetooth",
@@ -129,8 +129,8 @@ const TYPE_PRIORITY = {
   unknown: 2,
   bluetooth: 3
 };
-function compareMicrophones(a2, b2) {
-  return TYPE_PRIORITY[a2.type] - TYPE_PRIORITY[b2.type];
+function compareMicrophones(a, b2) {
+  return TYPE_PRIORITY[a.type] - TYPE_PRIORITY[b2.type];
 }
 async function selectBestMicrophone(debug = false) {
   const log = debug ? (...args) => console.log("[MicSelection]", ...args) : () => {
@@ -233,8 +233,8 @@ async function resolveServer(ticket, options) {
   return body.url;
 }
 const byteToHex = [];
-for (let i2 = 0; i2 < 256; ++i2) {
-  byteToHex.push((i2 + 256).toString(16).slice(1));
+for (let i = 0; i < 256; ++i) {
+  byteToHex.push((i + 256).toString(16).slice(1));
 }
 function unsafeStringify(arr, offset = 0) {
   return (byteToHex[arr[offset + 0]] + byteToHex[arr[offset + 1]] + byteToHex[arr[offset + 2]] + byteToHex[arr[offset + 3]] + "-" + byteToHex[arr[offset + 4]] + byteToHex[arr[offset + 5]] + "-" + byteToHex[arr[offset + 6]] + byteToHex[arr[offset + 7]] + "-" + byteToHex[arr[offset + 8]] + byteToHex[arr[offset + 9]] + "-" + byteToHex[arr[offset + 10]] + byteToHex[arr[offset + 11]] + byteToHex[arr[offset + 12]] + byteToHex[arr[offset + 13]] + byteToHex[arr[offset + 14]] + byteToHex[arr[offset + 15]]).toLowerCase();
@@ -295,8 +295,8 @@ class TopicTree {
         continue;
       }
       let node = target;
-      for (let i2 = 1; i2 < parts.length - 1; i2++) {
-        const seg = parts[i2];
+      for (let i = 1; i < parts.length - 1; i++) {
+        const seg = parts[i];
         const child = node[seg];
         if (typeof child !== "object" || child === null || Array.isArray(child)) {
           node[seg] = {};
@@ -404,8 +404,8 @@ class SingleRecordTree {
         continue;
       }
       let node = this.record;
-      for (let i2 = 0; i2 < parts.length - 1; i2++) {
-        const seg = parts[i2];
+      for (let i = 0; i < parts.length - 1; i++) {
+        const seg = parts[i];
         const child = node[seg];
         if (typeof child !== "object" || child === null || Array.isArray(child)) {
           node[seg] = {};
@@ -685,8 +685,8 @@ class PanaudiaClient {
             throw new BluetoothMicDefaultError(defaultMic.label, mics);
           }
         }
-      } catch (e2) {
-        if (e2 instanceof BluetoothMicDefaultError) throw e2;
+      } catch (e) {
+        if (e instanceof BluetoothMicDefaultError) throw e;
       }
     }
     let entityId = this.config.entityId;
@@ -911,34 +911,34 @@ export {
   SingleRecordTree,
   T as TopicMerger,
   TopicTree,
-  aframeToPanaudia,
-  ambisonicToWebglPosition,
-  ambisonicToWebglRotation,
-  babylonToPanaudia,
+  N as aframeToPanaudia,
+  O as ambisonicToWebglPosition,
+  Q as ambisonicToWebglRotation,
+  R as babylonToPanaudia,
   b as bytesToUuid,
   classifyByLabel,
   createEntityInfo3,
-  e as entityInfo3FromBytes,
-  a as entityInfo3ToBytes,
-  getWebTransportSupport,
-  i as isValidUuid,
+  f as entityInfo3FromBytes,
+  g as entityInfo3ToBytes,
+  ac as getWebTransportSupport,
+  h as isValidUuid,
   isWebTransportSupported,
-  panaudiaToAframe,
-  panaudiaToBabylon,
-  panaudiaToPixi,
-  panaudiaToPlaycanvas,
-  panaudiaToThreejs,
-  panaudiaToUnity,
-  panaudiaToUnreal,
-  pixiToPanaudia,
-  playcanvasToPanaudia,
+  ag as panaudiaToAframe,
+  ah as panaudiaToBabylon,
+  ai as panaudiaToPixi,
+  aj as panaudiaToPlaycanvas,
+  ak as panaudiaToThreejs,
+  al as panaudiaToUnity,
+  am as panaudiaToUnreal,
+  at as pixiToPanaudia,
+  au as playcanvasToPanaudia,
   resolveServer,
   selectBestMicrophone,
-  threejsToPanaudia,
-  unityToPanaudia,
-  unrealToPanaudia,
+  av as threejsToPanaudia,
+  aw as unityToPanaudia,
+  ax as unrealToPanaudia,
   u as uuidToBytes,
-  webglToAmbisonicPosition,
-  webglToAmbisonicRotation
+  ay as webglToAmbisonicPosition,
+  az as webglToAmbisonicRotation
 };
 //# sourceMappingURL=index.js.map

@@ -1,4 +1,4 @@
-import { MoqConnection } from './connection.js';
+import { DatagramReceiver } from './datagram-router.js';
 /**
  * Entity state with Panaudia coordinates
  */
@@ -42,7 +42,7 @@ export declare class StateSubscriber {
     /**
      * Attach to a connection and track alias
      */
-    attach(connection: MoqConnection, trackAlias: number): void;
+    attach(connection: DatagramReceiver, trackAlias: number): void;
     /**
      * Start receiving state updates via the datagram dispatcher
      */

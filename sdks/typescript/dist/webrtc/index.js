@@ -1,4 +1,4 @@
-import { C as ConnectionState, T as TopicMerger, a as entityInfo3ToBytes, E as ENTITY_INFO3_SIZE, e as entityInfo3FromBytes } from "../topic-merger.js";
+import { a as ConnectionState, T as TopicMerger, g as entityInfo3ToBytes, E as ENTITY_INFO3_SIZE, f as entityInfo3FromBytes } from "../topic-merger.js";
 function extractEntityIdFromJwt(token) {
   const parts = token.split(".");
   if (parts.length !== 3) throw new Error("Invalid JWT format");

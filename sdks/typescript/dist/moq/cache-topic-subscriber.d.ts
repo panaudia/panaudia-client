@@ -1,4 +1,4 @@
-import { MoqConnection } from './connection.js';
+import { DatagramReceiver } from './datagram-router.js';
 import { CacheMap, CacheEntry } from '../shared/cache-map.js';
 import { TopicValue, MergeDebugHandler } from '../shared/topic-merger.js';
 export type { TopicValue };
@@ -50,7 +50,7 @@ export declare class CacheTopicSubscriber {
     /**
      * Attach to a connection and track alias.
      */
-    attach(connection: MoqConnection, trackAlias: number): void;
+    attach(connection: DatagramReceiver, trackAlias: number): void;
     /**
      * Start receiving updates via the datagram dispatcher.
      */

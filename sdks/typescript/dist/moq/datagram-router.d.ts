@@ -24,6 +24,16 @@ export interface ParsedDatagram {
     groupId: bigint;
     objectId: bigint;
 }
+/**
+ * The minimal receive surface a subscriber needs — register/unregister a handler
+ * by track alias. Satisfied by both `MoqConnection` (main-thread transport) and
+ * `DatagramRouter` (the main-side router fed by the worker's forwarded datagrams),
+ * so subscribers work either way without knowing which.
+ */
+export interface DatagramReceiver {
+    registerDatagramHandler(trackAlias: number, handler: DatagramHandler): void;
+    unregisterDatagramHandler(trackAlias: number): void;
+}
 export declare class DatagramRouter {
     private handlers;
     private pending;
@@ -37,6 +47,8 @@ export declare class DatagramRouter {
     unregister(trackAlias: number): void;
     /** Route a parsed datagram to its handler, or buffer it if none is registered yet. */
     ingest(d: ParsedDatagram): void;
+    registerDatagramHandler(trackAlias: number, handler: DatagramHandler): void;
+    unregisterDatagramHandler(trackAlias: number): void;
     /** Number of buffered pre-handler datagrams (tests/diagnostics). */
     pendingCount(): number;
     /** Drop all handlers + buffered datagrams (connection close). */
