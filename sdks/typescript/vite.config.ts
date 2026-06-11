@@ -28,7 +28,11 @@ export default defineConfig({
         chunkFileNames: '[name].js',
       },
     },
-    sourcemap: true,
+    // No source-maps: the `?worker&inline` blob worker bakes a relative
+    // `//# sourceMappingURL=…` that resolves to `blob://null…` and Safari blocks it
+    // (Vite drives the worker map from build.sourcemap, with no per-worker override).
+    // minify is off, so the emitted bundle is fully readable without maps.
+    sourcemap: false,
     minify: false,
   },
   // Bundled module workers (the receive/transport worker uses `?worker&inline`,

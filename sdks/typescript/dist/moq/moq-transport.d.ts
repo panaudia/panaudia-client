@@ -134,6 +134,34 @@ export declare function buildUnannounce(namespace: string[]): Uint8Array;
  */
 export declare function buildObjectDatagram(trackAlias: number, groupId: bigint, objectId: bigint, publisherPriority: number, payload: Uint8Array): Uint8Array;
 /**
+ * Number of bytes the QUIC varint encoding of `value` occupies (1, 2, 4, or 8) —
+ * matching the thresholds in {@link encodeVarint}. Used to size scratch buffers.
+ */
+export declare function varintSize(value: number | bigint): number;
+/**
+ * Write the QUIC varint encoding of `value` into `buf` starting at `offset`,
+ * returning the offset just past the last byte written. No allocation. Produces
+ * bytes identical to {@link encodeVarint}.
+ *
+ * A `number` ≤ the 4-byte range (< 2^30) takes a BigInt-free fast path (the common
+ * case: type, trackAlias, and realistic group/object IDs); larger values and the
+ * 8-byte case use BigInt arithmetic, exactly as `encodeVarint`.
+ */
+export declare function writeVarintInto(buf: Uint8Array, offset: number, value: number | bigint): number;
+/**
+ * Upper bound on the encoded size of an OBJECT_DATAGRAM with a payload of at most
+ * `maxPayload` bytes: type(1) + trackAlias(≤8) + groupId(≤8) + objectId(≤8) +
+ * priority(1) + payload. Size one reused scratch buffer with this (design §6).
+ */
+export declare function maxObjectDatagramSize(maxPayload: number): number;
+/**
+ * Write a full OBJECT_DATAGRAM into `buf` (caller-owned, reused) and return its
+ * total length. Allocation-free counterpart of {@link buildObjectDatagram} —
+ * byte-for-byte identical output. `buf` must be at least
+ * {@link maxObjectDatagramSize}(payload.length); send `buf.subarray(0, len)`.
+ */
+export declare function encodeObjectDatagramInto(buf: Uint8Array, trackAlias: number, groupId: bigint, objectId: bigint, publisherPriority: number, payload: Uint8Array): number;
+/**
  * Parse the message type from the beginning of a message
  */
 export declare function parseMessageType(data: Uint8Array): {

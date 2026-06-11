@@ -33,6 +33,8 @@
     "test:coverage": "vitest --coverage",
     "typecheck": "tsc --noEmit",
     "verify:worklet": "node scripts/verify-worklet.mjs",
+    "verify:capture-worklet": "node scripts/verify-capture-worklet.mjs",
+    "verify:no-frame-alloc": "node scripts/verify-no-frame-alloc.mjs",
     "verify:receive-worker": "node scripts/verify-receive-worker.mjs",
     "test:integration": "npx playwright test"
   },

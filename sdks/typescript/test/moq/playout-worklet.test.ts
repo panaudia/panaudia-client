@@ -70,9 +70,12 @@ function rampPcm(frames: number): Float32Array {
   return pcm;
 }
 
+// lowInit/lowMin pinned to pre-2026-06-10 defaults so these wiring tests keep their
+// snapTarget=656 geometry (and lowMin<=lowInit); the deepened default is checked in
+// jitter-buffer-core.test.
 const STEREO_CFG: { processorOptions: PlayoutProcessorOptions } = {
   processorOptions: {
-    config: { numChannels: 2, readerFrame: 128, writerFrame: 240 },
+    config: { numChannels: 2, readerFrame: 128, writerFrame: 240, lowInit: 240, lowMin: 96 },
     statsEvery: 5,
   },
 };
@@ -154,7 +157,7 @@ describe('playout worklet', () => {
   });
 
   it('handles mono config too', () => {
-    const p = instantiate({ processorOptions: { config: { numChannels: 1, readerFrame: 128, writerFrame: 240 } } });
+    const p = instantiate({ processorOptions: { config: { numChannels: 1, readerFrame: 128, writerFrame: 240, lowInit: 240, lowMin: 96 } } });
     const mono = new Float32Array(800);
     for (let i = 0; i < mono.length; i++) mono[i] = i;
     p.port.onmessage!({ data: mono });

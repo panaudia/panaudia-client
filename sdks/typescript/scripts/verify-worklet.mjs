@@ -34,7 +34,9 @@ new Function('AudioWorkletProcessor', 'registerProcessor', code)(FakeAWP, (_n, c
 });
 check('processor registered', Cls !== null);
 
-const p = new Cls({ processorOptions: { config: { numChannels: 2, readerFrame: 128, writerFrame: 240 } } });
+// lowInit/lowMin pinned to pre-2026-06-10 defaults so the snap geometry below (rp=344)
+// holds and lowMin<=lowInit (the deepened default lowMin would exceed this lowInit).
+const p = new Cls({ processorOptions: { config: { numChannels: 2, readerFrame: 128, writerFrame: 240, lowInit: 240, lowMin: 96 } } });
 const pcm = new Float32Array(2000);
 for (let i = 0; i < 1000; i++) {
   pcm[i * 2] = i;

@@ -443,264 +443,169 @@ function wrapError(error, defaultCode = "UNKNOWN") {
 function isWebCodecsOpusSupported() {
   return typeof AudioEncoder !== "undefined";
 }
-class OpusEncoder {
-  encoder = null;
-  config;
-  frameCallback = null;
-  isInitialized = false;
-  constructor(config = {}) {
-    this.config = {
-      sampleRate: config.sampleRate ?? 48e3,
-      channels: config.channels ?? 1,
-      bitrate: config.bitrate ?? 64e3,
-      frameDurationMs: config.frameDurationMs ?? 5,
-      debug: config.debug ?? false
-    };
-  }
-  // eslint-disable-next-line @typescript-eslint/no-explicit-any
-  log(...args) {
-    if (this.config.debug) {
-      console.log("[OpusEncoder]", ...args);
-    }
-  }
-  /**
-   * Set callback for encoded frames
-   */
-  onFrame(callback) {
-    this.frameCallback = callback;
-  }
-  /**
-   * Initialize the encoder
-   */
-  async initialize() {
-    if (!isWebCodecsOpusSupported()) {
-      throw new MoqClientError(
-        "WebCodecs AudioEncoder is not supported in this browser",
-        "WEBCODECS_NOT_SUPPORTED"
-      );
-    }
-    const frameDurationUs = this.config.frameDurationMs * 1e3;
-    const encoderConfig = {
-      codec: "opus",
-      sampleRate: this.config.sampleRate,
-      numberOfChannels: this.config.channels,
-      bitrate: this.config.bitrate,
-      opus: { frameDuration: frameDurationUs }
-    };
-    const support = await AudioEncoder.isConfigSupported(encoderConfig);
-    if (!support.supported) {
-      throw new MoqClientError(
-        `Opus encoding not supported (frameDuration=${this.config.frameDurationMs}ms)`,
-        "OPUS_NOT_SUPPORTED"
-      );
-    }
-    this.encoder = new AudioEncoder({
-      output: (chunk, metadata) => {
-        this.handleEncodedChunk(chunk, metadata);
-      },
-      error: (error) => {
-        console.error("AudioEncoder error:", error);
-      }
-    });
-    this.encoder.configure(encoderConfig);
-    this.isInitialized = true;
-    this.log(`initialized: ${this.config.sampleRate}Hz, ${this.config.channels}ch, ${this.config.bitrate}bps, ${this.config.frameDurationMs}ms frames`);
-  }
-  /**
-   * Encode PCM audio data
-   *
-   * @param pcmData - Float32 PCM samples (interleaved if stereo)
-   * @param timestamp - Timestamp in microseconds
-   */
-  encode(pcmData, timestamp) {
-    if (!this.encoder || !this.isInitialized) {
-      throw new MoqClientError("Encoder not initialized", "NOT_INITIALIZED");
-    }
-    const audioData = new AudioData({
-      format: "f32",
-      sampleRate: this.config.sampleRate,
-      numberOfFrames: pcmData.length / this.config.channels,
-      numberOfChannels: this.config.channels,
-      timestamp,
-      data: pcmData.buffer
-    });
-    try {
-      this.encoder.encode(audioData);
-    } finally {
-      audioData.close();
-    }
-  }
-  /**
-   * Flush any pending frames
-   */
-  async flush() {
-    if (this.encoder && this.encoder.state === "configured") {
-      await this.encoder.flush();
-    }
-  }
-  /**
-   * Close the encoder and release resources
-   */
-  close() {
-    if (this.encoder) {
-      if (this.encoder.state !== "closed") {
-        this.encoder.close();
-      }
-      this.encoder = null;
-    }
-    this.isInitialized = false;
-  }
-  /**
-   * Handle encoded chunk from WebCodecs
-   */
-  handleEncodedChunk(chunk, _metadata) {
-    const data = new Uint8Array(chunk.byteLength);
-    chunk.copyTo(data);
-    const frameDurationUs = this.config.frameDurationMs * 1e3;
-    const frame = {
-      data,
-      timestamp: chunk.timestamp,
-      duration: chunk.duration ?? frameDurationUs
-    };
-    if (this.frameCallback) {
-      this.frameCallback(frame);
-    }
-  }
-  /**
-   * Get encoder state
-   */
-  getState() {
-    return this.encoder?.state ?? "closed";
-  }
+function captureCapacityFrames() {
+  return 2048;
 }
-const WORKLET_PROCESSOR_CODE = `
-class AudioCaptureProcessor extends AudioWorkletProcessor {
-  process(inputs, outputs, parameters) {
-    const input = inputs[0];
-    if (input && input[0] && input[0].length > 0) {
-      this.port.postMessage(new Float32Array(input[0]));
+class CaptureRing {
+  nc;
+  capacity;
+  data;
+  wpCell;
+  rpCell;
+  /** Count of quanta dropped because the consumer stalled past capacity (§5.1). */
+  overflows;
+  constructor(cfg) {
+    const nc = cfg.numChannels ?? 1;
+    const capacity = cfg.capacityFrames ?? 2048;
+    if (nc < 1) {
+      throw new Error("CaptureRing: numChannels must be >= 1");
     }
+    if (capacity < 1) {
+      throw new Error("CaptureRing: capacityFrames must be >= 1");
+    }
+    if (cfg.sharedStorage.length !== capacity * nc) {
+      throw new Error(
+        `CaptureRing: sharedStorage length ${cfg.sharedStorage.length} != capacity*nc ${capacity * nc} (allocate capacityFrames * numChannels floats)`
+      );
+    }
+    if (cfg.sharedWritePos.length < 1 || cfg.sharedReadPos.length < 1) {
+      throw new Error("CaptureRing: sharedWritePos/sharedReadPos must be length-1 BigInt64Arrays");
+    }
+    this.nc = nc;
+    this.capacity = capacity;
+    this.data = cfg.sharedStorage;
+    this.wpCell = cfg.sharedWritePos;
+    this.rpCell = cfg.sharedReadPos;
+    this.overflows = 0;
+  }
+  /** Cumulative producer position (frames), acquire-loaded. */
+  get writePos() {
+    return Number(Atomics.load(this.wpCell, 0));
+  }
+  /** Cumulative consumer position (frames), acquire-loaded. */
+  get readPos() {
+    return Number(Atomics.load(this.rpCell, 0));
+  }
+  /** Current fill in frames (unambiguous: positions are cumulative). */
+  fillFrames() {
+    return this.writePos - this.readPos;
+  }
+  /**
+   * PRODUCER (capture worklet). Interleave one render quantum of planar channels into
+   * the ring. `planar[ch]` is a Float32Array of `nFrames` samples (Web Audio is
+   * planar; all channels equal length). Channels beyond `planar.length` reuse the last
+   * (mono→stereo dup); channels beyond `nc` are ignored. If the consumer has stalled
+   * and the quantum would not fit, the WHOLE quantum is dropped and `overflows` is
+   * bumped — never blocks, never overwrites unread data (§5.1). Returns true if written.
+   */
+  write(planar) {
+    if (!planar || planar.length === 0 || !planar[0]) {
+      return false;
+    }
+    const nc = this.nc;
+    const cap = this.capacity;
+    const nFrames = planar[0].length;
+    if (nFrames === 0) {
+      return false;
+    }
+    const wp = this.writePos;
+    const rp = this.readPos;
+    if (wp - rp + nFrames > cap) {
+      this.overflows++;
+      return false;
+    }
+    const data = this.data;
+    const startFrame = wp % cap;
+    for (let i = 0; i < nFrames; i++) {
+      const ringBase = (startFrame + i) % cap * nc;
+      for (let ch = 0; ch < nc; ch++) {
+        const src = planar[ch < planar.length ? ch : planar.length - 1];
+        data[ringBase + ch] = src[i];
+      }
+    }
+    Atomics.store(this.wpCell, 0, BigInt(wp + nFrames));
     return true;
   }
+  /**
+   * CONSUMER (MOQ worker). Copy all whole frames currently available into `dst`
+   * (interleaved), up to `dst`'s capacity, then free that space. Returns the number of
+   * interleaved SAMPLES written (`frames * nc`), or 0 if nothing was ready. Drain to
+   * empty: leaves only what the producer hasn't yet published.
+   */
+  drain(dst) {
+    const nc = this.nc;
+    const cap = this.capacity;
+    const wp = this.writePos;
+    const rp = this.readPos;
+    const avail = wp - rp;
+    const room = Math.floor(dst.length / nc);
+    const nFrames = avail < room ? avail : room;
+    if (nFrames <= 0) {
+      return 0;
+    }
+    const data = this.data;
+    const startFrame = rp % cap;
+    if (startFrame + nFrames <= cap) {
+      dst.set(data.subarray(startFrame * nc, (startFrame + nFrames) * nc));
+    } else {
+      const first = cap - startFrame;
+      dst.set(data.subarray(startFrame * nc, cap * nc), 0);
+      dst.set(data.subarray(0, (nFrames - first) * nc), first * nc);
+    }
+    Atomics.store(this.rpCell, 0, BigInt(rp + nFrames));
+    return nFrames * nc;
+  }
 }
-registerProcessor('audio-capture-processor', AudioCaptureProcessor);
-`;
-class AudioCaptureEncoder {
-  audioContext = null;
-  sourceNode = null;
-  workletNode = null;
-  encoder;
-  config;
-  sampleBuffer = [];
-  bufferSize = 0;
-  samplesPerFrame;
-  frameDurationUs;
-  timestampUs = 0;
-  isRunning = false;
-  constructor(config = {}) {
-    this.config = {
-      sampleRate: config.sampleRate ?? 48e3,
-      channels: config.channels ?? 1,
-      bitrate: config.bitrate ?? 64e3,
-      frameDurationMs: config.frameDurationMs ?? 5,
-      debug: config.debug ?? false
-    };
-    this.encoder = new OpusEncoder(this.config);
-    this.samplesPerFrame = Math.floor(this.config.sampleRate * this.config.frameDurationMs / 1e3);
-    this.frameDurationUs = this.config.frameDurationMs * 1e3;
-  }
-  // eslint-disable-next-line @typescript-eslint/no-explicit-any
-  log(...args) {
-    if (this.config.debug) {
-      console.log("[AudioCaptureEncoder]", ...args);
-    }
-  }
-  /**
-   * Set callback for encoded Opus frames
-   */
-  onFrame(callback) {
-    this.encoder.onFrame(callback);
-  }
-  /**
-   * Start capturing and encoding
-   */
-  async start(mediaStream) {
-    await this.encoder.initialize();
-    this.audioContext = new AudioContext({
-      sampleRate: this.config.sampleRate
+const CAPTURE_PROCESSOR_NAME = "capture-processor";
+const CAPTURE_PROCESSOR_SOURCE = `
+class CaptureRingProcessor extends AudioWorkletProcessor {
+  constructor(options) {
+    super();
+    const opts = (options && options.processorOptions) || {};
+    this.signal = opts.signal;
+    this.ring = new CaptureRing({
+      numChannels: opts.numChannels,
+      capacityFrames: opts.capacityFrames,
+      sharedStorage: opts.sharedStorage,
+      sharedWritePos: opts.sharedWritePos,
+      sharedReadPos: opts.sharedReadPos,
     });
-    const blob2 = new Blob([WORKLET_PROCESSOR_CODE], { type: "application/javascript" });
-    const url = URL.createObjectURL(blob2);
-    await this.audioContext.audioWorklet.addModule(url);
-    URL.revokeObjectURL(url);
-    this.sourceNode = this.audioContext.createMediaStreamSource(mediaStream);
-    this.workletNode = new AudioWorkletNode(this.audioContext, "audio-capture-processor");
-    this.workletNode.port.onmessage = (event) => {
-      if (!this.isRunning) return;
-      this.addSamples(event.data);
-    };
-    this.sourceNode.connect(this.workletNode);
-    this.isRunning = true;
-    this.log(`started (AudioWorklet, ${this.config.frameDurationMs}ms frames, ${this.samplesPerFrame} samples/frame)`);
   }
-  /**
-   * Add samples to buffer and encode when we have enough
-   */
-  addSamples(samples) {
-    this.sampleBuffer.push(samples);
-    this.bufferSize += samples.length;
-    while (this.bufferSize >= this.samplesPerFrame) {
-      const frameData = new Float32Array(this.samplesPerFrame);
-      let frameOffset = 0;
-      while (frameOffset < this.samplesPerFrame && this.sampleBuffer.length > 0) {
-        const chunk = this.sampleBuffer[0];
-        const needed = this.samplesPerFrame - frameOffset;
-        const available = chunk.length;
-        if (available <= needed) {
-          frameData.set(chunk, frameOffset);
-          frameOffset += available;
-          this.sampleBuffer.shift();
-          this.bufferSize -= available;
-        } else {
-          frameData.set(chunk.subarray(0, needed), frameOffset);
-          this.sampleBuffer[0] = chunk.subarray(needed);
-          this.bufferSize -= needed;
-          frameOffset += needed;
-        }
-      }
-      this.encoder.encode(frameData, this.timestampUs);
-      this.timestampUs += this.frameDurationUs;
+
+  // PRODUCER: interleave the input quantum into the ring; wake the worker if we wrote.
+  // inputs[0] is the planar input (array of per-channel Float32Arrays); empty when no
+  // source is connected. CaptureRing.write guards the empty/overflow cases.
+  process(inputs) {
+    const input = inputs[0];
+    if (input && this.ring.write(input)) {
+      // Clock-free wake (design §6.1): bump + notify the signal cell. One bounded
+      // futex wake, one waiter (the MOQ worker's Atomics.waitAsync). Real-time-safe:
+      // no allocation, no lock, the caller never blocks.
+      Atomics.add(this.signal, 0, 1);
+      Atomics.notify(this.signal, 0, 1);
     }
+    return true; // keep the processor alive
   }
-  /**
-   * Stop capturing and encoding
-   */
-  async stop() {
-    this.isRunning = false;
-    await this.encoder.flush();
-    if (this.workletNode) {
-      this.workletNode.disconnect();
-      this.workletNode = null;
-    }
-    if (this.sourceNode) {
-      this.sourceNode.disconnect();
-      this.sourceNode = null;
-    }
-    if (this.audioContext) {
-      await this.audioContext.close();
-      this.audioContext = null;
-    }
-    this.encoder.close();
-    this.sampleBuffer = [];
-    this.bufferSize = 0;
-    this.log("stopped");
+}
+registerProcessor(${JSON.stringify(CAPTURE_PROCESSOR_NAME)}, CaptureRingProcessor);
+`;
+function buildCaptureWorkletCode() {
+  const coreSource = CaptureRing.toString();
+  if (!coreSource.startsWith("class")) {
+    throw new Error("capture-worklet: CaptureRing.toString() is not a class declaration");
   }
-  /**
-   * Check if currently running
-   */
-  isActive() {
-    return this.isRunning;
+  const helper = /\b__(publicField|privateField|decorateClass|decorateParam|name|esDecorate)\b/.exec(coreSource);
+  if (helper) {
+    throw new Error(
+      `capture-worklet: serialized CaptureRing references the bundler helper "${helper[0]}" — it would be undefined in the worklet. Ensure the build keeps native class output.`
+    );
   }
+  return `const CaptureRing = ${coreSource};
+${CAPTURE_PROCESSOR_SOURCE}`;
+}
+function createCaptureWorkletUrl() {
+  const blob2 = new Blob([buildCaptureWorkletCode()], { type: "application/javascript" });
+  return URL.createObjectURL(blob2);
 }
 var AudioPublisherState = /* @__PURE__ */ ((AudioPublisherState2) => {
   AudioPublisherState2["IDLE"] = "idle";
@@ -745,11 +650,7 @@ function isOpusSupported() {
   if (typeof MediaRecorder === "undefined") {
     return false;
   }
-  const mimeTypes = [
-    "audio/webm;codecs=opus",
-    "audio/ogg;codecs=opus",
-    "audio/webm"
-  ];
+  const mimeTypes = ["audio/webm;codecs=opus", "audio/ogg;codecs=opus", "audio/webm"];
   for (const mimeType of mimeTypes) {
     if (MediaRecorder.isTypeSupported(mimeType)) {
       return true;
@@ -761,11 +662,7 @@ function getBestOpusMimeType() {
   if (typeof MediaRecorder === "undefined") {
     return null;
   }
-  const mimeTypes = [
-    "audio/webm;codecs=opus",
-    "audio/ogg;codecs=opus",
-    "audio/webm"
-  ];
+  const mimeTypes = ["audio/webm;codecs=opus", "audio/ogg;codecs=opus", "audio/webm"];
   for (const mimeType of mimeTypes) {
     if (MediaRecorder.isTypeSupported(mimeType)) {
       return mimeType;
@@ -777,14 +674,17 @@ class AudioPublisher {
   config;
   state = "idle";
   mediaStream = null;
-  mediaRecorder = null;
-  frameHandler = null;
-  // WebCodecs encoder (preferred - produces raw Opus)
-  webCodecsEncoder = null;
-  useWebCodecs = false;
-  // Timing
-  startTime = 0;
-  frameSequence = 0;
+  // Capture half of the Web Audio graph (main thread).
+  audioContext = null;
+  sourceNode = null;
+  workletNode = null;
+  // SAB ring shared with the worklet (producer) and the worker (consumer).
+  sharedStorage = null;
+  sharedWritePos = null;
+  sharedReadPos = null;
+  sharedSignal = null;
+  numChannels;
+  capacityFrames;
   // eslint-disable-next-line @typescript-eslint/no-explicit-any
   log(...args) {
     if (this.config.debug) {
@@ -803,12 +703,8 @@ class AudioPublisher {
       deviceId: config.deviceId,
       debug: config.debug ?? false
     };
-    this.useWebCodecs = isWebCodecsOpusSupported();
-    if (this.useWebCodecs) {
-      this.log("Using WebCodecs for raw Opus encoding");
-    } else {
-      this.log("WebCodecs not available, using MediaRecorder (WebM container)");
-    }
+    this.numChannels = this.config.channelCount;
+    this.capacityFrames = captureCapacityFrames();
   }
   /**
    * Get current state
@@ -817,29 +713,48 @@ class AudioPublisher {
     return this.state;
   }
   /**
-   * Set handler for audio frames
+   * The Opus encoder config the worker should use (worker constructs WebCodecs
+   * AudioEncoder from this). Matches the capture sample rate / channel count.
    */
-  onFrame(handler) {
-    this.frameHandler = handler;
+  getEncoderConfig() {
+    return {
+      codec: "opus",
+      sampleRate: this.config.sampleRate,
+      numberOfChannels: this.config.channelCount,
+      bitrate: this.config.bitrate,
+      frameDurationUs: Math.round(this.config.frameDurationMs * 1e3)
+    };
   }
   /**
-   * Request microphone access and prepare for recording
+   * The shared capture ring + geometry to hand to the worker, or null if capture is
+   * not running / the SAB could not be allocated (not cross-origin isolated).
+   */
+  getCaptureHandoff() {
+    if (!this.sharedStorage || !this.sharedWritePos || !this.sharedReadPos || !this.sharedSignal) {
+      return null;
+    }
+    return {
+      numChannels: this.numChannels,
+      capacityFrames: this.capacityFrames,
+      sharedStorage: this.sharedStorage,
+      sharedWritePos: this.sharedWritePos,
+      sharedReadPos: this.sharedReadPos,
+      sharedSignal: this.sharedSignal
+    };
+  }
+  /**
+   * Request microphone access and prepare for capture.
    */
   async initialize() {
     if (this.state !== "idle") {
-      throw new MoqClientError(
-        `Cannot initialize: already in state ${this.state}`,
-        "INVALID_STATE"
-      );
+      throw new MoqClientError(`Cannot initialize: already in state ${this.state}`, "INVALID_STATE");
     }
     if (!navigator.mediaDevices || !navigator.mediaDevices.getUserMedia) {
-      throw new AudioNotSupportedError(
-        "getUserMedia is not supported in this browser"
-      );
+      throw new AudioNotSupportedError("getUserMedia is not supported in this browser");
     }
-    if (!isOpusSupported()) {
+    if (!isWebCodecsOpusSupported()) {
       throw new AudioNotSupportedError(
-        "Opus encoding is not supported in this browser. Try Chrome, Firefox, or Edge."
+        "WebCodecs Opus encoding is not supported in this browser. Try Chrome, Edge, Firefox, or Safari 26.4+."
       );
     }
     this.setState(
@@ -877,27 +792,20 @@ class AudioPublisher {
             error
           );
         } else if (error.name === "NotFoundError") {
-          throw new AudioPermissionError(
-            "No microphone found. Please connect a microphone and try again.",
-            error
-          );
+          throw new AudioPermissionError("No microphone found. Please connect a microphone and try again.", error);
         } else if (error.name === "NotReadableError") {
-          throw new AudioPermissionError(
-            "Microphone is in use by another application.",
-            error
-          );
+          throw new AudioPermissionError("Microphone is in use by another application.", error);
         }
       }
-      throw new AudioPermissionError(
-        `Failed to access microphone: ${error}`,
-        error
-      );
+      throw new AudioPermissionError(`Failed to access microphone: ${error}`, error);
     }
   }
   /**
-   * Start recording and encoding audio
+   * Start capturing: build the AudioContext + capture worklet and allocate the SAB
+   * ring the worklet fills. Requires cross-origin isolation (the SAB is mandatory —
+   * there is no main-thread-encode fallback).
    */
-  start() {
+  async start() {
     if (this.state !== "ready" && this.state !== "paused") {
       throw new MoqClientError(
         `Cannot start: must be in READY or PAUSED state, currently ${this.state}`,
@@ -907,151 +815,96 @@ class AudioPublisher {
     if (!this.mediaStream) {
       throw new MoqClientError("No media stream available", "INVALID_STATE");
     }
-    if (this.useWebCodecs) {
-      this.startWebCodecs();
-      return;
+    if (typeof SharedArrayBuffer === "undefined" || globalThis.crossOriginIsolated !== true) {
+      throw new AudioNotSupportedError(
+        "Microphone capture requires cross-origin isolation (COOP/COEP) for the SharedArrayBuffer ring"
+      );
     }
-    this.startMediaRecorder();
-  }
-  /**
-   * Start encoding using WebCodecs AudioEncoder (preferred - raw Opus)
-   */
-  startWebCodecs() {
-    this.webCodecsEncoder = new AudioCaptureEncoder({
-      sampleRate: this.config.sampleRate,
-      channels: this.config.channelCount,
-      bitrate: this.config.bitrate,
-      frameDurationMs: this.config.frameDurationMs,
-      debug: this.config.debug
-    });
-    this.webCodecsEncoder.onFrame((opusFrame) => {
-      if (this.frameHandler) {
-        const frame = {
-          data: opusFrame.data,
-          timestamp: Math.floor(opusFrame.timestamp / 1e3),
-          // Convert us to ms
-          duration: Math.floor(opusFrame.duration / 1e3)
-        };
-        this.frameHandler(frame);
-      }
-    });
-    this.webCodecsEncoder.start(this.mediaStream).then(() => {
+    if (typeof AudioWorkletNode === "undefined") {
+      throw new AudioNotSupportedError("AudioWorklet is not supported in this browser");
+    }
+    if (this.state === "paused" && this.audioContext && this.sourceNode && this.workletNode) {
+      this.sourceNode.connect(this.workletNode);
       this.setState(
         "recording"
         /* RECORDING */
       );
-      this.log(`Recording started with WebCodecs, ${this.config.bitrate} bps (raw Opus)`);
-    }).catch((error) => {
-      console.error("Failed to start WebCodecs encoder:", error);
-      this.setState(
-        "error"
-        /* ERROR */
-      );
-    });
-  }
-  /**
-   * Start encoding using MediaRecorder (fallback - WebM container)
-   */
-  startMediaRecorder() {
-    const mimeType = getBestOpusMimeType();
-    if (!mimeType) {
-      throw new AudioNotSupportedError("No supported Opus MIME type found");
+      this.log("Microphone resumed");
+      return;
     }
-    this.mediaRecorder = new MediaRecorder(this.mediaStream, {
-      mimeType,
-      audioBitsPerSecond: this.config.bitrate
-    });
-    this.mediaRecorder.ondataavailable = (event) => {
-      if (event.data.size > 0) {
-        this.handleEncodedData(event.data);
+    this.audioContext = new AudioContext({ sampleRate: this.config.sampleRate });
+    const url = createCaptureWorkletUrl();
+    try {
+      await this.audioContext.audioWorklet.addModule(url);
+    } finally {
+      URL.revokeObjectURL(url);
+    }
+    const nc = this.numChannels;
+    const cap = this.capacityFrames;
+    this.sharedStorage = new Float32Array(new SharedArrayBuffer(cap * nc * 4));
+    this.sharedWritePos = new BigInt64Array(new SharedArrayBuffer(8));
+    this.sharedReadPos = new BigInt64Array(new SharedArrayBuffer(8));
+    this.sharedSignal = new Int32Array(new SharedArrayBuffer(4));
+    this.sourceNode = this.audioContext.createMediaStreamSource(this.mediaStream);
+    this.workletNode = new AudioWorkletNode(this.audioContext, CAPTURE_PROCESSOR_NAME, {
+      numberOfInputs: 1,
+      numberOfOutputs: 0,
+      processorOptions: {
+        numChannels: nc,
+        capacityFrames: cap,
+        sharedStorage: this.sharedStorage,
+        sharedWritePos: this.sharedWritePos,
+        sharedReadPos: this.sharedReadPos,
+        signal: this.sharedSignal
       }
-    };
-    this.mediaRecorder.onerror = (event) => {
-      console.error("MediaRecorder error:", event);
-      this.setState(
-        "error"
-        /* ERROR */
-      );
-    };
-    this.mediaRecorder.onstop = () => {
-      this.log("MediaRecorder stopped");
-    };
-    this.startTime = performance.now();
-    this.frameSequence = 0;
-    this.mediaRecorder.start(this.config.frameDurationMs);
+    });
+    this.sourceNode.connect(this.workletNode);
     this.setState(
       "recording"
       /* RECORDING */
     );
-    this.log(`Recording started with ${mimeType}, ${this.config.bitrate} bps (WARNING: WebM container, server may not decode correctly)`);
+    this.log(`Capture started (SAB ring, ${nc}ch, capacity=${cap} frames)`);
   }
   /**
-   * Pause recording
+   * Pause capture: disconnect the mic from the worklet so the ring stops filling (the
+   * worker then has nothing to encode). The graph + SAB are kept for resume.
    */
   pause() {
     if (this.state !== "recording") {
       return;
     }
-    if (this.webCodecsEncoder) {
-      this.webCodecsEncoder.stop().catch(console.error);
-      this.setState(
-        "paused"
-        /* PAUSED */
-      );
-      return;
+    if (this.sourceNode && this.workletNode) {
+      try {
+        this.sourceNode.disconnect(this.workletNode);
+      } catch {
+      }
     }
-    if (this.mediaRecorder && this.mediaRecorder.state === "recording") {
-      this.mediaRecorder.pause();
-      this.setState(
-        "paused"
-        /* PAUSED */
-      );
-    }
+    this.setState(
+      "paused"
+      /* PAUSED */
+    );
+    this.log("Microphone paused");
   }
   /**
-   * Resume recording
+   * Resume capture (reconnect the mic to the worklet).
    */
   resume() {
     if (this.state !== "paused") {
       return;
     }
-    if (this.useWebCodecs && this.mediaStream) {
-      this.startWebCodecs();
-      return;
-    }
-    if (this.mediaRecorder && this.mediaRecorder.state === "paused") {
-      this.mediaRecorder.resume();
+    if (this.sourceNode && this.workletNode) {
+      this.sourceNode.connect(this.workletNode);
       this.setState(
         "recording"
         /* RECORDING */
       );
+      this.log("Microphone resumed");
     }
   }
   /**
-   * Stop recording
-   */
-  stop() {
-    if (this.webCodecsEncoder) {
-      this.webCodecsEncoder.stop().catch((error) => {
-        console.error("Error stopping WebCodecs encoder:", error);
-      });
-      this.webCodecsEncoder = null;
-    }
-    if (this.mediaRecorder) {
-      if (this.mediaRecorder.state !== "inactive") {
-        this.mediaRecorder.stop();
-      }
-      this.mediaRecorder = null;
-    }
-    this.setState(
-      "ready"
-      /* READY */
-    );
-  }
-  /**
-   * Enable or disable the mic tracks. Disabling makes the source emit
-   * silent samples — the encoder + track publisher stay alive, MOQ
-   * frames keep flowing as Opus DTX comfort-noise.
+   * Enable or disable the mic tracks. Disabling makes the source emit silent samples —
+   * the capture graph + worker encoder stay alive, so MOQ frames keep flowing as Opus
+   * DTX comfort-noise.
    */
   setMicEnabled(enabled) {
     if (!this.mediaStream) return;
@@ -1060,7 +913,35 @@ class AudioPublisher {
     }
   }
   /**
-   * Release all resources
+   * Stop capturing: tear down the capture graph (keeps the media stream so it can be
+   * restarted). The SAB views are released; the worker should be told to `stopCapture`.
+   */
+  stop() {
+    if (this.workletNode) {
+      this.workletNode.disconnect();
+      this.workletNode = null;
+    }
+    if (this.sourceNode) {
+      this.sourceNode.disconnect();
+      this.sourceNode = null;
+    }
+    if (this.audioContext) {
+      void this.audioContext.close();
+      this.audioContext = null;
+    }
+    this.sharedStorage = null;
+    this.sharedWritePos = null;
+    this.sharedReadPos = null;
+    this.sharedSignal = null;
+    if (this.state !== "idle" && this.state !== "error") {
+      this.setState(
+        "ready"
+        /* READY */
+      );
+    }
+  }
+  /**
+   * Release all resources (tears down the graph and stops the mic tracks).
    */
   dispose() {
     this.stop();
@@ -1070,36 +951,11 @@ class AudioPublisher {
       }
       this.mediaStream = null;
     }
-    this.frameHandler = null;
     this.setState(
       "idle"
       /* IDLE */
     );
   }
-  /**
-   * Handle encoded audio data from MediaRecorder
-   */
-  async handleEncodedData(blob2) {
-    try {
-      const arrayBuffer = await blob2.arrayBuffer();
-      const data = new Uint8Array(arrayBuffer);
-      const timestamp = performance.now() - this.startTime;
-      const frame = {
-        data,
-        timestamp: Math.floor(timestamp),
-        duration: this.config.frameDurationMs
-      };
-      this.frameSequence++;
-      if (this.frameHandler) {
-        this.frameHandler(frame);
-      }
-    } catch (error) {
-      console.error("Error processing encoded audio:", error);
-    }
-  }
-  /**
-   * Update state
-   */
   setState(state) {
     this.state = state;
   }
@@ -1503,6 +1359,72 @@ function buildObjectDatagram(trackAlias, groupId, objectId, publisherPriority, p
   builder.writeRaw(payload);
   return builder.build();
 }
+function writeVarintInto(buf, offset, value) {
+  if (typeof value === "number") {
+    if (!Number.isInteger(value) || value < 0) {
+      throw new RangeError(`writeVarintInto: value must be a non-negative integer, got ${value}`);
+    }
+    if (value < 64) {
+      buf[offset] = value;
+      return offset + 1;
+    }
+    if (value < 16384) {
+      buf[offset] = value >> 8 | 64;
+      buf[offset + 1] = value & 255;
+      return offset + 2;
+    }
+    if (value < 1073741824) {
+      buf[offset] = value >>> 24 | 128;
+      buf[offset + 1] = value >>> 16 & 255;
+      buf[offset + 2] = value >>> 8 & 255;
+      buf[offset + 3] = value & 255;
+      return offset + 4;
+    }
+    value = BigInt(value);
+  }
+  const n = value;
+  if (n < 0n) {
+    throw new RangeError(`writeVarintInto: value must be non-negative, got ${n}`);
+  }
+  if (n < 0x40n) {
+    buf[offset] = Number(n);
+    return offset + 1;
+  }
+  if (n < 0x4000n) {
+    buf[offset] = Number(n >> 8n | 0x40n);
+    buf[offset + 1] = Number(n & 0xffn);
+    return offset + 2;
+  }
+  if (n < 0x40000000n) {
+    buf[offset] = Number(n >> 24n | 0x80n);
+    buf[offset + 1] = Number(n >> 16n & 0xffn);
+    buf[offset + 2] = Number(n >> 8n & 0xffn);
+    buf[offset + 3] = Number(n & 0xffn);
+    return offset + 4;
+  }
+  buf[offset] = Number(n >> 56n | 0xc0n);
+  buf[offset + 1] = Number(n >> 48n & 0xffn);
+  buf[offset + 2] = Number(n >> 40n & 0xffn);
+  buf[offset + 3] = Number(n >> 32n & 0xffn);
+  buf[offset + 4] = Number(n >> 24n & 0xffn);
+  buf[offset + 5] = Number(n >> 16n & 0xffn);
+  buf[offset + 6] = Number(n >> 8n & 0xffn);
+  buf[offset + 7] = Number(n & 0xffn);
+  return offset + 8;
+}
+function maxObjectDatagramSize(maxPayload) {
+  return 1 + 8 + 8 + 8 + 1 + maxPayload;
+}
+function encodeObjectDatagramInto(buf, trackAlias, groupId, objectId, publisherPriority, payload) {
+  let pos = 0;
+  pos = writeVarintInto(buf, pos, 0);
+  pos = writeVarintInto(buf, pos, trackAlias);
+  pos = writeVarintInto(buf, pos, groupId);
+  pos = writeVarintInto(buf, pos, objectId);
+  buf[pos++] = publisherPriority & 255;
+  buf.set(payload, pos);
+  return pos + payload.length;
+}
 function parseMessageType(data) {
   const { value, bytesRead } = decodeVarint(data, 0);
   return { type: Number(value), bytesRead };
@@ -1760,6 +1682,8 @@ class MoqConnection {
         this.handleError(error);
       });
       await this.transport.ready;
+      const negotiated = this.transport.protocol;
+      console.log(`[MOQ] WebTransport ready — negotiated subprotocol: ${JSON.stringify(negotiated)}`);
       this.setState(ConnectionState.CONNECTED);
     } catch (error) {
       this.setState(ConnectionState.ERROR, error);
@@ -1834,6 +1758,9 @@ class MoqConnection {
   async sendDatagram(data) {
     if (!this.transport) {
       throw new Error("Not connected");
+    }
+    if (data.length === 0) {
+      return;
     }
     if (!this.datagramWriter) {
       this.datagramWriter = this.transport.datagrams.writable.getWriter();
@@ -2030,7 +1957,7 @@ class MoqWorkerClient {
     this.worker.terminate();
   }
 }
-const jsContent = 'var ConnectionState = /* @__PURE__ */ ((ConnectionState2) => {\n  ConnectionState2["DISCONNECTED"] = "disconnected";\n  ConnectionState2["CONNECTING"] = "connecting";\n  ConnectionState2["CONNECTED"] = "connected";\n  ConnectionState2["AUTHENTICATED"] = "authenticated";\n  ConnectionState2["ERROR"] = "error";\n  return ConnectionState2;\n})(ConnectionState || {});\nvar MoqMessageType = /* @__PURE__ */ ((MoqMessageType2) => {\n  MoqMessageType2[MoqMessageType2["CLIENT_SETUP"] = 32] = "CLIENT_SETUP";\n  MoqMessageType2[MoqMessageType2["SERVER_SETUP"] = 33] = "SERVER_SETUP";\n  MoqMessageType2[MoqMessageType2["ANNOUNCE"] = 6] = "ANNOUNCE";\n  MoqMessageType2[MoqMessageType2["ANNOUNCE_OK"] = 7] = "ANNOUNCE_OK";\n  MoqMessageType2[MoqMessageType2["ANNOUNCE_ERROR"] = 8] = "ANNOUNCE_ERROR";\n  MoqMessageType2[MoqMessageType2["UNANNOUNCE"] = 9] = "UNANNOUNCE";\n  MoqMessageType2[MoqMessageType2["SUBSCRIBE"] = 3] = "SUBSCRIBE";\n  MoqMessageType2[MoqMessageType2["SUBSCRIBE_OK"] = 4] = "SUBSCRIBE_OK";\n  MoqMessageType2[MoqMessageType2["SUBSCRIBE_ERROR"] = 5] = "SUBSCRIBE_ERROR";\n  MoqMessageType2[MoqMessageType2["UNSUBSCRIBE"] = 10] = "UNSUBSCRIBE";\n  MoqMessageType2[MoqMessageType2["SUBSCRIBE_DONE"] = 11] = "SUBSCRIBE_DONE";\n  MoqMessageType2[MoqMessageType2["OBJECT_STREAM"] = 0] = "OBJECT_STREAM";\n  MoqMessageType2[MoqMessageType2["OBJECT_DATAGRAM"] = 1] = "OBJECT_DATAGRAM";\n  MoqMessageType2[MoqMessageType2["GOAWAY"] = 16] = "GOAWAY";\n  return MoqMessageType2;\n})(MoqMessageType || {});\nvar MoqSetupParameter = /* @__PURE__ */ ((MoqSetupParameter2) => {\n  MoqSetupParameter2[MoqSetupParameter2["ROLE"] = 0] = "ROLE";\n  MoqSetupParameter2[MoqSetupParameter2["PATH"] = 1] = "PATH";\n  MoqSetupParameter2[MoqSetupParameter2["MAX_SUBSCRIBE_ID"] = 2] = "MAX_SUBSCRIBE_ID";\n  return MoqSetupParameter2;\n})(MoqSetupParameter || {});\nvar MoqFilterType = /* @__PURE__ */ ((MoqFilterType2) => {\n  MoqFilterType2[MoqFilterType2["LATEST_GROUP"] = 1] = "LATEST_GROUP";\n  MoqFilterType2[MoqFilterType2["LATEST_OBJECT"] = 2] = "LATEST_OBJECT";\n  MoqFilterType2[MoqFilterType2["ABSOLUTE_START"] = 3] = "ABSOLUTE_START";\n  MoqFilterType2[MoqFilterType2["ABSOLUTE_RANGE"] = 4] = "ABSOLUTE_RANGE";\n  return MoqFilterType2;\n})(MoqFilterType || {});\nvar MoqGroupOrder = /* @__PURE__ */ ((MoqGroupOrder2) => {\n  MoqGroupOrder2[MoqGroupOrder2["NONE"] = 0] = "NONE";\n  MoqGroupOrder2[MoqGroupOrder2["ASCENDING"] = 1] = "ASCENDING";\n  MoqGroupOrder2[MoqGroupOrder2["DESCENDING"] = 2] = "DESCENDING";\n  return MoqGroupOrder2;\n})(MoqGroupOrder || {});\nfunction encodeVarint(value) {\n  const n = BigInt(value);\n  if (n < 64n) {\n    return new Uint8Array([Number(n)]);\n  } else if (n < 16384n) {\n    return new Uint8Array([Number(n >> 8n | 0x40n), Number(n & 0xffn)]);\n  } else if (n < 1073741824n) {\n    return new Uint8Array([\n      Number(n >> 24n | 0x80n),\n      Number(n >> 16n & 0xffn),\n      Number(n >> 8n & 0xffn),\n      Number(n & 0xffn)\n    ]);\n  } else {\n    return new Uint8Array([\n      Number(n >> 56n | 0xc0n),\n      Number(n >> 48n & 0xffn),\n      Number(n >> 40n & 0xffn),\n      Number(n >> 32n & 0xffn),\n      Number(n >> 24n & 0xffn),\n      Number(n >> 16n & 0xffn),\n      Number(n >> 8n & 0xffn),\n      Number(n & 0xffn)\n    ]);\n  }\n}\nfunction decodeVarint(data, offset = 0) {\n  if (offset >= data.length) {\n    throw new Error("Not enough data to decode varint");\n  }\n  const firstByte = data[offset];\n  const prefix = firstByte >> 6;\n  switch (prefix) {\n    case 0: {\n      return { value: BigInt(firstByte), bytesRead: 1 };\n    }\n    case 1: {\n      if (offset + 2 > data.length) {\n        throw new Error("Not enough data for 2-byte varint");\n      }\n      const value = BigInt((firstByte & 63) << 8) | BigInt(data[offset + 1]);\n      return { value, bytesRead: 2 };\n    }\n    case 2: {\n      if (offset + 4 > data.length) {\n        throw new Error("Not enough data for 4-byte varint");\n      }\n      const value = BigInt(firstByte & 63) << 24n | BigInt(data[offset + 1]) << 16n | BigInt(data[offset + 2]) << 8n | BigInt(data[offset + 3]);\n      return { value, bytesRead: 4 };\n    }\n    case 3: {\n      if (offset + 8 > data.length) {\n        throw new Error("Not enough data for 8-byte varint");\n      }\n      const value = BigInt(firstByte & 63) << 56n | BigInt(data[offset + 1]) << 48n | BigInt(data[offset + 2]) << 40n | BigInt(data[offset + 3]) << 32n | BigInt(data[offset + 4]) << 24n | BigInt(data[offset + 5]) << 16n | BigInt(data[offset + 6]) << 8n | BigInt(data[offset + 7]);\n      return { value, bytesRead: 8 };\n    }\n    default:\n      throw new Error("Invalid varint prefix");\n  }\n}\nconst textEncoder = new TextEncoder();\nconst textDecoder = new TextDecoder();\nfunction encodeString(str) {\n  const bytes = textEncoder.encode(str);\n  const lengthBytes = encodeVarint(bytes.length);\n  const result = new Uint8Array(lengthBytes.length + bytes.length);\n  result.set(lengthBytes, 0);\n  result.set(bytes, lengthBytes.length);\n  return result;\n}\nfunction decodeString(data, offset = 0) {\n  const { value: length, bytesRead: lengthBytes } = decodeVarint(data, offset);\n  const stringLength = Number(length);\n  const stringStart = offset + lengthBytes;\n  const stringEnd = stringStart + stringLength;\n  if (stringEnd > data.length) {\n    throw new Error("Not enough data for string");\n  }\n  const value = textDecoder.decode(data.subarray(stringStart, stringEnd));\n  return { value, bytesRead: lengthBytes + stringLength };\n}\nfunction encodeBytes(bytes) {\n  const lengthBytes = encodeVarint(bytes.length);\n  const result = new Uint8Array(lengthBytes.length + bytes.length);\n  result.set(lengthBytes, 0);\n  result.set(bytes, lengthBytes.length);\n  return result;\n}\nfunction decodeBytes(data, offset = 0) {\n  const { value: length, bytesRead: lengthBytes } = decodeVarint(data, offset);\n  const bytesLength = Number(length);\n  const bytesStart = offset + lengthBytes;\n  const bytesEnd = bytesStart + bytesLength;\n  if (bytesEnd > data.length) {\n    throw new Error("Not enough data for bytes");\n  }\n  const value = data.subarray(bytesStart, bytesEnd);\n  return { value, bytesRead: lengthBytes + bytesLength };\n}\nclass MessageBuilder {\n  chunks = [];\n  totalLength = 0;\n  /**\n   * Append a varint to the message\n   */\n  writeVarint(value) {\n    const bytes = encodeVarint(value);\n    this.chunks.push(bytes);\n    this.totalLength += bytes.length;\n    return this;\n  }\n  /**\n   * Append a length-prefixed string to the message\n   */\n  writeString(str) {\n    const bytes = encodeString(str);\n    this.chunks.push(bytes);\n    this.totalLength += bytes.length;\n    return this;\n  }\n  /**\n   * Append length-prefixed bytes to the message\n   */\n  writeBytes(data) {\n    const bytes = encodeBytes(data);\n    this.chunks.push(bytes);\n    this.totalLength += bytes.length;\n    return this;\n  }\n  /**\n   * Append raw bytes (no length prefix) to the message\n   */\n  writeRaw(data) {\n    this.chunks.push(data);\n    this.totalLength += data.length;\n    return this;\n  }\n  /**\n   * Build the final message\n   */\n  build() {\n    const result = new Uint8Array(this.totalLength);\n    let offset = 0;\n    for (const chunk of this.chunks) {\n      result.set(chunk, offset);\n      offset += chunk.length;\n    }\n    return result;\n  }\n}\nfunction wrapWithLengthFrame(messageType, content) {\n  const typeBytes = encodeVarint(messageType);\n  const length = content.length;\n  const lengthBytes = new Uint8Array(2);\n  lengthBytes[0] = length >> 8 & 255;\n  lengthBytes[1] = length & 255;\n  const result = new Uint8Array(typeBytes.length + 2 + content.length);\n  result.set(typeBytes, 0);\n  result.set(lengthBytes, typeBytes.length);\n  result.set(content, typeBytes.length + 2);\n  return result;\n}\nfunction encodeParams(builder, params) {\n  const sorted = [...params].sort((a, b) => a.type - b.type);\n  builder.writeVarint(sorted.length);\n  let prev = 0;\n  for (const p of sorted) {\n    builder.writeVarint(p.type - prev);\n    prev = p.type;\n    if (p.type % 2 === 1) {\n      const bytes = p.value;\n      builder.writeVarint(bytes.length);\n      builder.writeRaw(bytes);\n    } else {\n      builder.writeVarint(p.value);\n    }\n  }\n}\nfunction decodeParams(data, offset = 0) {\n  let pos = offset;\n  const { value: count, bytesRead: countBytes } = decodeVarint(data, pos);\n  pos += countBytes;\n  const params = /* @__PURE__ */ new Map();\n  let prev = 0;\n  for (let i = 0; i < Number(count); i++) {\n    const { value: delta, bytesRead: deltaBytes } = decodeVarint(data, pos);\n    pos += deltaBytes;\n    const type = prev + Number(delta);\n    prev = type;\n    if (type % 2 === 1) {\n      const { value: blob, bytesRead: blobBytes } = decodeBytes(data, pos);\n      pos += blobBytes;\n      params.set(type, blob);\n    } else {\n      const { value: v, bytesRead: vBytes } = decodeVarint(data, pos);\n      pos += vBytes;\n      params.set(type, v);\n    }\n  }\n  return { params, bytesRead: pos - offset };\n}\nfunction buildClientSetup(_supportedVersions, _role, path, maxSubscribeId) {\n  const contentBuilder = new MessageBuilder();\n  const params = [];\n  if (path !== void 0) {\n    params.push({ type: MoqSetupParameter.PATH, value: textEncoder.encode(path) });\n  }\n  if (maxSubscribeId !== void 0) {\n    params.push({ type: MoqSetupParameter.MAX_SUBSCRIBE_ID, value: BigInt(maxSubscribeId) });\n  }\n  encodeParams(contentBuilder, params);\n  return wrapWithLengthFrame(MoqMessageType.CLIENT_SETUP, contentBuilder.build());\n}\nconst SUB_PARAM_FORWARD = 16;\nconst SUB_PARAM_PRIORITY = 32;\nconst SUB_PARAM_FILTER = 33;\nconst SUB_PARAM_GROUP_ORDER = 34;\nconst SUB_OK_PARAM_EXPIRES = 8;\nconst SUB_OK_PARAM_LARGEST = 9;\nconst PARAM_AUTHORIZATION = 3;\nconst PARAM_RESUME_HLC = 65281;\nfunction buildSubscribe(subscription) {\n  const contentBuilder = new MessageBuilder();\n  contentBuilder.writeVarint(subscription.subscribeId);\n  contentBuilder.writeVarint(subscription.namespace.length);\n  for (const part of subscription.namespace) {\n    contentBuilder.writeString(part);\n  }\n  contentBuilder.writeString(subscription.trackName);\n  const params = [];\n  params.push({ type: SUB_PARAM_PRIORITY, value: BigInt(subscription.subscriberPriority ?? 128) });\n  params.push({ type: SUB_PARAM_GROUP_ORDER, value: BigInt(subscription.groupOrder ?? MoqGroupOrder.ASCENDING) });\n  params.push({ type: SUB_PARAM_FORWARD, value: BigInt(subscription.forward ?? 1) });\n  const filterBuilder = new MessageBuilder();\n  filterBuilder.writeVarint(subscription.filterType);\n  params.push({ type: SUB_PARAM_FILTER, value: filterBuilder.build() });\n  if (subscription.authorization) {\n    params.push({ type: PARAM_AUTHORIZATION, value: textEncoder.encode(subscription.authorization) });\n  }\n  if (subscription.resumeOpId !== void 0 && subscription.resumeOpId > 0n) {\n    const opIdBuf = new Uint8Array(8);\n    new DataView(opIdBuf.buffer).setBigUint64(0, subscription.resumeOpId, false);\n    params.push({ type: PARAM_RESUME_HLC, value: opIdBuf });\n  }\n  encodeParams(contentBuilder, params);\n  return wrapWithLengthFrame(MoqMessageType.SUBSCRIBE, contentBuilder.build());\n}\nfunction buildAnnounce(announcement) {\n  const contentBuilder = new MessageBuilder();\n  contentBuilder.writeVarint(announcement.requestId);\n  contentBuilder.writeVarint(announcement.namespace.length);\n  for (const part of announcement.namespace) {\n    contentBuilder.writeString(part);\n  }\n  const params = [];\n  if (announcement.parameters) {\n    for (const [key, value] of announcement.parameters) {\n      params.push({ type: key, value });\n    }\n  }\n  encodeParams(contentBuilder, params);\n  return wrapWithLengthFrame(MoqMessageType.ANNOUNCE, contentBuilder.build());\n}\nfunction parseServerSetup(data, offset = 0) {\n  const { params } = decodeParams(data, offset);\n  const parameters = /* @__PURE__ */ new Map();\n  for (const [type, value] of params) {\n    parameters.set(type, value instanceof Uint8Array ? value : encodeVarint(value));\n  }\n  return {\n    selectedVersion: MOQ_TRANSPORT_VERSION,\n    parameters\n  };\n}\nfunction parseSubscribeOk(data, offset = 0) {\n  let pos = offset;\n  const { value: subscribeId, bytesRead: subIdBytes } = decodeVarint(data, pos);\n  pos += subIdBytes;\n  const { value: trackAlias, bytesRead: aliasBytes } = decodeVarint(data, pos);\n  pos += aliasBytes;\n  const { params } = decodeParams(data, pos);\n  const result = {\n    subscribeId: Number(subscribeId),\n    trackAlias: Number(trackAlias),\n    expires: 0n,\n    groupOrder: 0,\n    contentExists: false\n  };\n  const expires = params.get(SUB_OK_PARAM_EXPIRES);\n  if (typeof expires === "bigint") result.expires = expires;\n  const groupOrder = params.get(SUB_PARAM_GROUP_ORDER);\n  if (typeof groupOrder === "bigint") result.groupOrder = Number(groupOrder);\n  const largest = params.get(SUB_OK_PARAM_LARGEST);\n  if (largest instanceof Uint8Array) {\n    result.contentExists = true;\n    const g = decodeVarint(largest, 0);\n    const o = decodeVarint(largest, g.bytesRead);\n    result.largestGroupId = g.value;\n    result.largestObjectId = o.value;\n  }\n  return result;\n}\nfunction parseSubscribeError(data, offset = 0) {\n  let pos = offset;\n  const { value: subscribeId, bytesRead: subIdBytes } = decodeVarint(data, pos);\n  pos += subIdBytes;\n  const { value: errorCode, bytesRead: errorCodeBytes } = decodeVarint(data, pos);\n  pos += errorCodeBytes;\n  const { bytesRead: retryBytes } = decodeVarint(data, pos);\n  pos += retryBytes;\n  const { value: reasonPhrase } = decodeString(data, pos);\n  return {\n    subscribeId: Number(subscribeId),\n    errorCode: Number(errorCode),\n    reasonPhrase,\n    trackAlias: 0\n  };\n}\nfunction parseAnnounceOk(data, offset = 0) {\n  const { value: requestId } = decodeVarint(data, offset);\n  return { requestId: Number(requestId) };\n}\nfunction parseAnnounceError(data, offset = 0) {\n  let pos = offset;\n  const { value: nsLength, bytesRead: nsLengthBytes } = decodeVarint(data, pos);\n  pos += nsLengthBytes;\n  const namespace = [];\n  for (let i = 0; i < Number(nsLength); i++) {\n    const { value: part, bytesRead: partBytes } = decodeString(data, pos);\n    pos += partBytes;\n    namespace.push(part);\n  }\n  const { value: errorCode, bytesRead: errorCodeBytes } = decodeVarint(data, pos);\n  pos += errorCodeBytes;\n  const { value: reasonPhrase, bytesRead: reasonBytes } = decodeString(data, pos);\n  pos += reasonBytes;\n  return {\n    namespace,\n    errorCode: Number(errorCode),\n    reasonPhrase\n  };\n}\nfunction parseObjectDatagram(data, offset = 0) {\n  let pos = offset;\n  const { value: _type, bytesRead: typeBytes } = decodeVarint(data, pos);\n  pos += typeBytes;\n  const { value: trackAlias, bytesRead: aliasBytes } = decodeVarint(data, pos);\n  pos += aliasBytes;\n  const { value: groupId, bytesRead: groupIdBytes } = decodeVarint(data, pos);\n  pos += groupIdBytes;\n  const { value: objectId, bytesRead: objectIdBytes } = decodeVarint(data, pos);\n  pos += objectIdBytes;\n  if (pos >= data.length) {\n    throw new Error("Not enough data for publisher priority");\n  }\n  const publisherPriority = data[pos];\n  pos += 1;\n  const payload = data.subarray(pos);\n  return {\n    trackAlias: Number(trackAlias),\n    groupId,\n    objectId,\n    publisherPriority,\n    payload\n  };\n}\nconst MOQ_TRANSPORT_VERSION = 4278190080 + 16;\nconst PENDING_DATAGRAM_MAX_BYTES = 1 * 1024 * 1024;\nclass DatagramRouter {\n  handlers = /* @__PURE__ */ new Map();\n  // Pre-handler buffer, FIFO across all aliases; oldest dropped when the byte cap\n  // is exceeded. Cleared on clear().\n  pending = [];\n  pendingBytes = 0;\n  /**\n   * Register a handler for a track alias and drain any datagrams that arrived for\n   * it before registration (the SUBSCRIBE_OK race), in arrival order.\n   */\n  register(trackAlias, handler) {\n    this.handlers.set(trackAlias, handler);\n    if (this.pending.length > 0) this.drainForAlias(trackAlias, handler);\n  }\n  /** Unregister a handler and discard any still-buffered datagrams for its alias. */\n  unregister(trackAlias) {\n    this.handlers.delete(trackAlias);\n    if (this.pending.length > 0) this.discardForAlias(trackAlias);\n  }\n  /** Route a parsed datagram to its handler, or buffer it if none is registered yet. */\n  ingest(d) {\n    const handler = this.handlers.get(d.trackAlias);\n    if (handler) {\n      handler(d.payload, d.trackAlias, d.groupId, d.objectId);\n    } else {\n      this.bufferUnknown(d);\n    }\n  }\n  // DatagramReceiver surface (same names as MoqConnection) so subscribers can take\n  // either. These are the public aliases of register()/unregister().\n  registerDatagramHandler(trackAlias, handler) {\n    this.register(trackAlias, handler);\n  }\n  unregisterDatagramHandler(trackAlias) {\n    this.unregister(trackAlias);\n  }\n  /** Number of buffered pre-handler datagrams (tests/diagnostics). */\n  pendingCount() {\n    return this.pending.length;\n  }\n  /** Drop all handlers + buffered datagrams (connection close). */\n  clear() {\n    this.handlers.clear();\n    this.pending = [];\n    this.pendingBytes = 0;\n  }\n  drainForAlias(trackAlias, handler) {\n    const remaining = [];\n    let drainedBytes = 0;\n    for (const d of this.pending) {\n      if (d.trackAlias === trackAlias) {\n        try {\n          handler(d.payload, d.trackAlias, d.groupId, d.objectId);\n        } catch {\n        }\n        drainedBytes += d.payload.length;\n      } else {\n        remaining.push(d);\n      }\n    }\n    this.pending = remaining;\n    this.pendingBytes -= drainedBytes;\n  }\n  discardForAlias(trackAlias) {\n    const remaining = [];\n    let discardedBytes = 0;\n    for (const d of this.pending) {\n      if (d.trackAlias === trackAlias) {\n        discardedBytes += d.payload.length;\n      } else {\n        remaining.push(d);\n      }\n    }\n    this.pending = remaining;\n    this.pendingBytes -= discardedBytes;\n  }\n  bufferUnknown(d) {\n    this.pending.push(d);\n    this.pendingBytes += d.payload.length;\n    while (this.pendingBytes > PENDING_DATAGRAM_MAX_BYTES && this.pending.length > 0) {\n      const dropped = this.pending.shift();\n      this.pendingBytes -= dropped.payload.length;\n    }\n  }\n}\nclass MoqConnection {\n  constructor(serverUrl) {\n    this.serverUrl = serverUrl;\n  }\n  transport = null;\n  state = ConnectionState.DISCONNECTED;\n  handlers = {};\n  datagramWriter = null;\n  // Datagram dispatcher: the read loop lives here (transport concern); the\n  // trackAlias→handler routing + SUBSCRIBE_OK race buffer live in the router\n  // (Phase 1 extraction — worker-transport-plan.md).\n  router = new DatagramRouter();\n  datagramDispatcherRunning = false;\n  // \'main\' = this class reads the datagram readable directly (default/fallback).\n  // \'worker\' = the receive Worker owns the read loop (design §11.4); the main\n  // dispatcher is suppressed and parsed non-audio datagrams arrive via\n  // ingestForwardedDatagram(), still routed through the same DatagramRouter\n  // (handler map + SUBSCRIBE_OK race buffer), unchanged.\n  datagramMode = "main";\n  /**\n   * Get current connection state\n   */\n  getState() {\n    return this.state;\n  }\n  /**\n   * Get the underlying WebTransport instance\n   */\n  getTransport() {\n    return this.transport;\n  }\n  /**\n   * Set event handlers\n   */\n  setHandlers(handlers) {\n    this.handlers = { ...this.handlers, ...handlers };\n  }\n  /**\n   * Connect to the MOQ server via WebTransport\n   */\n  async connect(options) {\n    if (this.state !== ConnectionState.DISCONNECTED) {\n      throw new Error(`Cannot connect: already in state ${this.state}`);\n    }\n    this.setState(ConnectionState.CONNECTING);\n    try {\n      const wtOptions = {\n        allowPooling: false,\n        requireUnreliable: true,\n        // We use datagrams for audio\n        congestionControl: "low-latency",\n        // Negotiate the MOQ draft-16 subprotocol over WebTransport so the server\n        // selects draft-16 (it falls back to draft-14 if no subprotocol is set).\n        protocols: ["moqt-16"],\n        ...options\n      };\n      this.transport = new WebTransport(this.serverUrl, wtOptions);\n      this.transport.closed.then((info) => {\n        this.handleClose(info);\n      }).catch((error) => {\n        this.handleError(error);\n      });\n      await this.transport.ready;\n      this.setState(ConnectionState.CONNECTED);\n    } catch (error) {\n      this.setState(ConnectionState.ERROR, error);\n      throw error;\n    }\n  }\n  /**\n   * Close the connection gracefully\n   */\n  close(closeInfo) {\n    this.datagramDispatcherRunning = false;\n    this.datagramMode = "main";\n    this.router.clear();\n    if (this.datagramWriter) {\n      this.datagramWriter.releaseLock();\n      this.datagramWriter = null;\n    }\n    if (this.transport) {\n      this.transport.close(closeInfo);\n      this.transport = null;\n    }\n    this.setState(ConnectionState.DISCONNECTED);\n  }\n  /**\n   * Create a bidirectional stream for the MOQ control channel\n   */\n  async createControlStream() {\n    if (!this.transport) {\n      throw new Error("Not connected");\n    }\n    return this.transport.createBidirectionalStream();\n  }\n  /**\n   * Create a unidirectional stream for sending data\n   */\n  async createSendStream() {\n    if (!this.transport) {\n      throw new Error("Not connected");\n    }\n    return this.transport.createUnidirectionalStream();\n  }\n  /**\n   * Get the incoming unidirectional streams reader\n   */\n  getIncomingStreams() {\n    if (!this.transport) {\n      throw new Error("Not connected");\n    }\n    return this.transport.incomingUnidirectionalStreams;\n  }\n  /**\n   * Get the datagram writer/reader for audio frames\n   */\n  getDatagrams() {\n    if (!this.transport) {\n      throw new Error("Not connected");\n    }\n    return this.transport.datagrams;\n  }\n  /**\n   * Get a reader for incoming datagrams\n   */\n  getDatagramReader() {\n    if (!this.transport) {\n      return null;\n    }\n    return this.transport.datagrams.readable.getReader();\n  }\n  /**\n   * Send a datagram (used for audio frames)\n   */\n  async sendDatagram(data) {\n    if (!this.transport) {\n      throw new Error("Not connected");\n    }\n    if (!this.datagramWriter) {\n      this.datagramWriter = this.transport.datagrams.writable.getWriter();\n    }\n    try {\n      await this.datagramWriter.write(data);\n    } catch (error) {\n      try {\n        this.datagramWriter.releaseLock();\n      } catch {\n      }\n      this.datagramWriter = null;\n      throw error;\n    }\n  }\n  /**\n   * Switch to worker datagram mode (design §11.4): the receive Worker reads the\n   * datagram readable, so the main dispatcher must NOT. Returns the unlocked\n   * `datagrams.readable` for transfer into the worker. Must be called before any\n   * `registerDatagramHandler` (which would otherwise start the main dispatcher\n   * and lock the stream). Returns null if not connected.\n   */\n  takeDatagramReadableForWorker() {\n    if (!this.transport) return null;\n    if (this.datagramDispatcherRunning) {\n      throw new Error("Cannot switch to worker datagram mode: main dispatcher already reading");\n    }\n    this.datagramMode = "worker";\n    return this.transport.datagrams.readable;\n  }\n  /**\n   * Revert to main datagram mode if worker setup failed before locking the\n   * stream (so a later registerDatagramHandler starts the main dispatcher).\n   */\n  revertToMainDatagramMode() {\n    this.datagramMode = "main";\n  }\n  /**\n   * Feed a parsed datagram forwarded from the receive Worker through the normal\n   * dispatch path (handlers map + SUBSCRIBE_OK pending buffer). The worker only\n   * forwards non-audio tracks; audio is decoded in the worker and never arrives\n   * here.\n   */\n  ingestForwardedDatagram(trackAlias, payload, groupId, objectId) {\n    this.router.ingest({ trackAlias, payload, groupId, objectId });\n  }\n  /**\n   * Register a datagram handler for a specific track alias. Starts the dispatcher\n   * on first registration (transport concern); the router drains any datagrams\n   * that arrived for this alias before registration (the SUBSCRIBE_OK race).\n   */\n  registerDatagramHandler(trackAlias, handler) {\n    if (!this.datagramDispatcherRunning) {\n      this.startDatagramDispatcher();\n    }\n    this.router.register(trackAlias, handler);\n  }\n  /** Unregister a datagram handler; the router discards any still-buffered datagrams for it. */\n  unregisterDatagramHandler(trackAlias) {\n    this.router.unregister(trackAlias);\n  }\n  /**\n   * Number of buffered pre-handler datagrams currently held. Exposed for tests and\n   * diagnostics; production callers shouldn\'t need it.\n   */\n  getPendingDatagramCount() {\n    return this.router.pendingCount();\n  }\n  /**\n   * Start the single datagram reader loop that dispatches to handlers by track alias\n   */\n  startDatagramDispatcher() {\n    if (this.datagramMode === "worker") {\n      return;\n    }\n    if (this.datagramDispatcherRunning || !this.transport) {\n      return;\n    }\n    this.datagramDispatcherRunning = true;\n    const reader = this.transport.datagrams.readable.getReader();\n    const loop = async () => {\n      try {\n        while (this.datagramDispatcherRunning) {\n          const { value, done } = await reader.read();\n          if (done) break;\n          if (!value) continue;\n          try {\n            const parsed = parseObjectDatagram(value);\n            this.router.ingest(parsed);\n          } catch {\n          }\n        }\n      } catch (error) {\n        if (this.datagramDispatcherRunning) {\n          console.error("Datagram dispatcher error:", error);\n        }\n      } finally {\n        this.datagramDispatcherRunning = false;\n      }\n    };\n    loop();\n  }\n  /**\n   * Update connection state and notify handlers\n   */\n  setState(state, error) {\n    this.state = state;\n    if (this.handlers.onStateChange) {\n      this.handlers.onStateChange(state, error);\n    }\n  }\n  /**\n   * Handle connection close\n   */\n  handleClose(info) {\n    if (this.datagramWriter) {\n      try {\n        this.datagramWriter.releaseLock();\n      } catch {\n      }\n      this.datagramWriter = null;\n    }\n    this.transport = null;\n    this.setState(ConnectionState.DISCONNECTED);\n    if (this.handlers.onClose) {\n      this.handlers.onClose(info);\n    }\n  }\n  /**\n   * Handle connection error\n   */\n  handleError(error) {\n    console.error("WebTransport connection error:", error);\n    if (this.datagramWriter) {\n      try {\n        this.datagramWriter.releaseLock();\n      } catch {\n      }\n      this.datagramWriter = null;\n    }\n    this.transport = null;\n    this.setState(ConnectionState.ERROR, error);\n  }\n}\nclass MoqClientError extends Error {\n  constructor(message, code, details) {\n    super(message);\n    this.code = code;\n    this.details = details;\n    this.name = "MoqClientError";\n  }\n}\nclass AuthenticationError extends MoqClientError {\n  constructor(message, moqErrorCode, details) {\n    super(message, "AUTHENTICATION_FAILED", details);\n    this.moqErrorCode = moqErrorCode;\n    this.name = "AuthenticationError";\n  }\n  /**\n   * Check if this is an invalid token error\n   */\n  isInvalidToken() {\n    return this.moqErrorCode === 2 || this.moqErrorCode === 1027;\n  }\n  /**\n   * Check if this is an expired token error\n   */\n  isExpiredToken() {\n    return this.message.toLowerCase().includes("expired");\n  }\n}\nclass ProtocolError extends MoqClientError {\n  constructor(message, moqErrorCode, details) {\n    super(message, "PROTOCOL_ERROR", details);\n    this.moqErrorCode = moqErrorCode;\n    this.name = "ProtocolError";\n  }\n}\nclass SubscriptionError extends MoqClientError {\n  constructor(message, moqErrorCode, trackNamespace, details) {\n    super(message, "SUBSCRIPTION_FAILED", details);\n    this.moqErrorCode = moqErrorCode;\n    this.trackNamespace = trackNamespace;\n    this.name = "SubscriptionError";\n  }\n}\nclass AnnouncementError extends MoqClientError {\n  constructor(message, moqErrorCode, namespace, details) {\n    super(message, "ANNOUNCEMENT_FAILED", details);\n    this.moqErrorCode = moqErrorCode;\n    this.namespace = namespace;\n    this.name = "AnnouncementError";\n  }\n}\nfunction getMoqErrorMessage(code) {\n  switch (code) {\n    case 0:\n      return "No error";\n    case 1:\n      return "Internal error";\n    case 2:\n      return "Unauthorized";\n    case 3:\n      return "Protocol violation";\n    case 4:\n      return "Duplicate track alias";\n    case 5:\n      return "Parameter length mismatch";\n    case 6:\n      return "Too many subscribes";\n    case 16:\n      return "GOAWAY timeout";\n    case 1027:\n      return "Invalid token (custom)";\n    default:\n      return `Unknown error (0x${code.toString(16)})`;\n  }\n}\nclass MoqSession {\n  constructor(connection2, debug = false) {\n    this.connection = connection2;\n    this.debug = debug;\n  }\n  controlStream = null;\n  writer = null;\n  reader = null;\n  readBuffer = new Uint8Array(0);\n  nextSubscribeId = 1;\n  nextTrackAlias = 1;\n  nextAnnounceRequestId = 2;\n  // Client uses even IDs for announces (to avoid collisions with server)\n  // Track state\n  subscriptions = /* @__PURE__ */ new Map();\n  announcements = /* @__PURE__ */ new Map();\n  incomingSubscriptions = /* @__PURE__ */ new Map();\n  // Callbacks for when server subscribes to our tracks\n  onIncomingSubscribeCallback = null;\n  debug;\n  // eslint-disable-next-line @typescript-eslint/no-explicit-any\n  log(...args) {\n    if (this.debug) {\n      console.log("[MOQ]", ...args);\n    }\n  }\n  /**\n   * Set callback for when server subscribes to one of our announced tracks\n   */\n  onIncomingSubscribe(callback) {\n    this.onIncomingSubscribeCallback = callback;\n  }\n  /**\n   * Initialize the MOQ session over the control stream\n   * @param role - The MOQ role (publisher, subscriber, or pubsub)\n   * @param path - Optional path parameter\n   * @param maxSubscribeId - Max number of requests server can send to client (default: 100)\n   */\n  async initialize(role, path, maxSubscribeId = 100) {\n    this.log("Creating control stream...");\n    this.controlStream = await this.connection.createControlStream();\n    this.writer = this.controlStream.writable.getWriter();\n    this.reader = this.controlStream.readable.getReader();\n    this.log("Control stream created, sending CLIENT_SETUP...");\n    const setupMsg = buildClientSetup([MOQ_TRANSPORT_VERSION], role, path, maxSubscribeId);\n    this.log("CLIENT_SETUP message size:", setupMsg.length, "bytes");\n    this.log("CLIENT_SETUP hex:", Array.from(setupMsg).map((b) => b.toString(16).padStart(2, "0")).join(" "));\n    await this.writer.write(setupMsg);\n    this.log("CLIENT_SETUP sent, waiting for SERVER_SETUP...");\n    const { type, content } = await this.readFramedMessage();\n    this.log("Received response type: 0x" + type.toString(16) + ", content size:", content.length, "bytes");\n    if (type !== MoqMessageType.SERVER_SETUP) {\n      throw new ProtocolError(\n        `Expected SERVER_SETUP (0x41), got message type 0x${type.toString(16)}`,\n        type\n      );\n    }\n    const serverSetup = parseServerSetup(content, 0);\n    this.log("Session established, server version:", serverSetup.selectedVersion.toString(16));\n  }\n  /**\n   * Subscribe to a track with JWT authorization\n   */\n  async subscribe(namespace, trackName, authorization, resumeOpId) {\n    const subscribeId = this.nextSubscribeId++;\n    const subscribeMsg = buildSubscribe({\n      subscribeId,\n      namespace,\n      trackName,\n      filterType: MoqFilterType.LATEST_GROUP,\n      authorization,\n      resumeOpId\n    });\n    this.log("SUBSCRIBE message size:", subscribeMsg.length, "bytes");\n    await this.writer.write(subscribeMsg);\n    const { type, content } = await this.waitForMessage([\n      MoqMessageType.SUBSCRIBE_OK,\n      MoqMessageType.SUBSCRIBE_ERROR\n    ]);\n    if (type === MoqMessageType.SUBSCRIBE_OK) {\n      const ok = parseSubscribeOk(content, 0);\n      this.log("Subscribed successfully, subscribeId:", ok.subscribeId, "trackAlias:", ok.trackAlias);\n      this.subscriptions.set(subscribeId, { namespace, trackName, alias: ok.trackAlias });\n      return subscribeId;\n    } else if (type === MoqMessageType.SUBSCRIBE_ERROR) {\n      const error = parseSubscribeError(content, 0);\n      const errorMessage = `${error.reasonPhrase} (${getMoqErrorMessage(error.errorCode)})`;\n      if (error.errorCode === 2 || error.errorCode === 1027) {\n        throw new AuthenticationError(errorMessage, error.errorCode, { namespace, trackName });\n      }\n      throw new SubscriptionError(errorMessage, error.errorCode, namespace);\n    } else {\n      throw new ProtocolError(\n        `Expected SUBSCRIBE_OK or SUBSCRIBE_ERROR, got message type 0x${type.toString(16)}`,\n        type\n      );\n    }\n  }\n  /**\n   * Wait for a specific message type, handling other messages that arrive first\n   */\n  async waitForMessage(expectedTypes) {\n    const maxAttempts = 20;\n    for (let i = 0; i < maxAttempts; i++) {\n      const { type, content } = await this.readFramedMessage();\n      if (expectedTypes.includes(type)) {\n        return { type, content };\n      }\n      this.log(`Received unexpected message type 0x${type.toString(16)} while waiting, handling it`);\n      await this.handleUnexpectedMessage(type, content);\n    }\n    throw new ProtocolError(\n      `Timeout waiting for message types: ${expectedTypes.map((t) => "0x" + t.toString(16)).join(", ")}`,\n      0\n    );\n  }\n  /**\n   * Handle messages that arrive when we\'re waiting for something else\n   */\n  async handleUnexpectedMessage(type, content) {\n    switch (type) {\n      case MoqMessageType.ANNOUNCE:\n        this.log("Received ANNOUNCE from server, sending ANNOUNCE_OK");\n        await this.sendAnnounceOk(content);\n        break;\n      case 17:\n        this.log("Received SUBSCRIBE_ANNOUNCES from server, sending OK");\n        await this.sendSubscribeAnnouncesOk(content);\n        break;\n      case MoqMessageType.SUBSCRIBE:\n        this.log("Received SUBSCRIBE from server, sending SUBSCRIBE_OK");\n        await this.handleIncomingSubscribe(content);\n        break;\n      default:\n        this.log(`Skipping unhandled message type 0x${type.toString(16)}`);\n    }\n  }\n  /**\n   * Handle incoming SUBSCRIBE from server and respond with SUBSCRIBE_OK\n   *\n   * Per moqtransport v0.5.1 / draft-ietf-moq-transport-11, the SUBSCRIBE\n   * wire format does NOT include TrackAlias. The publisher (us) assigns a\n   * TrackAlias and returns it in SUBSCRIBE_OK.\n   *\n   * SUBSCRIBE wire format: RequestID, Namespace, TrackName, Priority,\n   *   GroupOrder, Forward, FilterType, Parameters\n   *\n   * SUBSCRIBE_OK wire format: RequestID, TrackAlias, Expires, GroupOrder,\n   *   ContentExists, [LargestLocation], Parameters\n   */\n  async handleIncomingSubscribe(content) {\n    let pos = 0;\n    const requestIdByte = content[pos];\n    let requestId;\n    if (requestIdByte < 64) {\n      requestId = requestIdByte;\n      pos += 1;\n    } else if ((requestIdByte & 192) === 64) {\n      requestId = (requestIdByte & 63) << 8 | content[pos + 1];\n      pos += 2;\n    } else {\n      requestId = requestIdByte & 63;\n      pos += 1;\n    }\n    const namespace = this.parseNamespaceFromContent(content, pos);\n    const trackAlias = this.nextTrackAlias++;\n    this.log(`Server subscribing to: ${namespace.join("/")}, assigning trackAlias=${trackAlias}`);\n    const builder = new MessageBuilder();\n    builder.writeVarint(requestId);\n    builder.writeVarint(trackAlias);\n    builder.writeVarint(0);\n    builder.writeRaw(new Uint8Array([1]));\n    builder.writeRaw(new Uint8Array([0]));\n    builder.writeVarint(0);\n    const msg = wrapWithLengthFrame(MoqMessageType.SUBSCRIBE_OK, builder.build());\n    await this.writer.write(msg);\n    this.log("Sent SUBSCRIBE_OK for requestId:", requestId, "trackAlias:", trackAlias);\n    this.incomingSubscriptions.set(requestId, { trackAlias, namespace });\n    if (this.onIncomingSubscribeCallback) {\n      this.onIncomingSubscribeCallback(namespace, trackAlias);\n    }\n  }\n  /**\n   * Get track alias for an incoming subscription by namespace\n   */\n  getIncomingTrackAlias(namespacePrefix) {\n    for (const [, sub] of this.incomingSubscriptions) {\n      if (sub.namespace.join("/").startsWith(namespacePrefix)) {\n        return sub.trackAlias;\n      }\n    }\n    return void 0;\n  }\n  /**\n   * Parse namespace from content starting at given position\n   */\n  parseNamespaceFromContent(content, startPos) {\n    let pos = startPos;\n    const namespace = [];\n    if (pos >= content.length) return namespace;\n    const firstByte = content[pos];\n    let nsLength;\n    if (firstByte < 64) {\n      nsLength = firstByte;\n      pos += 1;\n    } else if ((firstByte & 192) === 64) {\n      nsLength = (firstByte & 63) << 8 | content[pos + 1];\n      pos += 2;\n    } else {\n      nsLength = firstByte & 63;\n      pos += 1;\n    }\n    for (let i = 0; i < nsLength && pos < content.length; i++) {\n      const partLenByte = content[pos];\n      let partLen;\n      if (partLenByte < 64) {\n        partLen = partLenByte;\n        pos += 1;\n      } else if ((partLenByte & 192) === 64) {\n        partLen = (partLenByte & 63) << 8 | content[pos + 1];\n        pos += 2;\n      } else {\n        partLen = partLenByte & 63;\n        pos += 1;\n      }\n      if (pos + partLen <= content.length) {\n        const part = new TextDecoder().decode(content.slice(pos, pos + partLen));\n        namespace.push(part);\n        pos += partLen;\n      }\n    }\n    return namespace;\n  }\n  /**\n   * Send ANNOUNCE_OK response\n   */\n  async sendAnnounceOk(announceContent) {\n    const requestId = this.parseRequestId(announceContent);\n    this.log("Sending ANNOUNCE_OK for requestId:", requestId);\n    const builder = new MessageBuilder();\n    builder.writeVarint(requestId);\n    const msg = wrapWithLengthFrame(MoqMessageType.ANNOUNCE_OK, builder.build());\n    this.log("ANNOUNCE_OK message size:", msg.length, "bytes");\n    await this.writer.write(msg);\n  }\n  /**\n   * Send SUBSCRIBE_ANNOUNCES_OK response\n   */\n  async sendSubscribeAnnouncesOk(subscribeAnnouncesContent) {\n    const requestId = this.parseRequestId(subscribeAnnouncesContent);\n    this.log("Sending SUBSCRIBE_ANNOUNCES_OK for requestId:", requestId);\n    const builder = new MessageBuilder();\n    builder.writeVarint(requestId);\n    const msg = wrapWithLengthFrame(18, builder.build());\n    await this.writer.write(msg);\n  }\n  /**\n   * Parse RequestID (first varint) from message content\n   */\n  parseRequestId(content) {\n    const firstByte = content[0];\n    if (firstByte < 64) {\n      return firstByte;\n    } else if ((firstByte & 192) === 64) {\n      return (firstByte & 63) << 8 | content[1];\n    } else if ((firstByte & 192) === 128) {\n      return (firstByte & 63) << 24 | content[1] << 16 | content[2] << 8 | content[3];\n    } else {\n      return content[4] << 24 | content[5] << 16 | content[6] << 8 | content[7];\n    }\n  }\n  /**\n   * Announce a track namespace\n   */\n  async announce(namespace, authorization) {\n    const requestId = this.nextAnnounceRequestId;\n    this.nextAnnounceRequestId += 2;\n    const parameters = /* @__PURE__ */ new Map();\n    if (authorization) {\n      const encoder = new TextEncoder();\n      parameters.set(3, encoder.encode(authorization));\n    }\n    const announceMsg = buildAnnounce({ requestId, namespace, parameters: parameters.size > 0 ? parameters : void 0 });\n    this.log("ANNOUNCE message size:", announceMsg.length, "bytes, requestId:", requestId);\n    await this.writer.write(announceMsg);\n    const { type, content } = await this.waitForMessage([\n      MoqMessageType.ANNOUNCE_OK,\n      MoqMessageType.ANNOUNCE_ERROR\n    ]);\n    if (type === MoqMessageType.ANNOUNCE_OK) {\n      const ok = parseAnnounceOk(content, 0);\n      const nsKey = namespace.join("/");\n      this.announcements.set(nsKey, { namespace });\n      this.log("Announced successfully:", nsKey, "requestId:", ok.requestId);\n    } else if (type === MoqMessageType.ANNOUNCE_ERROR) {\n      const error = parseAnnounceError(content, 0);\n      const errorMessage = `${error.reasonPhrase} (${getMoqErrorMessage(error.errorCode)})`;\n      throw new AnnouncementError(errorMessage, error.errorCode, namespace);\n    } else {\n      throw new ProtocolError(\n        `Expected ANNOUNCE_OK or ANNOUNCE_ERROR, got message type 0x${type.toString(16)}`,\n        type\n      );\n    }\n  }\n  /**\n   * Get track alias for a subscription\n   */\n  getTrackAlias(subscribeId) {\n    return this.subscriptions.get(subscribeId)?.alias;\n  }\n  /**\n   * Start background message processing loop\n   * This handles messages that arrive after initial connection setup\n   */\n  startMessageLoop() {\n    this.processMessages().catch((error) => {\n      this.log("Message loop ended:", error.message);\n    });\n  }\n  /**\n   * Background message processing\n   */\n  async processMessages() {\n    this.log("Starting background message processing loop");\n    while (this.reader) {\n      try {\n        const { type, content } = await this.readFramedMessage();\n        this.log(`Background received message type 0x${type.toString(16)}`);\n        await this.handleUnexpectedMessage(type, content);\n      } catch (error) {\n        this.log("Message processing stopped:", error.message);\n        break;\n      }\n    }\n  }\n  /**\n   * Close the session\n   */\n  async close() {\n    if (this.writer) {\n      try {\n        await this.writer.close();\n      } catch {\n      }\n      this.writer = null;\n    }\n    if (this.reader) {\n      try {\n        await this.reader.cancel();\n      } catch {\n      }\n      this.reader = null;\n    }\n    this.controlStream = null;\n  }\n  /**\n   * Read a complete message from the control stream with proper length framing\n   * Format: [Type varint] [Length: 2 bytes big-endian] [Content: length bytes]\n   * Returns: { type, content } where content is the message body without type/length\n   */\n  async readFramedMessage() {\n    while (this.readBuffer.length < 3) {\n      const { value, done } = await this.reader.read();\n      if (done) {\n        throw new Error("Control stream closed unexpectedly");\n      }\n      const newBuffer = new Uint8Array(this.readBuffer.length + value.length);\n      newBuffer.set(this.readBuffer);\n      newBuffer.set(value, this.readBuffer.length);\n      this.readBuffer = newBuffer;\n    }\n    let typeLength = 1;\n    const firstByte = this.readBuffer[0];\n    const prefix = firstByte >> 6;\n    if (prefix === 1) typeLength = 2;\n    else if (prefix === 2) typeLength = 4;\n    else if (prefix === 3) typeLength = 8;\n    const headerSize = typeLength + 2;\n    while (this.readBuffer.length < headerSize) {\n      const { value, done } = await this.reader.read();\n      if (done) {\n        throw new Error("Control stream closed unexpectedly");\n      }\n      const newBuffer = new Uint8Array(this.readBuffer.length + value.length);\n      newBuffer.set(this.readBuffer);\n      newBuffer.set(value, this.readBuffer.length);\n      this.readBuffer = newBuffer;\n    }\n    let type;\n    if (typeLength === 1) {\n      type = firstByte;\n    } else if (typeLength === 2) {\n      type = (firstByte & 63) << 8 | this.readBuffer[1];\n    } else {\n      throw new Error(`Unsupported varint length: ${typeLength}`);\n    }\n    const lengthOffset = typeLength;\n    const contentLength = this.readBuffer[lengthOffset] << 8 | this.readBuffer[lengthOffset + 1];\n    this.log("readFramedMessage: type=0x" + type.toString(16) + ", contentLength=" + contentLength);\n    const totalSize = headerSize + contentLength;\n    while (this.readBuffer.length < totalSize) {\n      const { value, done } = await this.reader.read();\n      if (done) {\n        throw new Error("Control stream closed unexpectedly");\n      }\n      const newBuffer = new Uint8Array(this.readBuffer.length + value.length);\n      newBuffer.set(this.readBuffer);\n      newBuffer.set(value, this.readBuffer.length);\n      this.readBuffer = newBuffer;\n    }\n    const content = this.readBuffer.slice(headerSize, totalSize);\n    this.readBuffer = this.readBuffer.slice(totalSize);\n    this.log("readFramedMessage: returning type=0x" + type.toString(16) + ", content.length=" + content.length);\n    return { type, content };\n  }\n}\nclass JitterBufferCore {\n  // ---- immutable geometry (frames) ----\n  capacity;\n  floor;\n  w;\n  nc;\n  sampleRate;\n  lMin;\n  lMax;\n  hMin;\n  hMax;\n  // ---- immutable controller constants ----\n  windowReads;\n  widenThreshold;\n  widenStep;\n  narrowStep;\n  // ---- storage: capacity * nc interleaved floats ----\n  data;\n  // ---- SPSC heads — cumulative (never wrap). Index via (pos % capacity) * nc. ----\n  // writePos crosses the writer→reader thread boundary in SAB mode, so it is\n  // backed by an atomic cell when `sharedWritePos` is given; otherwise a plain\n  // number. The Atomics.store/load act as the release/acquire fence pairing the\n  // ring writes (writer) with the ring reads (reader) — the Go SPSC contract.\n  // readPos is reader-owned (the writer never touches it), so it stays plain.\n  _writePos = 0;\n  wpCell = null;\n  get writePos() {\n    return this.wpCell ? Number(Atomics.load(this.wpCell, 0)) : this._writePos;\n  }\n  set writePos(v) {\n    if (this.wpCell) Atomics.store(this.wpCell, 0, BigInt(v));\n    else this._writePos = v;\n  }\n  readPos = 0;\n  // ---- live adaptive window ----\n  currentL;\n  currentH;\n  // ---- tumbling-window controller state (reader-owned) ----\n  insertCount = 0;\n  dropCount = 0;\n  readsThisWindow = 0;\n  // ---- last completed window\'s counts, for observation ----\n  lastWinInserts = 0;\n  lastWinDrops = 0;\n  // ---- cumulative stats ----\n  underruns = 0;\n  overruns = 0;\n  laps = 0;\n  samplesDropped = 0;\n  samplesInserted = 0;\n  constructor(cfg = {}) {\n    const sr = cfg.sampleRate ?? 48e3;\n    const nc = cfg.numChannels ?? 1;\n    const f = (ms) => Math.floor(sr * ms / 1e3);\n    const W = cfg.writerFrame ?? f(20);\n    const R = cfg.readerFrame ?? f(5);\n    const S = cfg.safety ?? f(1);\n    const lInit = cfg.lowInit ?? f(5);\n    const lMin = cfg.lowMin ?? f(2);\n    const lMax = cfg.lowMax ?? f(30);\n    const hInit = cfg.highInit ?? W;\n    const hMin = cfg.highMin ?? W;\n    const hMax = cfg.highMax ?? 3 * W;\n    if (R <= 0 || W <= 0) {\n      throw new Error("JitterBufferCore: readerFrame and writerFrame must be > 0");\n    }\n    if (S < 0) {\n      throw new Error("JitterBufferCore: safety must be >= 0");\n    }\n    if (!(0 <= lMin && lMin <= lInit && lInit <= lMax)) {\n      throw new Error("JitterBufferCore: require 0 <= lowMin <= lowInit <= lowMax");\n    }\n    if (!(0 <= hMin && hMin <= hInit && hInit <= hMax)) {\n      throw new Error("JitterBufferCore: require 0 <= highMin <= highInit <= highMax");\n    }\n    const floor = R + S;\n    const maxWR = Math.max(W, R);\n    const bandTopMax = R + S + lMax + 2 * W + hMax;\n    const capacity = 2 * bandTopMax + 2 * maxWR;\n    this.capacity = capacity;\n    this.floor = floor;\n    this.w = W;\n    this.nc = nc;\n    this.sampleRate = sr;\n    this.lMin = lMin;\n    this.lMax = lMax;\n    this.hMin = hMin;\n    this.hMax = hMax;\n    this.windowReads = cfg.windowReads ?? 750;\n    this.widenThreshold = cfg.widenThreshold ?? 5;\n    this.widenStep = cfg.widenStep ?? f(2);\n    this.narrowStep = cfg.narrowStep ?? Math.floor(sr * 500 / 1e6);\n    if (cfg.sharedStorage) {\n      if (cfg.sharedStorage.length !== capacity * nc) {\n        throw new Error(\n          `JitterBufferCore: sharedStorage length ${cfg.sharedStorage.length} != capacity*nc ${capacity * nc} (size it with computeJitterCapacity using the same config)`\n        );\n      }\n      this.data = cfg.sharedStorage;\n    } else {\n      this.data = new Float32Array(capacity * nc);\n    }\n    if (cfg.sharedWritePos) {\n      if (cfg.sharedWritePos.length < 1) {\n        throw new Error("JitterBufferCore: sharedWritePos must be a length-1 BigInt64Array");\n      }\n      this.wpCell = cfg.sharedWritePos;\n    }\n    this.currentL = lInit;\n    this.currentH = hInit;\n  }\n  /**\n   * Derive the operating thresholds from the (loaded-once) window allowances\n   * `l`, `h` plus the immutable floor and writer frame. Pure function; all\n   * branches of {@link read} use one consistent snapshot.\n   */\n  levels(l, h) {\n    const t = this.floor + l;\n    return { t, snapTarget: t + this.w, dropLine: t + this.w + h, overrunAt: t + 2 * this.w + h };\n  }\n  /**\n   * Copy `src` (interleaved, length a multiple of `nc`) into the ring. Never\n   * blocks. Writes longer than capacity are clipped to the most-recent\n   * `capacity` frames.\n   */\n  write(src) {\n    let nFrames = Math.floor(src.length / this.nc);\n    if (nFrames === 0) return;\n    if (nFrames > this.capacity) {\n      const skip = nFrames - this.capacity;\n      src = src.subarray(skip * this.nc);\n      nFrames = this.capacity;\n    }\n    const wp = this.writePos;\n    this.writeToRing(src, wp, nFrames);\n    this.writePos = wp + nFrames;\n  }\n  /**\n   * Copy up to `dst.length` interleaved samples from the ring into `dst`.\n   * Returns true when audio was produced, false on silence. See design §4. The\n   * window allowances L and H are read exactly once at the top so every branch\n   * sees consistent geometry. No debounce: corrections fire on the first\n   * out-of-band read.\n   */\n  read(dst) {\n    const nc = this.nc;\n    const nFrames = Math.floor(dst.length / nc);\n    if (nFrames === 0) return true;\n    let wp = this.writePos;\n    let rp = this.readPos;\n    let fill = wp - rp;\n    const { snapTarget, dropLine, overrunAt } = this.levels(this.currentL, this.currentH);\n    if (rp === 0) {\n      if (fill < snapTarget) {\n        dst.fill(0);\n        this.adapt();\n        return false;\n      }\n      rp = wp - snapTarget;\n      this.readPos = rp;\n      fill = snapTarget;\n    }\n    if (fill >= this.capacity) {\n      rp = wp - snapTarget;\n      this.readPos = rp;\n      fill = snapTarget;\n      this.laps++;\n    } else if (fill > overrunAt) {\n      rp = wp - snapTarget;\n      this.readPos = rp;\n      fill = snapTarget;\n      this.overruns++;\n    }\n    if (fill < nFrames) {\n      dst.fill(0);\n      this.underruns++;\n      this.adapt();\n      return false;\n    }\n    let corr = 0;\n    if (fill > dropLine && fill >= nFrames + 1) {\n      corr = 1;\n    } else if (fill < this.floor && nFrames >= 2) {\n      corr = -1;\n    }\n    if (corr === 1) {\n      this.readFromRing(dst, rp, nFrames);\n      const skipBase = (rp + nFrames) % this.capacity * nc;\n      const dstBase = (nFrames - 1) * nc;\n      for (let ch = 0; ch < nc; ch++) {\n        const a = dst[dstBase + ch];\n        const b = this.data[skipBase + ch];\n        dst[dstBase + ch] = (a + b) * 0.5;\n      }\n      this.readPos = rp + nFrames + 1;\n      this.samplesDropped++;\n      this.dropCount++;\n    } else if (corr === -1) {\n      const realFrames = nFrames - 1;\n      this.readFromRing(dst.subarray(0, realFrames * nc), rp, realFrames);\n      const peekBase = (rp + realFrames) % this.capacity * nc;\n      const lastBase = (realFrames - 1) * nc;\n      const tailBase = realFrames * nc;\n      for (let ch = 0; ch < nc; ch++) {\n        const a = dst[lastBase + ch];\n        const b = this.data[peekBase + ch];\n        dst[tailBase + ch] = (a + b) * 0.5;\n      }\n      this.readPos = rp + realFrames;\n      this.samplesInserted++;\n      this.insertCount++;\n    } else {\n      this.readFromRing(dst, rp, nFrames);\n      this.readPos = rp + nFrames;\n    }\n    this.adapt();\n    return true;\n  }\n  /**\n   * Tick the tumbling window once per Read and, every `windowReads`, run the\n   * decision off the accumulated correction counts, then reset them. No\n   * wall-clock: the window is a read count, the inputs are correction counts.\n   */\n  adapt() {\n    if (this.windowReads <= 0) return;\n    this.readsThisWindow++;\n    if (this.readsThisWindow < this.windowReads) return;\n    this.lastWinInserts = this.insertCount;\n    this.lastWinDrops = this.dropCount;\n    this.decide(this.insertCount, this.dropCount);\n    this.insertCount = 0;\n    this.dropCount = 0;\n    this.readsThisWindow = 0;\n  }\n  /**\n   * Move the window allowances from one window\'s correction counts (design §6):\n   *   - both sides breached (min ≥ threshold) ⇒ jitter ⇒ widen the breaching\n   *     side(s) by widenStep, capped at max (eager);\n   *   - otherwise a fully-calm side (count 0) narrows by narrowStep, floored at\n   *     min; a side that is lit but un-gated is drift — left to the ±1 corrector.\n   * `narrowStep < widenStep` makes it eager-up / reluctant-down — the stability\n   * guarantee.\n   */\n  decide(insertCount, dropCount) {\n    if (Math.min(insertCount, dropCount) >= this.widenThreshold) {\n      if (insertCount >= this.widenThreshold && this.currentL < this.lMax) {\n        this.currentL = Math.min(this.currentL + this.widenStep, this.lMax);\n      }\n      if (dropCount >= this.widenThreshold && this.currentH < this.hMax) {\n        this.currentH = Math.min(this.currentH + this.widenStep, this.hMax);\n      }\n      return;\n    }\n    if (insertCount === 0 && this.currentL > this.lMin) {\n      this.currentL = Math.max(this.currentL - this.narrowStep, this.lMin);\n    }\n    if (dropCount === 0 && this.currentH > this.hMin) {\n      this.currentH = Math.max(this.currentH - this.narrowStep, this.hMin);\n    }\n  }\n  /** Current fill in frames. */\n  fillFrames() {\n    return this.writePos - this.readPos;\n  }\n  /** Fill in interleaved floats (matching the Go ICircularBuffer convention). */\n  getBehind() {\n    return this.fillFrames() * this.nc;\n  }\n  /** Rich snapshot for tuning/observability. */\n  snapshot() {\n    const fill = this.fillFrames();\n    const l = this.currentL;\n    const h = this.currentH;\n    const srMs = this.sampleRate / 1e3;\n    const { dropLine } = this.levels(l, h);\n    let zone = 0;\n    if (fill < this.floor) zone = -1;\n    else if (fill > dropLine) zone = 1;\n    return {\n      fillFrames: fill,\n      fillMs: fill / srMs,\n      floorFrames: this.floor,\n      lowAllowanceFrames: l,\n      lowAllowanceMs: l / srMs,\n      highAllowanceFrames: h,\n      highAllowanceMs: h / srMs,\n      targetFrames: this.floor + l,\n      started: this.readPos > 0,\n      underruns: this.underruns,\n      overruns: this.overruns,\n      laps: this.laps,\n      samplesDropped: this.samplesDropped,\n      samplesInserted: this.samplesInserted,\n      lastWindowInserts: this.lastWinInserts,\n      lastWindowDrops: this.lastWinDrops,\n      zone\n    };\n  }\n  /**\n   * Copy `nFrames` frames from `src` into the ring at frame position `wp`,\n   * handling wraparound. Caller guarantees `nFrames <= capacity`.\n   */\n  writeToRing(src, wp, nFrames) {\n    const cap = this.capacity;\n    const nc = this.nc;\n    const startFrame = wp % cap;\n    if (startFrame + nFrames <= cap) {\n      this.data.set(src.subarray(0, nFrames * nc), startFrame * nc);\n      return;\n    }\n    const first = cap - startFrame;\n    this.data.set(src.subarray(0, first * nc), startFrame * nc);\n    this.data.set(src.subarray(first * nc, nFrames * nc), 0);\n  }\n  /**\n   * Copy `nFrames` frames from the ring at frame position `rp` into `dst`,\n   * handling wraparound. Caller guarantees `nFrames <= capacity`.\n   */\n  readFromRing(dst, rp, nFrames) {\n    const cap = this.capacity;\n    const nc = this.nc;\n    const startFrame = rp % cap;\n    if (startFrame + nFrames <= cap) {\n      dst.set(this.data.subarray(startFrame * nc, (startFrame + nFrames) * nc));\n      return;\n    }\n    const first = cap - startFrame;\n    dst.set(this.data.subarray(startFrame * nc, cap * nc), 0);\n    dst.set(this.data.subarray(0, (nFrames - first) * nc), first * nc);\n  }\n}\nconst ctx = self;\nlet connection = null;\nlet session = null;\nlet jbuf = null;\nlet decoder = null;\nlet audioTrackAlias;\nlet reading = false;\nfunction emit(evt) {\n  ctx.postMessage(evt);\n}\nfunction configureDecoder(cfg) {\n  if (decoder) {\n    try {\n      decoder.close();\n    } catch {\n    }\n  }\n  decoder = new AudioDecoder({\n    output: (audioData) => {\n      try {\n        const frames = audioData.numberOfFrames;\n        const channels = audioData.numberOfChannels;\n        const pcm = new Float32Array(frames * channels);\n        audioData.copyTo(pcm, { planeIndex: 0, format: "f32" });\n        jbuf?.write(pcm);\n      } catch (e) {\n        emit({ kind: "evt", type: "notice", event: "decode-error", detail: String(e) });\n      } finally {\n        audioData.close();\n      }\n    },\n    error: (e) => emit({ kind: "evt", type: "notice", event: "decode-error", detail: String(e) })\n  });\n  decoder.configure({\n    codec: cfg.codec,\n    sampleRate: cfg.sampleRate,\n    numberOfChannels: cfg.numberOfChannels,\n    optimizeForLatency: true\n  });\n}\nfunction startReadLoop() {\n  if (reading || !connection) return;\n  const datagrams = connection.getDatagrams();\n  const reader = datagrams.readable.getReader();\n  reading = true;\n  (async () => {\n    try {\n      while (reading) {\n        const { value, done } = await reader.read();\n        if (done) {\n          emit({ kind: "evt", type: "notice", event: "reader-done" });\n          break;\n        }\n        if (!value) continue;\n        let parsed;\n        try {\n          parsed = parseObjectDatagram(value);\n        } catch {\n          continue;\n        }\n        if (audioTrackAlias !== void 0 && parsed.trackAlias === audioTrackAlias && jbuf && decoder) {\n          try {\n            decoder.decode(\n              new EncodedAudioChunk({\n                type: "key",\n                // Opus frames are always key frames\n                timestamp: Number(parsed.groupId) * 1e3,\n                data: parsed.payload\n              })\n            );\n          } catch (e) {\n            emit({ kind: "evt", type: "notice", event: "decode-error", detail: String(e) });\n          }\n        } else {\n          const copy = parsed.payload.slice();\n          ctx.postMessage(\n            {\n              kind: "evt",\n              type: "datagram",\n              trackAlias: parsed.trackAlias,\n              payload: copy,\n              groupId: parsed.groupId,\n              objectId: parsed.objectId\n            },\n            // transfer the copy\'s buffer\n            [copy.buffer]\n          );\n        }\n      }\n    } catch (e) {\n      if (reading) emit({ kind: "evt", type: "notice", event: "reader-error", detail: String(e) });\n    } finally {\n      reading = false;\n    }\n  })();\n}\nasync function handle(method, args) {\n  switch (method) {\n    case "connect": {\n      const a = args;\n      connection = new MoqConnection(a.serverUrl);\n      connection.setHandlers({\n        onStateChange: (state, error) => emit({ kind: "evt", type: "connectionState", state: String(state), detail: error?.message })\n      });\n      await connection.connect(a.options);\n      session = new MoqSession(connection);\n      session.onIncomingSubscribe(\n        (namespace, trackAlias) => emit({ kind: "evt", type: "incomingSubscribe", namespace, trackAlias })\n      );\n      return;\n    }\n    case "initSession": {\n      const a = args;\n      if (!session) throw new Error("initSession before connect");\n      await session.initialize(a.role, void 0, a.maxSubscribeId);\n      startReadLoop();\n      return;\n    }\n    case "subscribe": {\n      const a = args;\n      if (!session) throw new Error("subscribe before connect");\n      const subscribeId = await session.subscribe(a.namespace, a.trackName, a.authorization, a.resumeOpId);\n      return { subscribeId, trackAlias: session.getTrackAlias(subscribeId) };\n    }\n    case "announce": {\n      const a = args;\n      if (!session) throw new Error("announce before connect");\n      await session.announce(a.namespace, a.authorization);\n      return;\n    }\n    case "setAudioTrack": {\n      const a = args;\n      jbuf = new JitterBufferCore({\n        ...a.jbufConfig,\n        sharedStorage: a.sharedStorage,\n        sharedWritePos: a.sharedWritePos\n      });\n      configureDecoder(a.decoderConfig);\n      audioTrackAlias = a.trackAlias;\n      return;\n    }\n    case "sendDatagram": {\n      const a = args;\n      if (!connection) throw new Error("sendDatagram before connect");\n      await connection.sendDatagram(a.bytes);\n      return;\n    }\n    case "startMessageLoop": {\n      if (!session) throw new Error("startMessageLoop before connect");\n      session.startMessageLoop();\n      return;\n    }\n    case "disconnect": {\n      reading = false;\n      if (decoder) {\n        try {\n          decoder.close();\n        } catch {\n        }\n        decoder = null;\n      }\n      if (session) {\n        await session.close();\n        session = null;\n      }\n      if (connection) {\n        connection.close();\n        connection = null;\n      }\n      jbuf = null;\n      audioTrackAlias = void 0;\n      return;\n    }\n    default: {\n      throw new Error(`unknown method: ${String(method)}`);\n    }\n  }\n}\nctx.onmessage = (e) => {\n  const msg = e.data;\n  if (!msg || msg.kind !== "req") return;\n  handle(msg.method, msg.args).then(\n    (result) => ctx.postMessage({ kind: "res", id: msg.id, ok: true, result }),\n    (err) => ctx.postMessage({ kind: "res", id: msg.id, ok: false, error: String(err) })\n  );\n};\n//# sourceMappingURL=moq-worker-D2K8P0kZ.js.map\n';
+const jsContent = 'var ConnectionState = /* @__PURE__ */ ((ConnectionState2) => {\n  ConnectionState2["DISCONNECTED"] = "disconnected";\n  ConnectionState2["CONNECTING"] = "connecting";\n  ConnectionState2["CONNECTED"] = "connected";\n  ConnectionState2["AUTHENTICATED"] = "authenticated";\n  ConnectionState2["ERROR"] = "error";\n  return ConnectionState2;\n})(ConnectionState || {});\nvar MoqMessageType = /* @__PURE__ */ ((MoqMessageType2) => {\n  MoqMessageType2[MoqMessageType2["CLIENT_SETUP"] = 32] = "CLIENT_SETUP";\n  MoqMessageType2[MoqMessageType2["SERVER_SETUP"] = 33] = "SERVER_SETUP";\n  MoqMessageType2[MoqMessageType2["ANNOUNCE"] = 6] = "ANNOUNCE";\n  MoqMessageType2[MoqMessageType2["ANNOUNCE_OK"] = 7] = "ANNOUNCE_OK";\n  MoqMessageType2[MoqMessageType2["ANNOUNCE_ERROR"] = 8] = "ANNOUNCE_ERROR";\n  MoqMessageType2[MoqMessageType2["UNANNOUNCE"] = 9] = "UNANNOUNCE";\n  MoqMessageType2[MoqMessageType2["SUBSCRIBE"] = 3] = "SUBSCRIBE";\n  MoqMessageType2[MoqMessageType2["SUBSCRIBE_OK"] = 4] = "SUBSCRIBE_OK";\n  MoqMessageType2[MoqMessageType2["SUBSCRIBE_ERROR"] = 5] = "SUBSCRIBE_ERROR";\n  MoqMessageType2[MoqMessageType2["UNSUBSCRIBE"] = 10] = "UNSUBSCRIBE";\n  MoqMessageType2[MoqMessageType2["SUBSCRIBE_DONE"] = 11] = "SUBSCRIBE_DONE";\n  MoqMessageType2[MoqMessageType2["OBJECT_STREAM"] = 0] = "OBJECT_STREAM";\n  MoqMessageType2[MoqMessageType2["OBJECT_DATAGRAM"] = 1] = "OBJECT_DATAGRAM";\n  MoqMessageType2[MoqMessageType2["GOAWAY"] = 16] = "GOAWAY";\n  return MoqMessageType2;\n})(MoqMessageType || {});\nvar MoqSetupParameter = /* @__PURE__ */ ((MoqSetupParameter2) => {\n  MoqSetupParameter2[MoqSetupParameter2["ROLE"] = 0] = "ROLE";\n  MoqSetupParameter2[MoqSetupParameter2["PATH"] = 1] = "PATH";\n  MoqSetupParameter2[MoqSetupParameter2["MAX_SUBSCRIBE_ID"] = 2] = "MAX_SUBSCRIBE_ID";\n  return MoqSetupParameter2;\n})(MoqSetupParameter || {});\nvar MoqFilterType = /* @__PURE__ */ ((MoqFilterType2) => {\n  MoqFilterType2[MoqFilterType2["LATEST_GROUP"] = 1] = "LATEST_GROUP";\n  MoqFilterType2[MoqFilterType2["LATEST_OBJECT"] = 2] = "LATEST_OBJECT";\n  MoqFilterType2[MoqFilterType2["ABSOLUTE_START"] = 3] = "ABSOLUTE_START";\n  MoqFilterType2[MoqFilterType2["ABSOLUTE_RANGE"] = 4] = "ABSOLUTE_RANGE";\n  return MoqFilterType2;\n})(MoqFilterType || {});\nvar MoqGroupOrder = /* @__PURE__ */ ((MoqGroupOrder2) => {\n  MoqGroupOrder2[MoqGroupOrder2["NONE"] = 0] = "NONE";\n  MoqGroupOrder2[MoqGroupOrder2["ASCENDING"] = 1] = "ASCENDING";\n  MoqGroupOrder2[MoqGroupOrder2["DESCENDING"] = 2] = "DESCENDING";\n  return MoqGroupOrder2;\n})(MoqGroupOrder || {});\nfunction encodeVarint(value) {\n  const n = BigInt(value);\n  if (n < 64n) {\n    return new Uint8Array([Number(n)]);\n  } else if (n < 16384n) {\n    return new Uint8Array([Number(n >> 8n | 0x40n), Number(n & 0xffn)]);\n  } else if (n < 1073741824n) {\n    return new Uint8Array([\n      Number(n >> 24n | 0x80n),\n      Number(n >> 16n & 0xffn),\n      Number(n >> 8n & 0xffn),\n      Number(n & 0xffn)\n    ]);\n  } else {\n    return new Uint8Array([\n      Number(n >> 56n | 0xc0n),\n      Number(n >> 48n & 0xffn),\n      Number(n >> 40n & 0xffn),\n      Number(n >> 32n & 0xffn),\n      Number(n >> 24n & 0xffn),\n      Number(n >> 16n & 0xffn),\n      Number(n >> 8n & 0xffn),\n      Number(n & 0xffn)\n    ]);\n  }\n}\nfunction decodeVarint(data, offset = 0) {\n  if (offset >= data.length) {\n    throw new Error("Not enough data to decode varint");\n  }\n  const firstByte = data[offset];\n  const prefix = firstByte >> 6;\n  switch (prefix) {\n    case 0: {\n      return { value: BigInt(firstByte), bytesRead: 1 };\n    }\n    case 1: {\n      if (offset + 2 > data.length) {\n        throw new Error("Not enough data for 2-byte varint");\n      }\n      const value = BigInt((firstByte & 63) << 8) | BigInt(data[offset + 1]);\n      return { value, bytesRead: 2 };\n    }\n    case 2: {\n      if (offset + 4 > data.length) {\n        throw new Error("Not enough data for 4-byte varint");\n      }\n      const value = BigInt(firstByte & 63) << 24n | BigInt(data[offset + 1]) << 16n | BigInt(data[offset + 2]) << 8n | BigInt(data[offset + 3]);\n      return { value, bytesRead: 4 };\n    }\n    case 3: {\n      if (offset + 8 > data.length) {\n        throw new Error("Not enough data for 8-byte varint");\n      }\n      const value = BigInt(firstByte & 63) << 56n | BigInt(data[offset + 1]) << 48n | BigInt(data[offset + 2]) << 40n | BigInt(data[offset + 3]) << 32n | BigInt(data[offset + 4]) << 24n | BigInt(data[offset + 5]) << 16n | BigInt(data[offset + 6]) << 8n | BigInt(data[offset + 7]);\n      return { value, bytesRead: 8 };\n    }\n    default:\n      throw new Error("Invalid varint prefix");\n  }\n}\nconst textEncoder = new TextEncoder();\nconst textDecoder = new TextDecoder();\nfunction encodeString(str) {\n  const bytes = textEncoder.encode(str);\n  const lengthBytes = encodeVarint(bytes.length);\n  const result = new Uint8Array(lengthBytes.length + bytes.length);\n  result.set(lengthBytes, 0);\n  result.set(bytes, lengthBytes.length);\n  return result;\n}\nfunction decodeString(data, offset = 0) {\n  const { value: length, bytesRead: lengthBytes } = decodeVarint(data, offset);\n  const stringLength = Number(length);\n  const stringStart = offset + lengthBytes;\n  const stringEnd = stringStart + stringLength;\n  if (stringEnd > data.length) {\n    throw new Error("Not enough data for string");\n  }\n  const value = textDecoder.decode(data.subarray(stringStart, stringEnd));\n  return { value, bytesRead: lengthBytes + stringLength };\n}\nfunction encodeBytes(bytes) {\n  const lengthBytes = encodeVarint(bytes.length);\n  const result = new Uint8Array(lengthBytes.length + bytes.length);\n  result.set(lengthBytes, 0);\n  result.set(bytes, lengthBytes.length);\n  return result;\n}\nfunction decodeBytes(data, offset = 0) {\n  const { value: length, bytesRead: lengthBytes } = decodeVarint(data, offset);\n  const bytesLength = Number(length);\n  const bytesStart = offset + lengthBytes;\n  const bytesEnd = bytesStart + bytesLength;\n  if (bytesEnd > data.length) {\n    throw new Error("Not enough data for bytes");\n  }\n  const value = data.subarray(bytesStart, bytesEnd);\n  return { value, bytesRead: lengthBytes + bytesLength };\n}\nclass MessageBuilder {\n  chunks = [];\n  totalLength = 0;\n  /**\n   * Append a varint to the message\n   */\n  writeVarint(value) {\n    const bytes = encodeVarint(value);\n    this.chunks.push(bytes);\n    this.totalLength += bytes.length;\n    return this;\n  }\n  /**\n   * Append a length-prefixed string to the message\n   */\n  writeString(str) {\n    const bytes = encodeString(str);\n    this.chunks.push(bytes);\n    this.totalLength += bytes.length;\n    return this;\n  }\n  /**\n   * Append length-prefixed bytes to the message\n   */\n  writeBytes(data) {\n    const bytes = encodeBytes(data);\n    this.chunks.push(bytes);\n    this.totalLength += bytes.length;\n    return this;\n  }\n  /**\n   * Append raw bytes (no length prefix) to the message\n   */\n  writeRaw(data) {\n    this.chunks.push(data);\n    this.totalLength += data.length;\n    return this;\n  }\n  /**\n   * Build the final message\n   */\n  build() {\n    const result = new Uint8Array(this.totalLength);\n    let offset = 0;\n    for (const chunk of this.chunks) {\n      result.set(chunk, offset);\n      offset += chunk.length;\n    }\n    return result;\n  }\n}\nfunction wrapWithLengthFrame(messageType, content) {\n  const typeBytes = encodeVarint(messageType);\n  const length = content.length;\n  const lengthBytes = new Uint8Array(2);\n  lengthBytes[0] = length >> 8 & 255;\n  lengthBytes[1] = length & 255;\n  const result = new Uint8Array(typeBytes.length + 2 + content.length);\n  result.set(typeBytes, 0);\n  result.set(lengthBytes, typeBytes.length);\n  result.set(content, typeBytes.length + 2);\n  return result;\n}\nfunction encodeParams(builder, params) {\n  const sorted = [...params].sort((a, b) => a.type - b.type);\n  builder.writeVarint(sorted.length);\n  let prev = 0;\n  for (const p of sorted) {\n    builder.writeVarint(p.type - prev);\n    prev = p.type;\n    if (p.type % 2 === 1) {\n      const bytes = p.value;\n      builder.writeVarint(bytes.length);\n      builder.writeRaw(bytes);\n    } else {\n      builder.writeVarint(p.value);\n    }\n  }\n}\nfunction decodeParams(data, offset = 0) {\n  let pos = offset;\n  const { value: count, bytesRead: countBytes } = decodeVarint(data, pos);\n  pos += countBytes;\n  const params = /* @__PURE__ */ new Map();\n  let prev = 0;\n  for (let i = 0; i < Number(count); i++) {\n    const { value: delta, bytesRead: deltaBytes } = decodeVarint(data, pos);\n    pos += deltaBytes;\n    const type = prev + Number(delta);\n    prev = type;\n    if (type % 2 === 1) {\n      const { value: blob, bytesRead: blobBytes } = decodeBytes(data, pos);\n      pos += blobBytes;\n      params.set(type, blob);\n    } else {\n      const { value: v, bytesRead: vBytes } = decodeVarint(data, pos);\n      pos += vBytes;\n      params.set(type, v);\n    }\n  }\n  return { params, bytesRead: pos - offset };\n}\nfunction buildClientSetup(_supportedVersions, _role, path, maxSubscribeId) {\n  const contentBuilder = new MessageBuilder();\n  const params = [];\n  if (path !== void 0) {\n    params.push({ type: MoqSetupParameter.PATH, value: textEncoder.encode(path) });\n  }\n  if (maxSubscribeId !== void 0) {\n    params.push({ type: MoqSetupParameter.MAX_SUBSCRIBE_ID, value: BigInt(maxSubscribeId) });\n  }\n  encodeParams(contentBuilder, params);\n  return wrapWithLengthFrame(MoqMessageType.CLIENT_SETUP, contentBuilder.build());\n}\nconst SUB_PARAM_FORWARD = 16;\nconst SUB_PARAM_PRIORITY = 32;\nconst SUB_PARAM_FILTER = 33;\nconst SUB_PARAM_GROUP_ORDER = 34;\nconst SUB_OK_PARAM_EXPIRES = 8;\nconst SUB_OK_PARAM_LARGEST = 9;\nconst PARAM_AUTHORIZATION = 3;\nconst PARAM_RESUME_HLC = 65281;\nfunction buildSubscribe(subscription) {\n  const contentBuilder = new MessageBuilder();\n  contentBuilder.writeVarint(subscription.subscribeId);\n  contentBuilder.writeVarint(subscription.namespace.length);\n  for (const part of subscription.namespace) {\n    contentBuilder.writeString(part);\n  }\n  contentBuilder.writeString(subscription.trackName);\n  const params = [];\n  params.push({ type: SUB_PARAM_PRIORITY, value: BigInt(subscription.subscriberPriority ?? 128) });\n  params.push({ type: SUB_PARAM_GROUP_ORDER, value: BigInt(subscription.groupOrder ?? MoqGroupOrder.ASCENDING) });\n  params.push({ type: SUB_PARAM_FORWARD, value: BigInt(subscription.forward ?? 1) });\n  const filterBuilder = new MessageBuilder();\n  filterBuilder.writeVarint(subscription.filterType);\n  params.push({ type: SUB_PARAM_FILTER, value: filterBuilder.build() });\n  if (subscription.authorization) {\n    params.push({ type: PARAM_AUTHORIZATION, value: textEncoder.encode(subscription.authorization) });\n  }\n  if (subscription.resumeOpId !== void 0 && subscription.resumeOpId > 0n) {\n    const opIdBuf = new Uint8Array(8);\n    new DataView(opIdBuf.buffer).setBigUint64(0, subscription.resumeOpId, false);\n    params.push({ type: PARAM_RESUME_HLC, value: opIdBuf });\n  }\n  encodeParams(contentBuilder, params);\n  return wrapWithLengthFrame(MoqMessageType.SUBSCRIBE, contentBuilder.build());\n}\nfunction buildAnnounce(announcement) {\n  const contentBuilder = new MessageBuilder();\n  contentBuilder.writeVarint(announcement.requestId);\n  contentBuilder.writeVarint(announcement.namespace.length);\n  for (const part of announcement.namespace) {\n    contentBuilder.writeString(part);\n  }\n  const params = [];\n  if (announcement.parameters) {\n    for (const [key, value] of announcement.parameters) {\n      params.push({ type: key, value });\n    }\n  }\n  encodeParams(contentBuilder, params);\n  return wrapWithLengthFrame(MoqMessageType.ANNOUNCE, contentBuilder.build());\n}\nfunction writeVarintInto(buf, offset, value) {\n  if (typeof value === "number") {\n    if (!Number.isInteger(value) || value < 0) {\n      throw new RangeError(`writeVarintInto: value must be a non-negative integer, got ${value}`);\n    }\n    if (value < 64) {\n      buf[offset] = value;\n      return offset + 1;\n    }\n    if (value < 16384) {\n      buf[offset] = value >> 8 | 64;\n      buf[offset + 1] = value & 255;\n      return offset + 2;\n    }\n    if (value < 1073741824) {\n      buf[offset] = value >>> 24 | 128;\n      buf[offset + 1] = value >>> 16 & 255;\n      buf[offset + 2] = value >>> 8 & 255;\n      buf[offset + 3] = value & 255;\n      return offset + 4;\n    }\n    value = BigInt(value);\n  }\n  const n = value;\n  if (n < 0n) {\n    throw new RangeError(`writeVarintInto: value must be non-negative, got ${n}`);\n  }\n  if (n < 0x40n) {\n    buf[offset] = Number(n);\n    return offset + 1;\n  }\n  if (n < 0x4000n) {\n    buf[offset] = Number(n >> 8n | 0x40n);\n    buf[offset + 1] = Number(n & 0xffn);\n    return offset + 2;\n  }\n  if (n < 0x40000000n) {\n    buf[offset] = Number(n >> 24n | 0x80n);\n    buf[offset + 1] = Number(n >> 16n & 0xffn);\n    buf[offset + 2] = Number(n >> 8n & 0xffn);\n    buf[offset + 3] = Number(n & 0xffn);\n    return offset + 4;\n  }\n  buf[offset] = Number(n >> 56n | 0xc0n);\n  buf[offset + 1] = Number(n >> 48n & 0xffn);\n  buf[offset + 2] = Number(n >> 40n & 0xffn);\n  buf[offset + 3] = Number(n >> 32n & 0xffn);\n  buf[offset + 4] = Number(n >> 24n & 0xffn);\n  buf[offset + 5] = Number(n >> 16n & 0xffn);\n  buf[offset + 6] = Number(n >> 8n & 0xffn);\n  buf[offset + 7] = Number(n & 0xffn);\n  return offset + 8;\n}\nfunction maxObjectDatagramSize(maxPayload) {\n  return 1 + 8 + 8 + 8 + 1 + maxPayload;\n}\nfunction encodeObjectDatagramInto(buf, trackAlias, groupId, objectId, publisherPriority, payload) {\n  let pos = 0;\n  pos = writeVarintInto(buf, pos, 0);\n  pos = writeVarintInto(buf, pos, trackAlias);\n  pos = writeVarintInto(buf, pos, groupId);\n  pos = writeVarintInto(buf, pos, objectId);\n  buf[pos++] = publisherPriority & 255;\n  buf.set(payload, pos);\n  return pos + payload.length;\n}\nfunction parseServerSetup(data, offset = 0) {\n  const { params } = decodeParams(data, offset);\n  const parameters = /* @__PURE__ */ new Map();\n  for (const [type, value] of params) {\n    parameters.set(type, value instanceof Uint8Array ? value : encodeVarint(value));\n  }\n  return {\n    selectedVersion: MOQ_TRANSPORT_VERSION,\n    parameters\n  };\n}\nfunction parseSubscribeOk(data, offset = 0) {\n  let pos = offset;\n  const { value: subscribeId, bytesRead: subIdBytes } = decodeVarint(data, pos);\n  pos += subIdBytes;\n  const { value: trackAlias, bytesRead: aliasBytes } = decodeVarint(data, pos);\n  pos += aliasBytes;\n  const { params } = decodeParams(data, pos);\n  const result = {\n    subscribeId: Number(subscribeId),\n    trackAlias: Number(trackAlias),\n    expires: 0n,\n    groupOrder: 0,\n    contentExists: false\n  };\n  const expires = params.get(SUB_OK_PARAM_EXPIRES);\n  if (typeof expires === "bigint") result.expires = expires;\n  const groupOrder = params.get(SUB_PARAM_GROUP_ORDER);\n  if (typeof groupOrder === "bigint") result.groupOrder = Number(groupOrder);\n  const largest = params.get(SUB_OK_PARAM_LARGEST);\n  if (largest instanceof Uint8Array) {\n    result.contentExists = true;\n    const g = decodeVarint(largest, 0);\n    const o = decodeVarint(largest, g.bytesRead);\n    result.largestGroupId = g.value;\n    result.largestObjectId = o.value;\n  }\n  return result;\n}\nfunction parseSubscribeError(data, offset = 0) {\n  let pos = offset;\n  const { value: subscribeId, bytesRead: subIdBytes } = decodeVarint(data, pos);\n  pos += subIdBytes;\n  const { value: errorCode, bytesRead: errorCodeBytes } = decodeVarint(data, pos);\n  pos += errorCodeBytes;\n  const { bytesRead: retryBytes } = decodeVarint(data, pos);\n  pos += retryBytes;\n  const { value: reasonPhrase } = decodeString(data, pos);\n  return {\n    subscribeId: Number(subscribeId),\n    errorCode: Number(errorCode),\n    reasonPhrase,\n    trackAlias: 0\n  };\n}\nfunction parseAnnounceOk(data, offset = 0) {\n  const { value: requestId } = decodeVarint(data, offset);\n  return { requestId: Number(requestId) };\n}\nfunction parseAnnounceError(data, offset = 0) {\n  let pos = offset;\n  const { value: nsLength, bytesRead: nsLengthBytes } = decodeVarint(data, pos);\n  pos += nsLengthBytes;\n  const namespace = [];\n  for (let i = 0; i < Number(nsLength); i++) {\n    const { value: part, bytesRead: partBytes } = decodeString(data, pos);\n    pos += partBytes;\n    namespace.push(part);\n  }\n  const { value: errorCode, bytesRead: errorCodeBytes } = decodeVarint(data, pos);\n  pos += errorCodeBytes;\n  const { value: reasonPhrase, bytesRead: reasonBytes } = decodeString(data, pos);\n  pos += reasonBytes;\n  return {\n    namespace,\n    errorCode: Number(errorCode),\n    reasonPhrase\n  };\n}\nfunction parseObjectDatagram(data, offset = 0) {\n  let pos = offset;\n  const { value: _type, bytesRead: typeBytes } = decodeVarint(data, pos);\n  pos += typeBytes;\n  const { value: trackAlias, bytesRead: aliasBytes } = decodeVarint(data, pos);\n  pos += aliasBytes;\n  const { value: groupId, bytesRead: groupIdBytes } = decodeVarint(data, pos);\n  pos += groupIdBytes;\n  const { value: objectId, bytesRead: objectIdBytes } = decodeVarint(data, pos);\n  pos += objectIdBytes;\n  if (pos >= data.length) {\n    throw new Error("Not enough data for publisher priority");\n  }\n  const publisherPriority = data[pos];\n  pos += 1;\n  const payload = data.subarray(pos);\n  return {\n    trackAlias: Number(trackAlias),\n    groupId,\n    objectId,\n    publisherPriority,\n    payload\n  };\n}\nconst MOQ_TRANSPORT_VERSION = 4278190080 + 16;\nconst PENDING_DATAGRAM_MAX_BYTES = 1 * 1024 * 1024;\nclass DatagramRouter {\n  handlers = /* @__PURE__ */ new Map();\n  // Pre-handler buffer, FIFO across all aliases; oldest dropped when the byte cap\n  // is exceeded. Cleared on clear().\n  pending = [];\n  pendingBytes = 0;\n  /**\n   * Register a handler for a track alias and drain any datagrams that arrived for\n   * it before registration (the SUBSCRIBE_OK race), in arrival order.\n   */\n  register(trackAlias, handler) {\n    this.handlers.set(trackAlias, handler);\n    if (this.pending.length > 0) this.drainForAlias(trackAlias, handler);\n  }\n  /** Unregister a handler and discard any still-buffered datagrams for its alias. */\n  unregister(trackAlias) {\n    this.handlers.delete(trackAlias);\n    if (this.pending.length > 0) this.discardForAlias(trackAlias);\n  }\n  /** Route a parsed datagram to its handler, or buffer it if none is registered yet. */\n  ingest(d) {\n    const handler = this.handlers.get(d.trackAlias);\n    if (handler) {\n      handler(d.payload, d.trackAlias, d.groupId, d.objectId);\n    } else {\n      this.bufferUnknown(d);\n    }\n  }\n  // DatagramReceiver surface (same names as MoqConnection) so subscribers can take\n  // either. These are the public aliases of register()/unregister().\n  registerDatagramHandler(trackAlias, handler) {\n    this.register(trackAlias, handler);\n  }\n  unregisterDatagramHandler(trackAlias) {\n    this.unregister(trackAlias);\n  }\n  /** Number of buffered pre-handler datagrams (tests/diagnostics). */\n  pendingCount() {\n    return this.pending.length;\n  }\n  /** Drop all handlers + buffered datagrams (connection close). */\n  clear() {\n    this.handlers.clear();\n    this.pending = [];\n    this.pendingBytes = 0;\n  }\n  drainForAlias(trackAlias, handler) {\n    const remaining = [];\n    let drainedBytes = 0;\n    for (const d of this.pending) {\n      if (d.trackAlias === trackAlias) {\n        try {\n          handler(d.payload, d.trackAlias, d.groupId, d.objectId);\n        } catch {\n        }\n        drainedBytes += d.payload.length;\n      } else {\n        remaining.push(d);\n      }\n    }\n    this.pending = remaining;\n    this.pendingBytes -= drainedBytes;\n  }\n  discardForAlias(trackAlias) {\n    const remaining = [];\n    let discardedBytes = 0;\n    for (const d of this.pending) {\n      if (d.trackAlias === trackAlias) {\n        discardedBytes += d.payload.length;\n      } else {\n        remaining.push(d);\n      }\n    }\n    this.pending = remaining;\n    this.pendingBytes -= discardedBytes;\n  }\n  bufferUnknown(d) {\n    this.pending.push(d);\n    this.pendingBytes += d.payload.length;\n    while (this.pendingBytes > PENDING_DATAGRAM_MAX_BYTES && this.pending.length > 0) {\n      const dropped = this.pending.shift();\n      this.pendingBytes -= dropped.payload.length;\n    }\n  }\n}\nclass MoqConnection {\n  constructor(serverUrl) {\n    this.serverUrl = serverUrl;\n  }\n  transport = null;\n  state = ConnectionState.DISCONNECTED;\n  handlers = {};\n  datagramWriter = null;\n  // Datagram dispatcher: the read loop lives here (transport concern); the\n  // trackAlias→handler routing + SUBSCRIBE_OK race buffer live in the router\n  // (Phase 1 extraction — worker-transport-plan.md).\n  router = new DatagramRouter();\n  datagramDispatcherRunning = false;\n  // \'main\' = this class reads the datagram readable directly (default/fallback).\n  // \'worker\' = the receive Worker owns the read loop (design §11.4); the main\n  // dispatcher is suppressed and parsed non-audio datagrams arrive via\n  // ingestForwardedDatagram(), still routed through the same DatagramRouter\n  // (handler map + SUBSCRIBE_OK race buffer), unchanged.\n  datagramMode = "main";\n  /**\n   * Get current connection state\n   */\n  getState() {\n    return this.state;\n  }\n  /**\n   * Get the underlying WebTransport instance\n   */\n  getTransport() {\n    return this.transport;\n  }\n  /**\n   * Set event handlers\n   */\n  setHandlers(handlers) {\n    this.handlers = { ...this.handlers, ...handlers };\n  }\n  /**\n   * Connect to the MOQ server via WebTransport\n   */\n  async connect(options) {\n    if (this.state !== ConnectionState.DISCONNECTED) {\n      throw new Error(`Cannot connect: already in state ${this.state}`);\n    }\n    this.setState(ConnectionState.CONNECTING);\n    try {\n      const wtOptions = {\n        allowPooling: false,\n        requireUnreliable: true,\n        // We use datagrams for audio\n        congestionControl: "low-latency",\n        // Negotiate the MOQ draft-16 subprotocol over WebTransport so the server\n        // selects draft-16 (it falls back to draft-14 if no subprotocol is set).\n        protocols: ["moqt-16"],\n        ...options\n      };\n      this.transport = new WebTransport(this.serverUrl, wtOptions);\n      this.transport.closed.then((info) => {\n        this.handleClose(info);\n      }).catch((error) => {\n        this.handleError(error);\n      });\n      await this.transport.ready;\n      const negotiated = this.transport.protocol;\n      console.log(`[MOQ] WebTransport ready — negotiated subprotocol: ${JSON.stringify(negotiated)}`);\n      this.setState(ConnectionState.CONNECTED);\n    } catch (error) {\n      this.setState(ConnectionState.ERROR, error);\n      throw error;\n    }\n  }\n  /**\n   * Close the connection gracefully\n   */\n  close(closeInfo) {\n    this.datagramDispatcherRunning = false;\n    this.datagramMode = "main";\n    this.router.clear();\n    if (this.datagramWriter) {\n      this.datagramWriter.releaseLock();\n      this.datagramWriter = null;\n    }\n    if (this.transport) {\n      this.transport.close(closeInfo);\n      this.transport = null;\n    }\n    this.setState(ConnectionState.DISCONNECTED);\n  }\n  /**\n   * Create a bidirectional stream for the MOQ control channel\n   */\n  async createControlStream() {\n    if (!this.transport) {\n      throw new Error("Not connected");\n    }\n    return this.transport.createBidirectionalStream();\n  }\n  /**\n   * Create a unidirectional stream for sending data\n   */\n  async createSendStream() {\n    if (!this.transport) {\n      throw new Error("Not connected");\n    }\n    return this.transport.createUnidirectionalStream();\n  }\n  /**\n   * Get the incoming unidirectional streams reader\n   */\n  getIncomingStreams() {\n    if (!this.transport) {\n      throw new Error("Not connected");\n    }\n    return this.transport.incomingUnidirectionalStreams;\n  }\n  /**\n   * Get the datagram writer/reader for audio frames\n   */\n  getDatagrams() {\n    if (!this.transport) {\n      throw new Error("Not connected");\n    }\n    return this.transport.datagrams;\n  }\n  /**\n   * Get a reader for incoming datagrams\n   */\n  getDatagramReader() {\n    if (!this.transport) {\n      return null;\n    }\n    return this.transport.datagrams.readable.getReader();\n  }\n  /**\n   * Send a datagram (used for audio frames)\n   */\n  async sendDatagram(data) {\n    if (!this.transport) {\n      throw new Error("Not connected");\n    }\n    if (data.length === 0) {\n      return;\n    }\n    if (!this.datagramWriter) {\n      this.datagramWriter = this.transport.datagrams.writable.getWriter();\n    }\n    try {\n      await this.datagramWriter.write(data);\n    } catch (error) {\n      try {\n        this.datagramWriter.releaseLock();\n      } catch {\n      }\n      this.datagramWriter = null;\n      throw error;\n    }\n  }\n  /**\n   * Switch to worker datagram mode (design §11.4): the receive Worker reads the\n   * datagram readable, so the main dispatcher must NOT. Returns the unlocked\n   * `datagrams.readable` for transfer into the worker. Must be called before any\n   * `registerDatagramHandler` (which would otherwise start the main dispatcher\n   * and lock the stream). Returns null if not connected.\n   */\n  takeDatagramReadableForWorker() {\n    if (!this.transport) return null;\n    if (this.datagramDispatcherRunning) {\n      throw new Error("Cannot switch to worker datagram mode: main dispatcher already reading");\n    }\n    this.datagramMode = "worker";\n    return this.transport.datagrams.readable;\n  }\n  /**\n   * Revert to main datagram mode if worker setup failed before locking the\n   * stream (so a later registerDatagramHandler starts the main dispatcher).\n   */\n  revertToMainDatagramMode() {\n    this.datagramMode = "main";\n  }\n  /**\n   * Feed a parsed datagram forwarded from the receive Worker through the normal\n   * dispatch path (handlers map + SUBSCRIBE_OK pending buffer). The worker only\n   * forwards non-audio tracks; audio is decoded in the worker and never arrives\n   * here.\n   */\n  ingestForwardedDatagram(trackAlias, payload, groupId, objectId) {\n    this.router.ingest({ trackAlias, payload, groupId, objectId });\n  }\n  /**\n   * Register a datagram handler for a specific track alias. Starts the dispatcher\n   * on first registration (transport concern); the router drains any datagrams\n   * that arrived for this alias before registration (the SUBSCRIBE_OK race).\n   */\n  registerDatagramHandler(trackAlias, handler) {\n    if (!this.datagramDispatcherRunning) {\n      this.startDatagramDispatcher();\n    }\n    this.router.register(trackAlias, handler);\n  }\n  /** Unregister a datagram handler; the router discards any still-buffered datagrams for it. */\n  unregisterDatagramHandler(trackAlias) {\n    this.router.unregister(trackAlias);\n  }\n  /**\n   * Number of buffered pre-handler datagrams currently held. Exposed for tests and\n   * diagnostics; production callers shouldn\'t need it.\n   */\n  getPendingDatagramCount() {\n    return this.router.pendingCount();\n  }\n  /**\n   * Start the single datagram reader loop that dispatches to handlers by track alias\n   */\n  startDatagramDispatcher() {\n    if (this.datagramMode === "worker") {\n      return;\n    }\n    if (this.datagramDispatcherRunning || !this.transport) {\n      return;\n    }\n    this.datagramDispatcherRunning = true;\n    const reader = this.transport.datagrams.readable.getReader();\n    const loop = async () => {\n      try {\n        while (this.datagramDispatcherRunning) {\n          const { value, done } = await reader.read();\n          if (done) break;\n          if (!value) continue;\n          try {\n            const parsed = parseObjectDatagram(value);\n            this.router.ingest(parsed);\n          } catch {\n          }\n        }\n      } catch (error) {\n        if (this.datagramDispatcherRunning) {\n          console.error("Datagram dispatcher error:", error);\n        }\n      } finally {\n        this.datagramDispatcherRunning = false;\n      }\n    };\n    loop();\n  }\n  /**\n   * Update connection state and notify handlers\n   */\n  setState(state, error) {\n    this.state = state;\n    if (this.handlers.onStateChange) {\n      this.handlers.onStateChange(state, error);\n    }\n  }\n  /**\n   * Handle connection close\n   */\n  handleClose(info) {\n    if (this.datagramWriter) {\n      try {\n        this.datagramWriter.releaseLock();\n      } catch {\n      }\n      this.datagramWriter = null;\n    }\n    this.transport = null;\n    this.setState(ConnectionState.DISCONNECTED);\n    if (this.handlers.onClose) {\n      this.handlers.onClose(info);\n    }\n  }\n  /**\n   * Handle connection error\n   */\n  handleError(error) {\n    console.error("WebTransport connection error:", error);\n    if (this.datagramWriter) {\n      try {\n        this.datagramWriter.releaseLock();\n      } catch {\n      }\n      this.datagramWriter = null;\n    }\n    this.transport = null;\n    this.setState(ConnectionState.ERROR, error);\n  }\n}\nclass MoqClientError extends Error {\n  constructor(message, code, details) {\n    super(message);\n    this.code = code;\n    this.details = details;\n    this.name = "MoqClientError";\n  }\n}\nclass AuthenticationError extends MoqClientError {\n  constructor(message, moqErrorCode, details) {\n    super(message, "AUTHENTICATION_FAILED", details);\n    this.moqErrorCode = moqErrorCode;\n    this.name = "AuthenticationError";\n  }\n  /**\n   * Check if this is an invalid token error\n   */\n  isInvalidToken() {\n    return this.moqErrorCode === 2 || this.moqErrorCode === 1027;\n  }\n  /**\n   * Check if this is an expired token error\n   */\n  isExpiredToken() {\n    return this.message.toLowerCase().includes("expired");\n  }\n}\nclass ProtocolError extends MoqClientError {\n  constructor(message, moqErrorCode, details) {\n    super(message, "PROTOCOL_ERROR", details);\n    this.moqErrorCode = moqErrorCode;\n    this.name = "ProtocolError";\n  }\n}\nclass SubscriptionError extends MoqClientError {\n  constructor(message, moqErrorCode, trackNamespace, details) {\n    super(message, "SUBSCRIPTION_FAILED", details);\n    this.moqErrorCode = moqErrorCode;\n    this.trackNamespace = trackNamespace;\n    this.name = "SubscriptionError";\n  }\n}\nclass AnnouncementError extends MoqClientError {\n  constructor(message, moqErrorCode, namespace, details) {\n    super(message, "ANNOUNCEMENT_FAILED", details);\n    this.moqErrorCode = moqErrorCode;\n    this.namespace = namespace;\n    this.name = "AnnouncementError";\n  }\n}\nfunction getMoqErrorMessage(code) {\n  switch (code) {\n    case 0:\n      return "No error";\n    case 1:\n      return "Internal error";\n    case 2:\n      return "Unauthorized";\n    case 3:\n      return "Protocol violation";\n    case 4:\n      return "Duplicate track alias";\n    case 5:\n      return "Parameter length mismatch";\n    case 6:\n      return "Too many subscribes";\n    case 16:\n      return "GOAWAY timeout";\n    case 1027:\n      return "Invalid token (custom)";\n    default:\n      return `Unknown error (0x${code.toString(16)})`;\n  }\n}\nclass MoqSession {\n  constructor(connection2, debug = false) {\n    this.connection = connection2;\n    this.debug = debug;\n  }\n  controlStream = null;\n  writer = null;\n  reader = null;\n  readBuffer = new Uint8Array(0);\n  nextSubscribeId = 1;\n  nextTrackAlias = 1;\n  nextAnnounceRequestId = 2;\n  // Client uses even IDs for announces (to avoid collisions with server)\n  // Track state\n  subscriptions = /* @__PURE__ */ new Map();\n  announcements = /* @__PURE__ */ new Map();\n  incomingSubscriptions = /* @__PURE__ */ new Map();\n  // Callbacks for when server subscribes to our tracks\n  onIncomingSubscribeCallback = null;\n  debug;\n  // eslint-disable-next-line @typescript-eslint/no-explicit-any\n  log(...args) {\n    if (this.debug) {\n      console.log("[MOQ]", ...args);\n    }\n  }\n  /**\n   * Set callback for when server subscribes to one of our announced tracks\n   */\n  onIncomingSubscribe(callback) {\n    this.onIncomingSubscribeCallback = callback;\n  }\n  /**\n   * Initialize the MOQ session over the control stream\n   * @param role - The MOQ role (publisher, subscriber, or pubsub)\n   * @param path - Optional path parameter\n   * @param maxSubscribeId - Max number of requests server can send to client (default: 100)\n   */\n  async initialize(role, path, maxSubscribeId = 100) {\n    this.log("Creating control stream...");\n    this.controlStream = await this.connection.createControlStream();\n    this.writer = this.controlStream.writable.getWriter();\n    this.reader = this.controlStream.readable.getReader();\n    this.log("Control stream created, sending CLIENT_SETUP...");\n    const setupMsg = buildClientSetup([MOQ_TRANSPORT_VERSION], role, path, maxSubscribeId);\n    this.log("CLIENT_SETUP message size:", setupMsg.length, "bytes");\n    this.log("CLIENT_SETUP hex:", Array.from(setupMsg).map((b) => b.toString(16).padStart(2, "0")).join(" "));\n    await this.writer.write(setupMsg);\n    this.log("CLIENT_SETUP sent, waiting for SERVER_SETUP...");\n    const { type, content } = await this.readFramedMessage();\n    this.log("Received response type: 0x" + type.toString(16) + ", content size:", content.length, "bytes");\n    if (type !== MoqMessageType.SERVER_SETUP) {\n      throw new ProtocolError(\n        `Expected SERVER_SETUP (0x41), got message type 0x${type.toString(16)}`,\n        type\n      );\n    }\n    const serverSetup = parseServerSetup(content, 0);\n    this.log("Session established, server version:", serverSetup.selectedVersion.toString(16));\n  }\n  /**\n   * Subscribe to a track with JWT authorization\n   */\n  async subscribe(namespace, trackName, authorization, resumeOpId) {\n    const subscribeId = this.nextSubscribeId++;\n    const subscribeMsg = buildSubscribe({\n      subscribeId,\n      namespace,\n      trackName,\n      filterType: MoqFilterType.LATEST_GROUP,\n      authorization,\n      resumeOpId\n    });\n    this.log("SUBSCRIBE message size:", subscribeMsg.length, "bytes");\n    await this.writer.write(subscribeMsg);\n    const { type, content } = await this.waitForMessage([\n      MoqMessageType.SUBSCRIBE_OK,\n      MoqMessageType.SUBSCRIBE_ERROR\n    ]);\n    if (type === MoqMessageType.SUBSCRIBE_OK) {\n      const ok = parseSubscribeOk(content, 0);\n      this.log("Subscribed successfully, subscribeId:", ok.subscribeId, "trackAlias:", ok.trackAlias);\n      this.subscriptions.set(subscribeId, { namespace, trackName, alias: ok.trackAlias });\n      return subscribeId;\n    } else if (type === MoqMessageType.SUBSCRIBE_ERROR) {\n      const error = parseSubscribeError(content, 0);\n      const errorMessage = `${error.reasonPhrase} (${getMoqErrorMessage(error.errorCode)})`;\n      if (error.errorCode === 2 || error.errorCode === 1027) {\n        throw new AuthenticationError(errorMessage, error.errorCode, { namespace, trackName });\n      }\n      throw new SubscriptionError(errorMessage, error.errorCode, namespace);\n    } else {\n      throw new ProtocolError(\n        `Expected SUBSCRIBE_OK or SUBSCRIBE_ERROR, got message type 0x${type.toString(16)}`,\n        type\n      );\n    }\n  }\n  /**\n   * Wait for a specific message type, handling other messages that arrive first\n   */\n  async waitForMessage(expectedTypes) {\n    const maxAttempts = 20;\n    for (let i = 0; i < maxAttempts; i++) {\n      const { type, content } = await this.readFramedMessage();\n      if (expectedTypes.includes(type)) {\n        return { type, content };\n      }\n      this.log(`Received unexpected message type 0x${type.toString(16)} while waiting, handling it`);\n      await this.handleUnexpectedMessage(type, content);\n    }\n    throw new ProtocolError(\n      `Timeout waiting for message types: ${expectedTypes.map((t) => "0x" + t.toString(16)).join(", ")}`,\n      0\n    );\n  }\n  /**\n   * Handle messages that arrive when we\'re waiting for something else\n   */\n  async handleUnexpectedMessage(type, content) {\n    switch (type) {\n      case MoqMessageType.ANNOUNCE:\n        this.log("Received ANNOUNCE from server, sending ANNOUNCE_OK");\n        await this.sendAnnounceOk(content);\n        break;\n      case 17:\n        this.log("Received SUBSCRIBE_ANNOUNCES from server, sending OK");\n        await this.sendSubscribeAnnouncesOk(content);\n        break;\n      case MoqMessageType.SUBSCRIBE:\n        this.log("Received SUBSCRIBE from server, sending SUBSCRIBE_OK");\n        await this.handleIncomingSubscribe(content);\n        break;\n      default:\n        this.log(`Skipping unhandled message type 0x${type.toString(16)}`);\n    }\n  }\n  /**\n   * Handle incoming SUBSCRIBE from server and respond with SUBSCRIBE_OK\n   *\n   * Per moqtransport v0.5.1 / draft-ietf-moq-transport-11, the SUBSCRIBE\n   * wire format does NOT include TrackAlias. The publisher (us) assigns a\n   * TrackAlias and returns it in SUBSCRIBE_OK.\n   *\n   * SUBSCRIBE wire format: RequestID, Namespace, TrackName, Priority,\n   *   GroupOrder, Forward, FilterType, Parameters\n   *\n   * SUBSCRIBE_OK wire format: RequestID, TrackAlias, Expires, GroupOrder,\n   *   ContentExists, [LargestLocation], Parameters\n   */\n  async handleIncomingSubscribe(content) {\n    let pos = 0;\n    const requestIdByte = content[pos];\n    let requestId;\n    if (requestIdByte < 64) {\n      requestId = requestIdByte;\n      pos += 1;\n    } else if ((requestIdByte & 192) === 64) {\n      requestId = (requestIdByte & 63) << 8 | content[pos + 1];\n      pos += 2;\n    } else {\n      requestId = requestIdByte & 63;\n      pos += 1;\n    }\n    const namespace = this.parseNamespaceFromContent(content, pos);\n    const trackAlias = this.nextTrackAlias++;\n    this.log(`Server subscribing to: ${namespace.join("/")}, assigning trackAlias=${trackAlias}`);\n    const builder = new MessageBuilder();\n    builder.writeVarint(requestId);\n    builder.writeVarint(trackAlias);\n    builder.writeVarint(0);\n    builder.writeRaw(new Uint8Array([1]));\n    builder.writeRaw(new Uint8Array([0]));\n    builder.writeVarint(0);\n    const msg = wrapWithLengthFrame(MoqMessageType.SUBSCRIBE_OK, builder.build());\n    await this.writer.write(msg);\n    this.log("Sent SUBSCRIBE_OK for requestId:", requestId, "trackAlias:", trackAlias);\n    this.incomingSubscriptions.set(requestId, { trackAlias, namespace });\n    if (this.onIncomingSubscribeCallback) {\n      this.onIncomingSubscribeCallback(namespace, trackAlias);\n    }\n  }\n  /**\n   * Get track alias for an incoming subscription by namespace\n   */\n  getIncomingTrackAlias(namespacePrefix) {\n    for (const [, sub] of this.incomingSubscriptions) {\n      if (sub.namespace.join("/").startsWith(namespacePrefix)) {\n        return sub.trackAlias;\n      }\n    }\n    return void 0;\n  }\n  /**\n   * Parse namespace from content starting at given position\n   */\n  parseNamespaceFromContent(content, startPos) {\n    let pos = startPos;\n    const namespace = [];\n    if (pos >= content.length) return namespace;\n    const firstByte = content[pos];\n    let nsLength;\n    if (firstByte < 64) {\n      nsLength = firstByte;\n      pos += 1;\n    } else if ((firstByte & 192) === 64) {\n      nsLength = (firstByte & 63) << 8 | content[pos + 1];\n      pos += 2;\n    } else {\n      nsLength = firstByte & 63;\n      pos += 1;\n    }\n    for (let i = 0; i < nsLength && pos < content.length; i++) {\n      const partLenByte = content[pos];\n      let partLen;\n      if (partLenByte < 64) {\n        partLen = partLenByte;\n        pos += 1;\n      } else if ((partLenByte & 192) === 64) {\n        partLen = (partLenByte & 63) << 8 | content[pos + 1];\n        pos += 2;\n      } else {\n        partLen = partLenByte & 63;\n        pos += 1;\n      }\n      if (pos + partLen <= content.length) {\n        const part = new TextDecoder().decode(content.slice(pos, pos + partLen));\n        namespace.push(part);\n        pos += partLen;\n      }\n    }\n    return namespace;\n  }\n  /**\n   * Send ANNOUNCE_OK response\n   */\n  async sendAnnounceOk(announceContent) {\n    const requestId = this.parseRequestId(announceContent);\n    this.log("Sending ANNOUNCE_OK for requestId:", requestId);\n    const builder = new MessageBuilder();\n    builder.writeVarint(requestId);\n    const msg = wrapWithLengthFrame(MoqMessageType.ANNOUNCE_OK, builder.build());\n    this.log("ANNOUNCE_OK message size:", msg.length, "bytes");\n    await this.writer.write(msg);\n  }\n  /**\n   * Send SUBSCRIBE_ANNOUNCES_OK response\n   */\n  async sendSubscribeAnnouncesOk(subscribeAnnouncesContent) {\n    const requestId = this.parseRequestId(subscribeAnnouncesContent);\n    this.log("Sending SUBSCRIBE_ANNOUNCES_OK for requestId:", requestId);\n    const builder = new MessageBuilder();\n    builder.writeVarint(requestId);\n    const msg = wrapWithLengthFrame(18, builder.build());\n    await this.writer.write(msg);\n  }\n  /**\n   * Parse RequestID (first varint) from message content\n   */\n  parseRequestId(content) {\n    const firstByte = content[0];\n    if (firstByte < 64) {\n      return firstByte;\n    } else if ((firstByte & 192) === 64) {\n      return (firstByte & 63) << 8 | content[1];\n    } else if ((firstByte & 192) === 128) {\n      return (firstByte & 63) << 24 | content[1] << 16 | content[2] << 8 | content[3];\n    } else {\n      return content[4] << 24 | content[5] << 16 | content[6] << 8 | content[7];\n    }\n  }\n  /**\n   * Announce a track namespace\n   */\n  async announce(namespace, authorization) {\n    const requestId = this.nextAnnounceRequestId;\n    this.nextAnnounceRequestId += 2;\n    const parameters = /* @__PURE__ */ new Map();\n    if (authorization) {\n      const encoder = new TextEncoder();\n      parameters.set(3, encoder.encode(authorization));\n    }\n    const announceMsg = buildAnnounce({ requestId, namespace, parameters: parameters.size > 0 ? parameters : void 0 });\n    this.log("ANNOUNCE message size:", announceMsg.length, "bytes, requestId:", requestId);\n    await this.writer.write(announceMsg);\n    const { type, content } = await this.waitForMessage([\n      MoqMessageType.ANNOUNCE_OK,\n      MoqMessageType.ANNOUNCE_ERROR\n    ]);\n    if (type === MoqMessageType.ANNOUNCE_OK) {\n      const ok = parseAnnounceOk(content, 0);\n      const nsKey = namespace.join("/");\n      this.announcements.set(nsKey, { namespace });\n      this.log("Announced successfully:", nsKey, "requestId:", ok.requestId);\n    } else if (type === MoqMessageType.ANNOUNCE_ERROR) {\n      const error = parseAnnounceError(content, 0);\n      const errorMessage = `${error.reasonPhrase} (${getMoqErrorMessage(error.errorCode)})`;\n      throw new AnnouncementError(errorMessage, error.errorCode, namespace);\n    } else {\n      throw new ProtocolError(\n        `Expected ANNOUNCE_OK or ANNOUNCE_ERROR, got message type 0x${type.toString(16)}`,\n        type\n      );\n    }\n  }\n  /**\n   * Get track alias for a subscription\n   */\n  getTrackAlias(subscribeId) {\n    return this.subscriptions.get(subscribeId)?.alias;\n  }\n  /**\n   * Start background message processing loop\n   * This handles messages that arrive after initial connection setup\n   */\n  startMessageLoop() {\n    this.processMessages().catch((error) => {\n      this.log("Message loop ended:", error.message);\n    });\n  }\n  /**\n   * Background message processing\n   */\n  async processMessages() {\n    this.log("Starting background message processing loop");\n    while (this.reader) {\n      try {\n        const { type, content } = await this.readFramedMessage();\n        this.log(`Background received message type 0x${type.toString(16)}`);\n        await this.handleUnexpectedMessage(type, content);\n      } catch (error) {\n        this.log("Message processing stopped:", error.message);\n        break;\n      }\n    }\n  }\n  /**\n   * Close the session\n   */\n  async close() {\n    if (this.writer) {\n      try {\n        await this.writer.close();\n      } catch {\n      }\n      this.writer = null;\n    }\n    if (this.reader) {\n      try {\n        await this.reader.cancel();\n      } catch {\n      }\n      this.reader = null;\n    }\n    this.controlStream = null;\n  }\n  /**\n   * Read a complete message from the control stream with proper length framing\n   * Format: [Type varint] [Length: 2 bytes big-endian] [Content: length bytes]\n   * Returns: { type, content } where content is the message body without type/length\n   */\n  async readFramedMessage() {\n    while (this.readBuffer.length < 3) {\n      const { value, done } = await this.reader.read();\n      if (done) {\n        throw new Error("Control stream closed unexpectedly");\n      }\n      const newBuffer = new Uint8Array(this.readBuffer.length + value.length);\n      newBuffer.set(this.readBuffer);\n      newBuffer.set(value, this.readBuffer.length);\n      this.readBuffer = newBuffer;\n    }\n    let typeLength = 1;\n    const firstByte = this.readBuffer[0];\n    const prefix = firstByte >> 6;\n    if (prefix === 1) typeLength = 2;\n    else if (prefix === 2) typeLength = 4;\n    else if (prefix === 3) typeLength = 8;\n    const headerSize = typeLength + 2;\n    while (this.readBuffer.length < headerSize) {\n      const { value, done } = await this.reader.read();\n      if (done) {\n        throw new Error("Control stream closed unexpectedly");\n      }\n      const newBuffer = new Uint8Array(this.readBuffer.length + value.length);\n      newBuffer.set(this.readBuffer);\n      newBuffer.set(value, this.readBuffer.length);\n      this.readBuffer = newBuffer;\n    }\n    let type;\n    if (typeLength === 1) {\n      type = firstByte;\n    } else if (typeLength === 2) {\n      type = (firstByte & 63) << 8 | this.readBuffer[1];\n    } else {\n      throw new Error(`Unsupported varint length: ${typeLength}`);\n    }\n    const lengthOffset = typeLength;\n    const contentLength = this.readBuffer[lengthOffset] << 8 | this.readBuffer[lengthOffset + 1];\n    this.log("readFramedMessage: type=0x" + type.toString(16) + ", contentLength=" + contentLength);\n    const totalSize = headerSize + contentLength;\n    while (this.readBuffer.length < totalSize) {\n      const { value, done } = await this.reader.read();\n      if (done) {\n        throw new Error("Control stream closed unexpectedly");\n      }\n      const newBuffer = new Uint8Array(this.readBuffer.length + value.length);\n      newBuffer.set(this.readBuffer);\n      newBuffer.set(value, this.readBuffer.length);\n      this.readBuffer = newBuffer;\n    }\n    const content = this.readBuffer.slice(headerSize, totalSize);\n    this.readBuffer = this.readBuffer.slice(totalSize);\n    this.log("readFramedMessage: returning type=0x" + type.toString(16) + ", content.length=" + content.length);\n    return { type, content };\n  }\n}\nclass JitterBufferCore {\n  // ---- immutable geometry (frames) ----\n  capacity;\n  floor;\n  w;\n  nc;\n  sampleRate;\n  lMin;\n  lMax;\n  hMin;\n  hMax;\n  // ---- immutable controller constants ----\n  windowReads;\n  widenThreshold;\n  widenStep;\n  narrowStep;\n  // ---- storage: capacity * nc interleaved floats ----\n  data;\n  // ---- SPSC heads — cumulative (never wrap). Index via (pos % capacity) * nc. ----\n  // writePos crosses the writer→reader thread boundary in SAB mode, so it is\n  // backed by an atomic cell when `sharedWritePos` is given; otherwise a plain\n  // number. The Atomics.store/load act as the release/acquire fence pairing the\n  // ring writes (writer) with the ring reads (reader) — the Go SPSC contract.\n  // readPos is reader-owned (the writer never touches it), so it stays plain.\n  _writePos = 0;\n  wpCell = null;\n  get writePos() {\n    return this.wpCell ? Number(Atomics.load(this.wpCell, 0)) : this._writePos;\n  }\n  set writePos(v) {\n    if (this.wpCell) Atomics.store(this.wpCell, 0, BigInt(v));\n    else this._writePos = v;\n  }\n  readPos = 0;\n  // ---- live adaptive window ----\n  currentL;\n  currentH;\n  // ---- tumbling-window controller state (reader-owned) ----\n  insertCount = 0;\n  dropCount = 0;\n  readsThisWindow = 0;\n  // ---- last completed window\'s counts, for observation ----\n  lastWinInserts = 0;\n  lastWinDrops = 0;\n  // ---- cumulative stats ----\n  underruns = 0;\n  overruns = 0;\n  laps = 0;\n  samplesDropped = 0;\n  samplesInserted = 0;\n  constructor(cfg = {}) {\n    const sr = cfg.sampleRate ?? 48e3;\n    const nc = cfg.numChannels ?? 1;\n    const f = (ms) => Math.floor(sr * ms / 1e3);\n    const W = cfg.writerFrame ?? f(20);\n    const R = cfg.readerFrame ?? f(5);\n    const S = cfg.safety ?? f(1);\n    const lInit = cfg.lowInit ?? f(10);\n    const lMin = cfg.lowMin ?? f(7);\n    const lMax = cfg.lowMax ?? f(30);\n    const hInit = cfg.highInit ?? f(16);\n    const hMin = cfg.highMin ?? f(14);\n    const hMax = cfg.highMax ?? f(30);\n    if (R <= 0 || W <= 0) {\n      throw new Error("JitterBufferCore: readerFrame and writerFrame must be > 0");\n    }\n    if (S < 0) {\n      throw new Error("JitterBufferCore: safety must be >= 0");\n    }\n    if (!(0 <= lMin && lMin <= lInit && lInit <= lMax)) {\n      throw new Error("JitterBufferCore: require 0 <= lowMin <= lowInit <= lowMax");\n    }\n    if (!(0 <= hMin && hMin <= hInit && hInit <= hMax)) {\n      throw new Error("JitterBufferCore: require 0 <= highMin <= highInit <= highMax");\n    }\n    const floor = R + S;\n    const maxWR = Math.max(W, R);\n    const bandTopMax = R + S + lMax + 2 * W + hMax;\n    const capacity = 2 * bandTopMax + 2 * maxWR;\n    this.capacity = capacity;\n    this.floor = floor;\n    this.w = W;\n    this.nc = nc;\n    this.sampleRate = sr;\n    this.lMin = lMin;\n    this.lMax = lMax;\n    this.hMin = hMin;\n    this.hMax = hMax;\n    this.windowReads = cfg.windowReads ?? 750;\n    this.widenThreshold = cfg.widenThreshold ?? 5;\n    this.widenStep = cfg.widenStep ?? f(2);\n    this.narrowStep = cfg.narrowStep ?? Math.floor(sr * 500 / 1e6);\n    if (cfg.sharedStorage) {\n      if (cfg.sharedStorage.length !== capacity * nc) {\n        throw new Error(\n          `JitterBufferCore: sharedStorage length ${cfg.sharedStorage.length} != capacity*nc ${capacity * nc} (size it with computeJitterCapacity using the same config)`\n        );\n      }\n      this.data = cfg.sharedStorage;\n    } else {\n      this.data = new Float32Array(capacity * nc);\n    }\n    if (cfg.sharedWritePos) {\n      if (cfg.sharedWritePos.length < 1) {\n        throw new Error("JitterBufferCore: sharedWritePos must be a length-1 BigInt64Array");\n      }\n      this.wpCell = cfg.sharedWritePos;\n    }\n    this.currentL = lInit;\n    this.currentH = hInit;\n  }\n  /**\n   * Derive the operating thresholds from the (loaded-once) window allowances\n   * `l`, `h` plus the immutable floor and writer frame. Pure function; all\n   * branches of {@link read} use one consistent snapshot.\n   */\n  levels(l, h) {\n    const t = this.floor + l;\n    return { t, snapTarget: t + this.w, dropLine: t + this.w + h, overrunAt: t + 2 * this.w + h };\n  }\n  /**\n   * Copy `src` (interleaved, length a multiple of `nc`) into the ring. Never\n   * blocks. Writes longer than capacity are clipped to the most-recent\n   * `capacity` frames.\n   */\n  write(src) {\n    let nFrames = Math.floor(src.length / this.nc);\n    if (nFrames === 0) return;\n    if (nFrames > this.capacity) {\n      const skip = nFrames - this.capacity;\n      src = src.subarray(skip * this.nc);\n      nFrames = this.capacity;\n    }\n    const wp = this.writePos;\n    this.writeToRing(src, wp, nFrames);\n    this.writePos = wp + nFrames;\n  }\n  /**\n   * Copy up to `dst.length` interleaved samples from the ring into `dst`.\n   * Returns true when audio was produced, false on silence. See design §4. The\n   * window allowances L and H are read exactly once at the top so every branch\n   * sees consistent geometry. No debounce: corrections fire on the first\n   * out-of-band read.\n   */\n  read(dst) {\n    const nc = this.nc;\n    const nFrames = Math.floor(dst.length / nc);\n    if (nFrames === 0) return true;\n    let wp = this.writePos;\n    let rp = this.readPos;\n    let fill = wp - rp;\n    const { snapTarget, dropLine, overrunAt } = this.levels(this.currentL, this.currentH);\n    if (rp === 0) {\n      if (fill < snapTarget) {\n        dst.fill(0);\n        this.adapt();\n        return false;\n      }\n      rp = wp - snapTarget;\n      this.readPos = rp;\n      fill = snapTarget;\n    }\n    if (fill >= this.capacity) {\n      rp = wp - snapTarget;\n      this.readPos = rp;\n      fill = snapTarget;\n      this.laps++;\n    } else if (fill > overrunAt) {\n      rp = wp - snapTarget;\n      this.readPos = rp;\n      fill = snapTarget;\n      this.overruns++;\n    }\n    if (fill < nFrames) {\n      dst.fill(0);\n      this.underruns++;\n      this.adapt();\n      return false;\n    }\n    let corr = 0;\n    if (fill > dropLine && fill >= nFrames + 1) {\n      corr = 1;\n    } else if (fill < this.floor && nFrames >= 2) {\n      corr = -1;\n    }\n    if (corr === 1) {\n      this.readFromRing(dst, rp, nFrames);\n      const skipBase = (rp + nFrames) % this.capacity * nc;\n      const dstBase = (nFrames - 1) * nc;\n      for (let ch = 0; ch < nc; ch++) {\n        const a = dst[dstBase + ch];\n        const b = this.data[skipBase + ch];\n        dst[dstBase + ch] = (a + b) * 0.5;\n      }\n      this.readPos = rp + nFrames + 1;\n      this.samplesDropped++;\n      this.dropCount++;\n    } else if (corr === -1) {\n      const realFrames = nFrames - 1;\n      this.readFromRing(dst.subarray(0, realFrames * nc), rp, realFrames);\n      const peekBase = (rp + realFrames) % this.capacity * nc;\n      const lastBase = (realFrames - 1) * nc;\n      const tailBase = realFrames * nc;\n      for (let ch = 0; ch < nc; ch++) {\n        const a = dst[lastBase + ch];\n        const b = this.data[peekBase + ch];\n        dst[tailBase + ch] = (a + b) * 0.5;\n      }\n      this.readPos = rp + realFrames;\n      this.samplesInserted++;\n      this.insertCount++;\n    } else {\n      this.readFromRing(dst, rp, nFrames);\n      this.readPos = rp + nFrames;\n    }\n    this.adapt();\n    return true;\n  }\n  /**\n   * Tick the tumbling window once per Read and, every `windowReads`, run the\n   * decision off the accumulated correction counts, then reset them. No\n   * wall-clock: the window is a read count, the inputs are correction counts.\n   */\n  adapt() {\n    if (this.windowReads <= 0) return;\n    this.readsThisWindow++;\n    if (this.readsThisWindow < this.windowReads) return;\n    this.lastWinInserts = this.insertCount;\n    this.lastWinDrops = this.dropCount;\n    this.decide(this.insertCount, this.dropCount);\n    this.insertCount = 0;\n    this.dropCount = 0;\n    this.readsThisWindow = 0;\n  }\n  /**\n   * Move the window allowances from one window\'s correction counts (design §6):\n   *   - both sides breached (min ≥ threshold) ⇒ jitter ⇒ widen the breaching\n   *     side(s) by widenStep, capped at max (eager);\n   *   - otherwise a fully-calm side (count 0) narrows by narrowStep, floored at\n   *     min; a side that is lit but un-gated is drift — left to the ±1 corrector.\n   * `narrowStep < widenStep` makes it eager-up / reluctant-down — the stability\n   * guarantee.\n   */\n  decide(insertCount, dropCount) {\n    if (Math.min(insertCount, dropCount) >= this.widenThreshold) {\n      if (insertCount >= this.widenThreshold && this.currentL < this.lMax) {\n        this.currentL = Math.min(this.currentL + this.widenStep, this.lMax);\n      }\n      if (dropCount >= this.widenThreshold && this.currentH < this.hMax) {\n        this.currentH = Math.min(this.currentH + this.widenStep, this.hMax);\n      }\n      return;\n    }\n    if (insertCount === 0 && this.currentL > this.lMin) {\n      this.currentL = Math.max(this.currentL - this.narrowStep, this.lMin);\n    }\n    if (dropCount === 0 && this.currentH > this.hMin) {\n      this.currentH = Math.max(this.currentH - this.narrowStep, this.hMin);\n    }\n  }\n  /** Current fill in frames. */\n  fillFrames() {\n    return this.writePos - this.readPos;\n  }\n  /** Fill in interleaved floats (matching the Go ICircularBuffer convention). */\n  getBehind() {\n    return this.fillFrames() * this.nc;\n  }\n  /** Rich snapshot for tuning/observability. */\n  snapshot() {\n    const fill = this.fillFrames();\n    const l = this.currentL;\n    const h = this.currentH;\n    const srMs = this.sampleRate / 1e3;\n    const { dropLine } = this.levels(l, h);\n    let zone = 0;\n    if (fill < this.floor) zone = -1;\n    else if (fill > dropLine) zone = 1;\n    return {\n      fillFrames: fill,\n      fillMs: fill / srMs,\n      floorFrames: this.floor,\n      lowAllowanceFrames: l,\n      lowAllowanceMs: l / srMs,\n      highAllowanceFrames: h,\n      highAllowanceMs: h / srMs,\n      targetFrames: this.floor + l,\n      started: this.readPos > 0,\n      underruns: this.underruns,\n      overruns: this.overruns,\n      laps: this.laps,\n      samplesDropped: this.samplesDropped,\n      samplesInserted: this.samplesInserted,\n      lastWindowInserts: this.lastWinInserts,\n      lastWindowDrops: this.lastWinDrops,\n      zone\n    };\n  }\n  /**\n   * Copy `nFrames` frames from `src` into the ring at frame position `wp`,\n   * handling wraparound. Caller guarantees `nFrames <= capacity`.\n   */\n  writeToRing(src, wp, nFrames) {\n    const cap = this.capacity;\n    const nc = this.nc;\n    const startFrame = wp % cap;\n    if (startFrame + nFrames <= cap) {\n      this.data.set(src.subarray(0, nFrames * nc), startFrame * nc);\n      return;\n    }\n    const first = cap - startFrame;\n    this.data.set(src.subarray(0, first * nc), startFrame * nc);\n    this.data.set(src.subarray(first * nc, nFrames * nc), 0);\n  }\n  /**\n   * Copy `nFrames` frames from the ring at frame position `rp` into `dst`,\n   * handling wraparound. Caller guarantees `nFrames <= capacity`.\n   */\n  readFromRing(dst, rp, nFrames) {\n    const cap = this.capacity;\n    const nc = this.nc;\n    const startFrame = rp % cap;\n    if (startFrame + nFrames <= cap) {\n      dst.set(this.data.subarray(startFrame * nc, (startFrame + nFrames) * nc));\n      return;\n    }\n    const first = cap - startFrame;\n    dst.set(this.data.subarray(startFrame * nc, cap * nc), 0);\n    dst.set(this.data.subarray(0, (nFrames - first) * nc), first * nc);\n  }\n}\nclass CaptureRing {\n  nc;\n  capacity;\n  data;\n  wpCell;\n  rpCell;\n  /** Count of quanta dropped because the consumer stalled past capacity (§5.1). */\n  overflows;\n  constructor(cfg) {\n    const nc = cfg.numChannels ?? 1;\n    const capacity = cfg.capacityFrames ?? 2048;\n    if (nc < 1) {\n      throw new Error("CaptureRing: numChannels must be >= 1");\n    }\n    if (capacity < 1) {\n      throw new Error("CaptureRing: capacityFrames must be >= 1");\n    }\n    if (cfg.sharedStorage.length !== capacity * nc) {\n      throw new Error(\n        `CaptureRing: sharedStorage length ${cfg.sharedStorage.length} != capacity*nc ${capacity * nc} (allocate capacityFrames * numChannels floats)`\n      );\n    }\n    if (cfg.sharedWritePos.length < 1 || cfg.sharedReadPos.length < 1) {\n      throw new Error("CaptureRing: sharedWritePos/sharedReadPos must be length-1 BigInt64Arrays");\n    }\n    this.nc = nc;\n    this.capacity = capacity;\n    this.data = cfg.sharedStorage;\n    this.wpCell = cfg.sharedWritePos;\n    this.rpCell = cfg.sharedReadPos;\n    this.overflows = 0;\n  }\n  /** Cumulative producer position (frames), acquire-loaded. */\n  get writePos() {\n    return Number(Atomics.load(this.wpCell, 0));\n  }\n  /** Cumulative consumer position (frames), acquire-loaded. */\n  get readPos() {\n    return Number(Atomics.load(this.rpCell, 0));\n  }\n  /** Current fill in frames (unambiguous: positions are cumulative). */\n  fillFrames() {\n    return this.writePos - this.readPos;\n  }\n  /**\n   * PRODUCER (capture worklet). Interleave one render quantum of planar channels into\n   * the ring. `planar[ch]` is a Float32Array of `nFrames` samples (Web Audio is\n   * planar; all channels equal length). Channels beyond `planar.length` reuse the last\n   * (mono→stereo dup); channels beyond `nc` are ignored. If the consumer has stalled\n   * and the quantum would not fit, the WHOLE quantum is dropped and `overflows` is\n   * bumped — never blocks, never overwrites unread data (§5.1). Returns true if written.\n   */\n  write(planar) {\n    if (!planar || planar.length === 0 || !planar[0]) {\n      return false;\n    }\n    const nc = this.nc;\n    const cap = this.capacity;\n    const nFrames = planar[0].length;\n    if (nFrames === 0) {\n      return false;\n    }\n    const wp = this.writePos;\n    const rp = this.readPos;\n    if (wp - rp + nFrames > cap) {\n      this.overflows++;\n      return false;\n    }\n    const data = this.data;\n    const startFrame = wp % cap;\n    for (let i = 0; i < nFrames; i++) {\n      const ringBase = (startFrame + i) % cap * nc;\n      for (let ch = 0; ch < nc; ch++) {\n        const src = planar[ch < planar.length ? ch : planar.length - 1];\n        data[ringBase + ch] = src[i];\n      }\n    }\n    Atomics.store(this.wpCell, 0, BigInt(wp + nFrames));\n    return true;\n  }\n  /**\n   * CONSUMER (MOQ worker). Copy all whole frames currently available into `dst`\n   * (interleaved), up to `dst`\'s capacity, then free that space. Returns the number of\n   * interleaved SAMPLES written (`frames * nc`), or 0 if nothing was ready. Drain to\n   * empty: leaves only what the producer hasn\'t yet published.\n   */\n  drain(dst) {\n    const nc = this.nc;\n    const cap = this.capacity;\n    const wp = this.writePos;\n    const rp = this.readPos;\n    const avail = wp - rp;\n    const room = Math.floor(dst.length / nc);\n    const nFrames = avail < room ? avail : room;\n    if (nFrames <= 0) {\n      return 0;\n    }\n    const data = this.data;\n    const startFrame = rp % cap;\n    if (startFrame + nFrames <= cap) {\n      dst.set(data.subarray(startFrame * nc, (startFrame + nFrames) * nc));\n    } else {\n      const first = cap - startFrame;\n      dst.set(data.subarray(startFrame * nc, cap * nc), 0);\n      dst.set(data.subarray(0, (nFrames - first) * nc), first * nc);\n    }\n    Atomics.store(this.rpCell, 0, BigInt(rp + nFrames));\n    return nFrames * nc;\n  }\n}\nclass CaptureEncoder {\n  ring;\n  trackAlias;\n  sampleRate;\n  nc;\n  priority;\n  encoder;\n  send;\n  // Reused scratch — the zero-alloc hot path (design §6/§8).\n  pcmScratch;\n  // drained interleaved PCM\n  bytesScratch;\n  // Opus bytes (encoder output copyTo)\n  dgPool;\n  // framed OBJECT_DATAGRAMs, round-robin (see config)\n  dgPoolIdx;\n  // Sequencing (lifted from AudioTrackPublisher): input timestamp is a running sample\n  // count; objectId is a monotonic counter; groupId is the chunk timestamp in ms.\n  samplesSent;\n  objectSeq;\n  // Observability.\n  encodedBatches;\n  sentDatagrams;\n  droppedOversize;\n  constructor(cfg) {\n    this.ring = cfg.ring;\n    this.trackAlias = cfg.trackAlias;\n    this.sampleRate = cfg.sampleRate;\n    this.nc = cfg.numChannels;\n    this.priority = cfg.publisherPriority ?? 0;\n    this.send = cfg.send;\n    const maxPayload = cfg.maxPayloadBytes ?? 4e3;\n    this.pcmScratch = new Float32Array(cfg.ring.capacity * this.nc);\n    this.bytesScratch = new Uint8Array(maxPayload);\n    const poolSize = cfg.datagramPoolSize ?? 8;\n    this.dgPool = [];\n    for (let i = 0; i < poolSize; i++) {\n      this.dgPool.push(new Uint8Array(maxObjectDatagramSize(maxPayload)));\n    }\n    this.dgPoolIdx = 0;\n    this.samplesSent = 0;\n    this.objectSeq = 0n;\n    this.encodedBatches = 0;\n    this.sentDatagrams = 0;\n    this.droppedOversize = 0;\n    this.encoder = cfg.makeEncoder((chunk) => this.handleChunk(chunk));\n  }\n  /**\n   * Drain all PCM currently in the ring and feed it to the encoder as one AudioData.\n   * Called on each wake (design §6.1). Returns the interleaved sample count encoded (0\n   * if the ring was empty). Opus does the 240-frame packetization internally.\n   */\n  pump() {\n    const n = this.ring.drain(this.pcmScratch);\n    if (n <= 0) {\n      return 0;\n    }\n    const frames = n / this.nc;\n    const timestampUs = Math.round(this.samplesSent / this.sampleRate * 1e6);\n    this.encoder.encode(this.pcmScratch.subarray(0, n), frames, timestampUs);\n    this.samplesSent += frames;\n    this.encodedBatches++;\n    return n;\n  }\n  /** Encoder output: frame the Opus packet into reused scratch and send it. No alloc. */\n  handleChunk(chunk) {\n    const size = chunk.byteLength;\n    if (size === 0) {\n      return;\n    }\n    if (size > this.bytesScratch.length) {\n      this.droppedOversize++;\n      return;\n    }\n    chunk.copyTo(this.bytesScratch);\n    const groupId = BigInt(Math.floor(chunk.timestamp / 1e3));\n    const objectId = this.objectSeq++;\n    const dg = this.dgPool[this.dgPoolIdx];\n    this.dgPoolIdx = (this.dgPoolIdx + 1) % this.dgPool.length;\n    const len = encodeObjectDatagramInto(\n      dg,\n      this.trackAlias,\n      groupId,\n      objectId,\n      this.priority,\n      this.bytesScratch.subarray(0, size)\n    );\n    this.send(dg.subarray(0, len));\n    this.sentDatagrams++;\n  }\n  /** Flush any buffered Opus packet (fires `handleChunk`) and close the encoder. */\n  async stop() {\n    try {\n      await this.encoder.flush();\n    } catch {\n    }\n    this.encoder.close();\n  }\n}\nconst ctx = self;\nlet connection = null;\nlet session = null;\nlet jbuf = null;\nlet decoder = null;\nlet audioTrackAlias;\nlet reading = false;\nlet decodePcm = new Float32Array(0);\nlet decFrames = 0;\nlet decRateStart = 0;\nfunction newGapStats() {\n  return { count: 0, clumped: 0, tight: 0, cadence: 0, gap: 0, last: 0 };\n}\nfunction recordGap(s, now) {\n  if (s.last > 0) {\n    const g = now - s.last;\n    if (g < 1) s.clumped++;\n    else if (g < 4) s.tight++;\n    else if (g <= 6) s.cadence++;\n    else s.gap++;\n  }\n  s.last = now;\n  s.count++;\n}\nfunction resetGapBuckets(s) {\n  s.count = 0;\n  s.clumped = 0;\n  s.tight = 0;\n  s.cadence = 0;\n  s.gap = 0;\n}\nconst dgGaps = newGapStats();\nconst outGaps = newGapStats();\nlet outFmin = Number.MAX_SAFE_INTEGER;\nlet outFmax = 0;\nlet decTotal = 0;\nlet decTotalStart = 0;\nlet decTotalDone = false;\nlet captureEncoder = null;\nlet captureSignal = null;\nlet captureRunning = false;\nfunction emit(evt) {\n  ctx.postMessage(evt);\n}\nfunction configureDecoder(cfg) {\n  if (decoder) {\n    try {\n      decoder.close();\n    } catch {\n    }\n  }\n  decoder = new AudioDecoder({\n    output: (audioData) => {\n      try {\n        const frames = audioData.numberOfFrames;\n        const channels = audioData.numberOfChannels;\n        const need = frames * channels;\n        if (decodePcm.length < need) decodePcm = new Float32Array(need);\n        const pcm = decodePcm.subarray(0, need);\n        audioData.copyTo(pcm, { planeIndex: 0, format: "f32" });\n        jbuf?.write(pcm);\n        decFrames += frames;\n        const tNow = performance.now();\n        recordGap(outGaps, tNow);\n        if (frames < outFmin) outFmin = frames;\n        if (frames > outFmax) outFmax = frames;\n        if (decRateStart === 0) decRateStart = tNow;\n        const elapsed = tNow - decRateStart;\n        if (elapsed >= 2e3) {\n          const fps = decFrames / elapsed * 1e3;\n          emit({\n            kind: "evt",\n            type: "notice",\n            event: "decode-rate",\n            detail: `${fps.toFixed(1)} frames/wall-sec (${decFrames} frames / ${(elapsed / 1e3).toFixed(2)}s)`\n          });\n          const fmt = (s) => `n=${s.count} <1:${s.clumped} 1-4:${s.tight} ~5:${s.cadence} >6:${s.gap}`;\n          emit({\n            kind: "evt",\n            type: "notice",\n            event: "burst",\n            detail: `dg[${fmt(dgGaps)}] out[${fmt(outGaps)}] fpo=${outFmin === Number.MAX_SAFE_INTEGER ? 0 : outFmin}-${outFmax}`\n          });\n          decFrames = 0;\n          decRateStart = tNow;\n          resetGapBuckets(dgGaps);\n          resetGapBuckets(outGaps);\n          outFmin = Number.MAX_SAFE_INTEGER;\n          outFmax = 0;\n        }\n        decTotal += frames;\n        if (decTotalStart === 0) decTotalStart = tNow;\n        if (!decTotalDone && tNow - decTotalStart >= 6e4) {\n          const el = (tNow - decTotalStart) / 1e3;\n          const expected = 48e3 * el;\n          const ppm = (decTotal / expected - 1) * 1e6;\n          emit({\n            kind: "evt",\n            type: "notice",\n            event: "clocktest",\n            detail: `client decode wrote ${decTotal} frames in ${el.toFixed(2)}s; expected ${expected.toFixed(0)}; drift ${ppm >= 0 ? "+" : ""}${ppm.toFixed(1)} ppm`\n          });\n          decTotalDone = true;\n        }\n      } catch (e) {\n        emit({ kind: "evt", type: "notice", event: "decode-error", detail: String(e) });\n      } finally {\n        audioData.close();\n      }\n    },\n    error: (e) => emit({ kind: "evt", type: "notice", event: "decode-error", detail: String(e) })\n  });\n  decoder.configure({\n    codec: cfg.codec,\n    sampleRate: cfg.sampleRate,\n    numberOfChannels: cfg.numberOfChannels,\n    optimizeForLatency: true\n  });\n}\nfunction startReadLoop() {\n  if (reading || !connection) return;\n  const datagrams = connection.getDatagrams();\n  const reader = datagrams.readable.getReader();\n  reading = true;\n  (async () => {\n    try {\n      while (reading) {\n        const { value, done } = await reader.read();\n        if (done) {\n          emit({ kind: "evt", type: "notice", event: "reader-done" });\n          break;\n        }\n        if (!value) continue;\n        let parsed;\n        try {\n          parsed = parseObjectDatagram(value);\n        } catch {\n          continue;\n        }\n        if (audioTrackAlias !== void 0 && parsed.trackAlias === audioTrackAlias && jbuf && decoder) {\n          recordGap(dgGaps, performance.now());\n          try {\n            decoder.decode(\n              new EncodedAudioChunk({\n                type: "key",\n                // Opus frames are always key frames\n                timestamp: Number(parsed.groupId) * 1e3,\n                data: parsed.payload\n              })\n            );\n          } catch (e) {\n            emit({ kind: "evt", type: "notice", event: "decode-error", detail: String(e) });\n          }\n        } else {\n          const copy = parsed.payload.slice();\n          ctx.postMessage(\n            {\n              kind: "evt",\n              type: "datagram",\n              trackAlias: parsed.trackAlias,\n              payload: copy,\n              groupId: parsed.groupId,\n              objectId: parsed.objectId\n            },\n            // transfer the copy\'s buffer\n            [copy.buffer]\n          );\n        }\n      }\n    } catch (e) {\n      if (reading) emit({ kind: "evt", type: "notice", event: "reader-error", detail: String(e) });\n    } finally {\n      reading = false;\n    }\n  })();\n}\nfunction startCaptureLoop() {\n  if (captureRunning || !captureEncoder || !captureSignal) return;\n  captureRunning = true;\n  const signal = captureSignal;\n  const enc = captureEncoder;\n  const waitAsync = Atomics.waitAsync;\n  void (async () => {\n    let seen = Atomics.load(signal, 0);\n    while (captureRunning) {\n      enc.pump();\n      if (waitAsync) {\n        const r = waitAsync(signal, 0, seen);\n        if (r.async) await r.value;\n      } else {\n        await new Promise((res) => setTimeout(res, 2));\n      }\n      seen = Atomics.load(signal, 0);\n    }\n  })();\n}\nasync function stopCapture() {\n  captureRunning = false;\n  if (captureSignal) {\n    Atomics.add(captureSignal, 0, 1);\n    Atomics.notify(captureSignal, 0, 1);\n  }\n  if (captureEncoder) {\n    await captureEncoder.stop();\n    captureEncoder = null;\n  }\n  captureSignal = null;\n}\nasync function handle(method, args) {\n  switch (method) {\n    case "connect": {\n      const a = args;\n      connection = new MoqConnection(a.serverUrl);\n      connection.setHandlers({\n        onStateChange: (state, error) => emit({ kind: "evt", type: "connectionState", state: String(state), detail: error?.message })\n      });\n      await connection.connect(a.options);\n      session = new MoqSession(connection);\n      session.onIncomingSubscribe(\n        (namespace, trackAlias) => emit({ kind: "evt", type: "incomingSubscribe", namespace, trackAlias })\n      );\n      return;\n    }\n    case "initSession": {\n      const a = args;\n      if (!session) throw new Error("initSession before connect");\n      await session.initialize(a.role, void 0, a.maxSubscribeId);\n      startReadLoop();\n      return;\n    }\n    case "subscribe": {\n      const a = args;\n      if (!session) throw new Error("subscribe before connect");\n      const subscribeId = await session.subscribe(a.namespace, a.trackName, a.authorization, a.resumeOpId);\n      return { subscribeId, trackAlias: session.getTrackAlias(subscribeId) };\n    }\n    case "announce": {\n      const a = args;\n      if (!session) throw new Error("announce before connect");\n      await session.announce(a.namespace, a.authorization);\n      return;\n    }\n    case "setAudioTrack": {\n      const a = args;\n      jbuf = new JitterBufferCore({\n        ...a.jbufConfig,\n        sharedStorage: a.sharedStorage,\n        sharedWritePos: a.sharedWritePos\n      });\n      configureDecoder(a.decoderConfig);\n      audioTrackAlias = a.trackAlias;\n      return;\n    }\n    case "sendDatagram": {\n      const a = args;\n      if (!connection) throw new Error("sendDatagram before connect");\n      await connection.sendDatagram(a.bytes);\n      return;\n    }\n    case "setCaptureTrack": {\n      const a = args;\n      if (!connection) throw new Error("setCaptureTrack before connect");\n      await stopCapture();\n      const conn = connection;\n      const ring = new CaptureRing({\n        numChannels: a.numChannels,\n        capacityFrames: a.capacityFrames,\n        sharedStorage: a.sharedStorage,\n        sharedWritePos: a.sharedWritePos,\n        sharedReadPos: a.sharedReadPos\n      });\n      const ec = a.encoderConfig;\n      captureEncoder = new CaptureEncoder({\n        ring,\n        trackAlias: a.trackAlias,\n        sampleRate: ec.sampleRate,\n        numChannels: ec.numberOfChannels,\n        publisherPriority: a.publisherPriority,\n        // Inject the real WebCodecs encoder + AudioData (kept out of CaptureEncoder so\n        // its logic stays unit-testable). The output callback drives framing + send.\n        makeEncoder: (onChunk) => {\n          const audioEncoder = new AudioEncoder({\n            output: (chunk) => onChunk(chunk),\n            error: (e) => emit({ kind: "evt", type: "notice", event: "encode-error", detail: String(e) })\n          });\n          audioEncoder.configure({\n            codec: ec.codec,\n            sampleRate: ec.sampleRate,\n            numberOfChannels: ec.numberOfChannels,\n            bitrate: ec.bitrate,\n            opus: { frameDuration: ec.frameDurationUs }\n          });\n          return {\n            encode: (samples, frames, timestampUs) => {\n              const audioData = new AudioData({\n                format: "f32",\n                sampleRate: ec.sampleRate,\n                numberOfFrames: frames,\n                numberOfChannels: ec.numberOfChannels,\n                timestamp: timestampUs,\n                // The view is the non-shared pcmScratch (offset 0); cast past the\n                // ArrayBufferLike-vs-ArrayBuffer strictness. AudioData copies it\n                // synchronously, so the scratch is reusable right after.\n                data: samples\n              });\n              try {\n                audioEncoder.encode(audioData);\n              } finally {\n                audioData.close();\n              }\n            },\n            flush: () => audioEncoder.flush(),\n            close: () => {\n              if (audioEncoder.state !== "closed") audioEncoder.close();\n            }\n          };\n        },\n        send: (bytes) => {\n          void conn.sendDatagram(bytes);\n        }\n      });\n      captureSignal = a.sharedSignal;\n      startCaptureLoop();\n      return;\n    }\n    case "stopCapture": {\n      await stopCapture();\n      return;\n    }\n    case "startMessageLoop": {\n      if (!session) throw new Error("startMessageLoop before connect");\n      session.startMessageLoop();\n      return;\n    }\n    case "disconnect": {\n      reading = false;\n      await stopCapture();\n      if (decoder) {\n        try {\n          decoder.close();\n        } catch {\n        }\n        decoder = null;\n      }\n      if (session) {\n        await session.close();\n        session = null;\n      }\n      if (connection) {\n        connection.close();\n        connection = null;\n      }\n      jbuf = null;\n      audioTrackAlias = void 0;\n      return;\n    }\n    default: {\n      throw new Error(`unknown method: ${String(method)}`);\n    }\n  }\n}\nctx.onmessage = (e) => {\n  const msg = e.data;\n  if (!msg || msg.kind !== "req") return;\n  handle(msg.method, msg.args).then(\n    (result) => ctx.postMessage({ kind: "res", id: msg.id, ok: true, result }),\n    (err) => ctx.postMessage({ kind: "res", id: msg.id, ok: false, error: String(err) })\n  );\n};\n';
 const blob = typeof self !== "undefined" && self.Blob && new Blob(["URL.revokeObjectURL(import.meta.url);", jsContent], { type: "text/javascript;charset=utf-8" });
 function WorkerWrapper(options) {
   let objURL;
@@ -2259,14 +2186,28 @@ class StateTrackPublisher extends TrackPublisher {
 const PLAYOUT_TUNING = {
   safetyMs: 1,
   // S — floor pad above the underrun edge
-  lowInitMs: 5,
-  // warm-start L (server output is low-jitter MOQ datagrams)
-  lowMinMs: 2,
-  // baseline late cushion
+  // Deepened 2026-06-10 to absorb the browser reader-burst sawtooth. Measured: the
+  // AudioWorklet consumes in ~device-buffer clumps (~13 ms swing; outputLatency 37 ms)
+  // while the worker feeds smoothly at 5 ms, so `fill` sawtooths ~13 ms. The operating
+  // band floor→dropLine (= L + W + H) must exceed that, and the MINIMUMS must hold it
+  // there: the controller narrows on one-sided drops, and a reader-burst looks exactly
+  // like one-sided drops, so without high minimums it shrinks the band into the sawtooth.
+  // Retuned 2026-06-10 (robustness > latency): the controller narrows to the MINIMUMS
+  // under a reader-burst (one-sided drops), so lowMin/highMin ARE the steady-state
+  // operating point and must hold the WORST observed swing (~19 ms), not the median
+  // (~12 ms). Inits govern the warm-up window before adaptation (cures early crackle).
+  lowInitMs: 10,
+  // warm-start L — keeps the sawtooth trough off the floor during warm-up
+  lowMinMs: 7,
+  // late-cushion floor (steady-state min)
   lowMaxMs: 30,
   // latency ceiling
-  highMaxMultiple: 3,
-  // H_max = 3·W
+  highInitMs: 16,
+  // warm-start H — headroom for the reader-burst peak + warm-up transients
+  highMinMs: 14,
+  // H floor (steady-state min) — sized for the worst reader-burst swing
+  highMaxMs: 30,
+  // H ceiling — headroom for deeper-buffered output devices
   windowReads: 750,
   // N — 2.0s at the 2.667ms worklet cadence (Go uses 400 = 2.0s at 5ms)
   widenThreshold: 5,
@@ -2284,7 +2225,7 @@ function computeJitterCapacity(cfg = {}) {
   const R = cfg.readerFrame ?? f(5);
   const S = cfg.safety ?? f(1);
   const lMax = cfg.lowMax ?? f(30);
-  const hMax = cfg.highMax ?? 3 * W;
+  const hMax = cfg.highMax ?? f(30);
   const maxWR = Math.max(W, R);
   const bandTopMax = R + S + lMax + 2 * W + hMax;
   return { capacity: 2 * bandTopMax + 2 * maxWR, nc };
@@ -2346,12 +2287,12 @@ class JitterBufferCore {
     const W = cfg.writerFrame ?? f(20);
     const R = cfg.readerFrame ?? f(5);
     const S = cfg.safety ?? f(1);
-    const lInit = cfg.lowInit ?? f(5);
-    const lMin = cfg.lowMin ?? f(2);
+    const lInit = cfg.lowInit ?? f(10);
+    const lMin = cfg.lowMin ?? f(7);
     const lMax = cfg.lowMax ?? f(30);
-    const hInit = cfg.highInit ?? W;
-    const hMin = cfg.highMin ?? W;
-    const hMax = cfg.highMax ?? 3 * W;
+    const hInit = cfg.highInit ?? f(16);
+    const hMin = cfg.highMin ?? f(14);
+    const hMax = cfg.highMax ?? f(30);
     if (R <= 0 || W <= 0) {
       throw new Error("JitterBufferCore: readerFrame and writerFrame must be > 0");
     }
@@ -2630,6 +2571,10 @@ class PlayoutRingProcessor extends AudioWorkletProcessor {
     this.nc = this.core.nc;
     this.statsEvery = opts.statsEvery || 94;
     this.readsSinceStats = 0;
+    // CLOCKTEST: true fill min/max across the stats window (every read, not the
+    // 250ms point-sample) — reveals the real sawtooth amplitude from reader-burst.
+    this.winFillMin = 1e9;
+    this.winFillMax = 0;
     this.scratch = new Float32Array(128 * this.nc);
     this.pcmPort = null;
     // WRITER inputs arrive on this.port:
@@ -2663,6 +2608,9 @@ class PlayoutRingProcessor extends AudioWorkletProcessor {
     const block = this.scratch.subarray(0, need);
     // core.read zeroes the block on startup/underrun, so silence falls through.
     this.core.read(block);
+    const fill = this.core.fillFrames();
+    if (fill < this.winFillMin) this.winFillMin = fill;
+    if (fill > this.winFillMax) this.winFillMax = fill;
     for (let ch = 0; ch < out.length; ch++) {
       const dst = out[ch];
       const srcCh = ch < nc ? ch : nc - 1;
@@ -2670,7 +2618,9 @@ class PlayoutRingProcessor extends AudioWorkletProcessor {
     }
     if (++this.readsSinceStats >= this.statsEvery) {
       this.readsSinceStats = 0;
-      this.port.postMessage({ type: 'stats', snapshot: this.core.snapshot() });
+      this.port.postMessage({ type: 'stats', snapshot: this.core.snapshot(), fillMin: this.winFillMin, fillMax: this.winFillMax });
+      this.winFillMin = 1e9;
+      this.winFillMax = 0;
     }
     return true;
   }
@@ -2720,6 +2670,13 @@ class AudioPlayer {
   decodeStats = { framesDecoded: 0, samplesPlayed: 0, decodeErrors: 0 };
   // Throttle counter for the [JBUF] observation log.
   jbufLogCount = 0;
+  // CLOCKTEST (playout-drift investigation): audio-output (DAC) clock vs wall clock.
+  // Compares audioContext.currentTime advance to performance.now() advance over ~60s —
+  // the decisive check for whether the audio device clock really differs from the
+  // CPU/server clock by the suspected ~290 ppm. Fires once.
+  clockT0Wall = 0;
+  clockT0Ctx = 0;
+  clockLogged = false;
   // Worker mode: when the receive Worker decodes (design §11), AudioPlayer's own
   // main-thread AudioDecoder is bypassed (decodeFrame becomes a no-op) and PCM
   // reaches the worklet ring via the SAB (or the pcmPort fallback).
@@ -2874,7 +2831,8 @@ class AudioPlayer {
         const msg = e.data;
         if (msg && msg.type === "stats") {
           this.lastSnapshot = msg.snapshot;
-          this.logJitter(msg.snapshot);
+          this.logJitter(msg.snapshot, msg.fillMin, msg.fillMax);
+          this.clockProbe();
         }
       };
       this.gainNode = this.audioContext.createGain();
@@ -3032,11 +2990,44 @@ class AudioPlayer {
    * [JBUF] tuning line (design §10 / plan Phase 4). Gated by `debug`; throttled
    * to ~1/s (the worklet posts stats ~4/s). Filter devtools by "JBUF" during soak.
    */
-  logJitter(s) {
+  /**
+   * CLOCKTEST: compare the audio-output (DAC) clock to the wall clock. `currentTime`
+   * advances in the audio render domain; `performance.now()` in the CPU domain. Over
+   * ~60s, if the DAC is slower than the CPU/server clock, `currentTime` advances less →
+   * negative ppm — which is exactly what produces the drop-dominant ±1 splices. Fires
+   * once. Logged unconditionally (it's a deliberate diagnostic).
+   */
+  clockProbe() {
+    if (this.clockLogged || !this.audioContext) return;
+    const wall = performance.now();
+    const ctxMs = this.audioContext.currentTime * 1e3;
+    if (this.clockT0Wall === 0) {
+      this.clockT0Wall = wall;
+      this.clockT0Ctx = ctxMs;
+      const ctx = this.audioContext;
+      const base = (ctx.baseLatency ?? 0) * 1e3;
+      const out = (ctx.outputLatency ?? 0) * 1e3;
+      console.log(
+        `[CLOCKTEST] AudioContext baseLatency=${base.toFixed(2)}ms outputLatency=${out.toFixed(2)}ms sampleRate=${this.audioContext.sampleRate} (render-buffer ≈ fill-swing if reader-burst is the cause)`
+      );
+      return;
+    }
+    const dWall = wall - this.clockT0Wall;
+    if (dWall < 6e4) return;
+    const dCtx = ctxMs - this.clockT0Ctx;
+    const ppm = (dCtx / dWall - 1) * 1e6;
+    console.log(
+      `[CLOCKTEST] audio(DAC) clock vs wall: currentTime +${dCtx.toFixed(1)}ms vs performance.now +${dWall.toFixed(1)}ms over ~60s → DAC drift ${ppm >= 0 ? "+" : ""}${ppm.toFixed(1)} ppm (negative = DAC slower than CPU; that's the drop source)`
+    );
+    this.clockLogged = true;
+  }
+  logJitter(s, fillMin, fillMax) {
     if (!this.config.debug) return;
     if (this.jbufLogCount++ % 4 !== 0) return;
+    const srMs = this.config.sampleRate / 1e3;
+    const swing = fillMin !== void 0 && fillMax !== void 0 ? ` swing=${(fillMin / srMs).toFixed(1)}-${(fillMax / srMs).toFixed(1)}ms` : "";
     console.log(
-      `[JBUF] fill=${s.fillMs.toFixed(1)}ms L=${s.lowAllowanceMs.toFixed(1)} H=${s.highAllowanceMs.toFixed(1)} tgt=${s.targetFrames}fr zone=${s.zone} win=${s.lastWindowInserts}/${s.lastWindowDrops} und=${s.underruns} ovr=${s.overruns} lap=${s.laps} ins=${s.samplesInserted} drop=${s.samplesDropped}`
+      `[JBUF] fill=${s.fillMs.toFixed(1)}ms${swing} L=${s.lowAllowanceMs.toFixed(1)} H=${s.highAllowanceMs.toFixed(1)} tgt=${s.targetFrames}fr zone=${s.zone} win=${s.lastWindowInserts}/${s.lastWindowDrops} und=${s.underruns} ovr=${s.overruns} lap=${s.laps} ins=${s.samplesInserted} drop=${s.samplesDropped}`
     );
   }
   /**
@@ -3321,9 +3312,10 @@ class PanaudiaMoqClient {
   datagramRouter = new DatagramRouter();
   sender = null;
   state = ConnectionState.DISCONNECTED;
-  // Audio publishing
+  // Audio publishing — the capture worklet fills a SAB ring; the worker encodes/sends
+  // it (worker-capture-design.md). No main-thread track publisher for audio.
   audioPublisher = null;
-  audioTrackPublisher = null;
+  micStarted = false;
   // State publishing
   stateTrackPublisher = null;
   statePublishPending = false;
@@ -3740,31 +3732,46 @@ class PanaudiaMoqClient {
     if (!this.audioPublisher) {
       this.audioPublisher = new AudioPublisher({ ...config, debug: this.config.debug });
     }
-    if (!this.audioTrackPublisher) {
-      this.audioTrackPublisher = new AudioTrackPublisher({
-        trackAlias: this.audioInputTrackAlias,
-        publisherPriority: 0
-        // High priority for audio
-      });
-      this.audioTrackPublisher.attach(this.sender);
-    }
     await this.audioPublisher.initialize();
-    this.audioPublisher.onFrame((frame) => {
-      if (frame.data.length < 10) return;
-      if (this.audioTrackPublisher && this.state === ConnectionState.AUTHENTICATED) {
-        this.audioTrackPublisher.publishAudioFrame(frame.data, frame.timestamp).catch((error) => {
-          console.error("Failed to publish audio frame:", error);
-        });
-      }
-    });
-    this.audioTrackPublisher.startSession();
-    this.audioPublisher.start();
+    await this.audioPublisher.start();
+    this.micStarted = true;
+    this.startWorkerCapture();
     this.log("Microphone started");
+  }
+  /**
+   * (Re)start the worker's encode/send for the capture ring. Idempotent on the worker
+   * side (`setCaptureTrack` stops any prior capture first), so it is safe to call both
+   * when the mic starts and when the in/audio track alias is (re)assigned.
+   */
+  startWorkerCapture() {
+    if (!this.workerClient || !this.audioPublisher || !this.micStarted) return;
+    const handoff = this.audioPublisher.getCaptureHandoff();
+    if (!handoff) {
+      this.logWarn("mic capture needs cross-origin isolation (SAB) — not publishing on this page");
+      return;
+    }
+    void this.workerClient.call("setCaptureTrack", {
+      trackAlias: this.audioInputTrackAlias,
+      publisherPriority: 0,
+      // high priority for audio
+      encoderConfig: this.audioPublisher.getEncoderConfig(),
+      numChannels: handoff.numChannels,
+      capacityFrames: handoff.capacityFrames,
+      sharedStorage: handoff.sharedStorage,
+      sharedWritePos: handoff.sharedWritePos,
+      sharedReadPos: handoff.sharedReadPos,
+      sharedSignal: handoff.sharedSignal
+    });
+    this.log(`worker encoding mic → trackAlias=${this.audioInputTrackAlias} via SAB ring`);
   }
   /**
    * Stop capturing microphone audio
    */
   stopMicrophone() {
+    this.micStarted = false;
+    if (this.workerClient) {
+      void this.workerClient.call("stopCapture", {});
+    }
     if (this.audioPublisher) {
       this.audioPublisher.stop();
       this.log("Microphone stopped");
@@ -4035,13 +4042,7 @@ class PanaudiaMoqClient {
     if (!this.sender) return;
     if (nsPath.includes("in/audio")) {
       this.audioInputTrackAlias = trackAlias;
-      if (this.audioTrackPublisher) {
-        this.audioTrackPublisher.detach();
-        this.audioTrackPublisher = new AudioTrackPublisher({ trackAlias, publisherPriority: 0 });
-        this.audioTrackPublisher.attach(this.sender);
-        this.audioTrackPublisher.startSession();
-        this.log(`Recreated audioTrackPublisher with trackAlias=${trackAlias}`);
-      }
+      this.startWorkerCapture();
     }
     if (nsPath.includes("state/") && !nsPath.includes("out/state")) {
       this.stateTrackAlias = trackAlias;
@@ -4120,13 +4121,21 @@ class MoqTransportAdapter {
     this.pendingHandlers = [];
     await this.client.connect();
     const audio = config.audio;
-    await this.client.startMicrophone({
-      ...this.microphoneId ? { deviceId: this.microphoneId } : {},
-      ...audio?.echoCancellation !== void 0 ? { echoCancellation: audio.echoCancellation } : {},
-      ...audio?.noiseSuppression !== void 0 ? { noiseSuppression: audio.noiseSuppression } : {},
-      ...audio?.autoGainControl !== void 0 ? { autoGainControl: audio.autoGainControl } : {}
-    });
-    await this.client.startPlayback();
+    try {
+      await this.client.startMicrophone({
+        ...this.microphoneId ? { deviceId: this.microphoneId } : {},
+        ...audio?.echoCancellation !== void 0 ? { echoCancellation: audio.echoCancellation } : {},
+        ...audio?.noiseSuppression !== void 0 ? { noiseSuppression: audio.noiseSuppression } : {},
+        ...audio?.autoGainControl !== void 0 ? { autoGainControl: audio.autoGainControl } : {}
+      });
+    } catch (e) {
+      console.warn("[panaudia] startMicrophone failed; staying connected without mic:", e);
+    }
+    try {
+      await this.client.startPlayback();
+    } catch (e) {
+      console.warn("[panaudia] startPlayback failed; staying connected without playback:", e);
+    }
   }
   async disconnect() {
     if (this.client) {
@@ -4242,96 +4251,102 @@ class MoqTransportAdapter {
   }
 }
 export {
-  buildUnsubscribe as $,
+  buildClientSetup as $,
   AnnouncementError as A,
   BluetoothMicDefaultError as B,
-  CacheTopicSubscriber as C,
-  PanaudiaMoqClient as D,
+  CAPTURE_PROCESSOR_NAME as C,
+  MoqMessageType as D,
   EntitySubscriber as E,
-  PanaudiaTrackType as F,
-  ProtocolError as G,
-  StateTrackPublisher as H,
+  MoqRole as F,
+  MoqTransportAdapter as G,
+  PLAYOUT_TUNING as H,
   InvalidStateError as I,
   JitterBufferCore as J,
-  SubscriptionError as K,
-  TrackPublisher as L,
+  PanaudiaMoqClient as K,
+  PanaudiaTrackType as L,
   MoqClientError as M,
-  aframeToPanaudia as N,
-  ambisonicToWebglPosition as O,
+  ProtocolError as N,
+  StateTrackPublisher as O,
   PLAYOUT_PROCESSOR_NAME as P,
-  ambisonicToWebglRotation as Q,
-  babylonToPanaudia as R,
+  SubscriptionError as Q,
+  TrackPublisher as R,
   StateSubscriber as S,
   TimeoutError as T,
-  buildAnnounce as U,
-  buildClientSetup as V,
+  aframeToPanaudia as U,
+  ambisonicToWebglPosition as V,
   WebTransportNotSupportedError as W,
-  buildObjectDatagram as X,
-  buildPlayoutWorkletCode as Y,
-  buildSubscribe as Z,
-  buildUnannounce as _,
+  ambisonicToWebglRotation as X,
+  babylonToPanaudia as Y,
+  buildAnnounce as Z,
+  buildCaptureWorkletCode as _,
   AttributesSubscriber as a,
-  computeJitterCapacity as a0,
-  createPlayoutWorkletUrl as a1,
-  decodeBytes as a2,
-  decodeString as a3,
-  encodeBytes as a4,
-  encodeString as a5,
-  encodeVarint as a6,
-  generateTrackNamespace as a7,
-  getAudioCapabilities as a8,
-  getAudioPlaybackCapabilities as a9,
-  wrapError as aA,
-  getBestOpusMimeType as aa,
-  getMoqErrorMessage as ab,
-  getWebTransportSupport as ac,
-  isAudioPlaybackSupported as ad,
-  isOpusSupported as ae,
-  isWebTransportSupported as af,
-  panaudiaToAframe as ag,
-  panaudiaToBabylon as ah,
-  panaudiaToPixi as ai,
-  panaudiaToPlaycanvas as aj,
-  panaudiaToThreejs as ak,
-  panaudiaToUnity as al,
-  panaudiaToUnreal as am,
-  parseAnnounceError as an,
-  parseAnnounceOk as ao,
-  parseMessageType as ap,
-  parseServerSetup as aq,
-  parseSubscribeError as ar,
-  parseSubscribeOk as as,
-  pixiToPanaudia as at,
-  playcanvasToPanaudia as au,
-  threejsToPanaudia as av,
-  unityToPanaudia as aw,
-  unrealToPanaudia as ax,
-  webglToAmbisonicPosition as ay,
-  webglToAmbisonicRotation as az,
+  buildObjectDatagram as a0,
+  buildPlayoutWorkletCode as a1,
+  buildSubscribe as a2,
+  buildUnannounce as a3,
+  buildUnsubscribe as a4,
+  captureCapacityFrames as a5,
+  computeJitterCapacity as a6,
+  createCaptureWorkletUrl as a7,
+  createPlayoutWorkletUrl as a8,
+  decodeBytes as a9,
+  pixiToPanaudia as aA,
+  playcanvasToPanaudia as aB,
+  threejsToPanaudia as aC,
+  unityToPanaudia as aD,
+  unrealToPanaudia as aE,
+  webglToAmbisonicPosition as aF,
+  webglToAmbisonicRotation as aG,
+  wrapError as aH,
+  decodeString as aa,
+  encodeBytes as ab,
+  encodeString as ac,
+  encodeVarint as ad,
+  generateTrackNamespace as ae,
+  getAudioCapabilities as af,
+  getAudioPlaybackCapabilities as ag,
+  getBestOpusMimeType as ah,
+  getMoqErrorMessage as ai,
+  getWebTransportSupport as aj,
+  isAudioPlaybackSupported as ak,
+  isOpusSupported as al,
+  isWebTransportSupported as am,
+  panaudiaToAframe as an,
+  panaudiaToBabylon as ao,
+  panaudiaToPixi as ap,
+  panaudiaToPlaycanvas as aq,
+  panaudiaToThreejs as ar,
+  panaudiaToUnity as as,
+  panaudiaToUnreal as at,
+  parseAnnounceError as au,
+  parseAnnounceOk as av,
+  parseMessageType as aw,
+  parseServerSetup as ax,
+  parseSubscribeError as ay,
+  parseSubscribeOk as az,
   AudioDecoderNotSupportedError as b,
   AudioEncodingError as c,
   decodeVarint as d,
-  AudioNotSupportedError as e,
-  AudioPermissionError as f,
-  AudioPlayer as g,
-  AudioPlayerState as h,
-  AudioPublisher as i,
-  AudioPublisherState as j,
-  AudioTrackPublisher as k,
-  AuthenticationError as l,
-  ConnectionError as m,
-  ControlTrackPublisher as n,
-  JwtParseError as o,
+  encodeObjectDatagramInto as e,
+  AudioNotSupportedError as f,
+  AudioPermissionError as g,
+  AudioPlayer as h,
+  AudioPlayerState as i,
+  AudioPublisher as j,
+  AudioPublisherState as k,
+  AudioTrackPublisher as l,
+  maxObjectDatagramSize as m,
+  AuthenticationError as n,
+  CacheTopicSubscriber as o,
   parseObjectDatagram as p,
-  MOQ_TRANSPORT_VERSION as q,
-  MessageBuilder as r,
-  MoqConnection as s,
-  MoqErrorCode as t,
-  MoqFilterType as u,
-  MoqForwardingPreference as v,
-  MoqMessageType as w,
-  MoqRole as x,
-  MoqTransportAdapter as y,
-  PLAYOUT_TUNING as z
+  CaptureRing as q,
+  ConnectionError as r,
+  ControlTrackPublisher as s,
+  JwtParseError as t,
+  MOQ_TRANSPORT_VERSION as u,
+  MessageBuilder as v,
+  MoqConnection as w,
+  MoqErrorCode as x,
+  MoqFilterType as y,
+  MoqForwardingPreference as z
 };
-//# sourceMappingURL=moq-transport-adapter.js.map

@@ -6,6 +6,15 @@ export interface WorkerDecoderConfig {
     sampleRate: number;
     numberOfChannels: number;
 }
+/** Opus encoder config the worker hands to WebCodecs AudioEncoder (mic send path). */
+export interface WorkerEncoderConfig {
+    codec: string;
+    sampleRate: number;
+    numberOfChannels: number;
+    bitrate: number;
+    /** Opus frame duration in microseconds (e.g. 5000 = 5 ms). */
+    frameDurationUs: number;
+}
 export type WorkerRequest = {
     kind: 'req';
     id: number;
@@ -58,6 +67,26 @@ export type WorkerRequest = {
     args: {
         bytes: Uint8Array;
     };
+} | {
+    kind: 'req';
+    id: number;
+    method: 'setCaptureTrack';
+    args: {
+        trackAlias: number;
+        publisherPriority?: number;
+        encoderConfig: WorkerEncoderConfig;
+        numChannels: number;
+        capacityFrames: number;
+        sharedStorage: Float32Array;
+        sharedWritePos: BigInt64Array;
+        sharedReadPos: BigInt64Array;
+        sharedSignal: Int32Array;
+    };
+} | {
+    kind: 'req';
+    id: number;
+    method: 'stopCapture';
+    args: Record<string, never>;
 } | {
     kind: 'req';
     id: number;

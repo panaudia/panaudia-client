@@ -1,12 +1,24 @@
 /**
- * Audio Publisher - Captures microphone audio and publishes to MOQ
+ * Audio Publisher — captures microphone audio into a SharedArrayBuffer ring for the
+ * MOQ worker to Opus-encode and send (worker-capture-design.md §6, plan Phase 5).
  *
- * Uses WebCodecs AudioEncoder API for raw Opus encoding (preferred),
- * falling back to MediaRecorder for browsers without WebCodecs support.
+ * This is the send-side mirror of `AudioPlayer`: it owns the capture half of the Web
+ * Audio graph on the MAIN thread (getUserMedia → AudioContext → capture AudioWorklet)
+ * but does **no encoding** — the worklet interleaves each render quantum straight into a
+ * SAB ring (`CaptureRing`), and the worker drains/encodes/frames/sends it off the main
+ * thread. Main never touches mic PCM and does zero per-frame audio work.
+ *
+ * Cross-origin isolation (COOP/COEP) is REQUIRED — the SAB ring is the transport from
+ * the worklet to the worker; there is no non-isolated fallback for capture (the old
+ * main-thread encode path is gone). `getCaptureHandoff()` hands the shared ring +
+ * geometry to `PanaudiaMoqClient`, which passes it to the worker via `setCaptureTrack`.
  */
 
 import { MoqClientError } from './errors.js';
-import { AudioCaptureEncoder, isWebCodecsOpusSupported, type OpusFrame } from './opus-encoder.js';
+import { isWebCodecsOpusSupported } from './opus-encoder.js';
+import { createCaptureWorkletUrl, CAPTURE_PROCESSOR_NAME, type CaptureProcessorOptions } from './capture-worklet.js';
+import { captureCapacityFrames } from './capture-ring.js';
+import type { WorkerEncoderConfig } from './moq-worker-protocol.js';
 import type { MicrophoneType } from '../shared/microphone-selection.js';
 
 /**
@@ -25,13 +37,13 @@ export interface AudioPublisherConfig {
   /** Frame duration in milliseconds (default: 5). Valid: 2.5, 5, 10, 20, 40, 60 */
   frameDurationMs?: number;
 
-  /** Enable echo cancellation (default: true) */
+  /** Enable echo cancellation (default: false) */
   echoCancellation?: boolean;
 
-  /** Enable noise suppression (default: true) */
+  /** Enable noise suppression (default: false) */
   noiseSuppression?: boolean;
 
-  /** Enable auto gain control (default: true) */
+  /** Enable auto gain control (default: false) */
   autoGainControl?: boolean;
 
   /** Microphone device ID. Default: system default. */
@@ -54,23 +66,33 @@ export enum AudioPublisherState {
 }
 
 /**
- * Audio frame data ready for publishing
+ * @deprecated The publisher no longer emits encoded frames on the main thread —
+ * encoding moved to the worker (worker-capture-design.md). Kept as an exported type
+ * for API compatibility only.
  */
 export interface AudioFrame {
-  /** Opus-encoded audio data */
   data: Uint8Array;
-
-  /** Timestamp in milliseconds */
   timestamp: number;
-
-  /** Duration in milliseconds */
   duration: number;
 }
 
-/**
- * Event handler for audio frames
- */
+/** @deprecated See {@link AudioFrame}. */
 export type AudioFrameHandler = (frame: AudioFrame) => void;
+
+/**
+ * The shared capture ring + geometry handed to the worker (via `setCaptureTrack`). The
+ * worklet is the producer of this ring; the worker constructs a consumer `CaptureRing`
+ * over the same SAB cells.
+ */
+export interface CaptureHandoff {
+  numChannels: number;
+  capacityFrames: number;
+  sharedStorage: Float32Array;
+  sharedWritePos: BigInt64Array;
+  sharedReadPos: BigInt64Array;
+  /** §6.1 wake cell: the worklet notifies it, the worker waits on it. */
+  sharedSignal: Int32Array;
+}
 
 /**
  * Error types for audio publisher
@@ -119,76 +141,60 @@ export class BluetoothMicDefaultError extends MoqClientError {
 }
 
 /**
- * Check if Opus encoding is supported via MediaRecorder
+ * Check if Opus encoding is supported via MediaRecorder (diagnostic helper).
  */
 export function isOpusSupported(): boolean {
   if (typeof MediaRecorder === 'undefined') {
     return false;
   }
-
-  // Check for Opus support in various containers
-  const mimeTypes = [
-    'audio/webm;codecs=opus',
-    'audio/ogg;codecs=opus',
-    'audio/webm',
-  ];
-
+  const mimeTypes = ['audio/webm;codecs=opus', 'audio/ogg;codecs=opus', 'audio/webm'];
   for (const mimeType of mimeTypes) {
     if (MediaRecorder.isTypeSupported(mimeType)) {
       return true;
     }
   }
-
   return false;
 }
 
 /**
- * Get the best supported Opus MIME type
+ * Get the best supported Opus MIME type (diagnostic helper).
  */
 export function getBestOpusMimeType(): string | null {
   if (typeof MediaRecorder === 'undefined') {
     return null;
   }
-
-  // Prefer webm with explicit opus codec
-  const mimeTypes = [
-    'audio/webm;codecs=opus',
-    'audio/ogg;codecs=opus',
-    'audio/webm',
-  ];
-
+  const mimeTypes = ['audio/webm;codecs=opus', 'audio/ogg;codecs=opus', 'audio/webm'];
   for (const mimeType of mimeTypes) {
     if (MediaRecorder.isTypeSupported(mimeType)) {
       return mimeType;
     }
   }
-
   return null;
 }
 
 /**
  * Audio Publisher
  *
- * Captures audio from the microphone, encodes it to Opus, and provides
- * frames for publishing to the MOQ server.
- *
- * Uses WebCodecs AudioEncoder (preferred) for raw Opus output,
- * or MediaRecorder as fallback.
+ * Captures microphone audio into a SharedArrayBuffer ring (via a capture AudioWorklet)
+ * for the MOQ worker to encode and publish. Does not encode on the main thread.
  */
 export class AudioPublisher {
   private config: Required<Omit<AudioPublisherConfig, 'deviceId'>> & Pick<AudioPublisherConfig, 'deviceId'>;
   private state: AudioPublisherState = AudioPublisherState.IDLE;
   private mediaStream: MediaStream | null = null;
-  private mediaRecorder: MediaRecorder | null = null;
-  private frameHandler: AudioFrameHandler | null = null;
 
-  // WebCodecs encoder (preferred - produces raw Opus)
-  private webCodecsEncoder: AudioCaptureEncoder | null = null;
-  private useWebCodecs: boolean = false;
+  // Capture half of the Web Audio graph (main thread).
+  private audioContext: AudioContext | null = null;
+  private sourceNode: MediaStreamAudioSourceNode | null = null;
+  private workletNode: AudioWorkletNode | null = null;
 
-  // Timing
-  private startTime: number = 0;
-  private frameSequence: number = 0;
+  // SAB ring shared with the worklet (producer) and the worker (consumer).
+  private sharedStorage: Float32Array | null = null;
+  private sharedWritePos: BigInt64Array | null = null;
+  private sharedReadPos: BigInt64Array | null = null;
+  private sharedSignal: Int32Array | null = null;
+  private readonly numChannels: number;
+  private readonly capacityFrames: number;
 
   // eslint-disable-next-line @typescript-eslint/no-explicit-any
   private log(...args: any[]): void {
@@ -209,15 +215,8 @@ export class AudioPublisher {
       deviceId: config.deviceId,
       debug: config.debug ?? false,
     };
-
-    // Prefer WebCodecs if available (produces raw Opus frames)
-    this.useWebCodecs = isWebCodecsOpusSupported();
-    if (this.useWebCodecs) {
-
-      this.log('Using WebCodecs for raw Opus encoding');
-    } else {
-      this.log('WebCodecs not available, using MediaRecorder (WebM container)');
-    }
+    this.numChannels = this.config.channelCount;
+    this.capacityFrames = captureCapacityFrames();
   }
 
   /**
@@ -228,34 +227,51 @@ export class AudioPublisher {
   }
 
   /**
-   * Set handler for audio frames
+   * The Opus encoder config the worker should use (worker constructs WebCodecs
+   * AudioEncoder from this). Matches the capture sample rate / channel count.
    */
-  onFrame(handler: AudioFrameHandler): void {
-    this.frameHandler = handler;
+  getEncoderConfig(): WorkerEncoderConfig {
+    return {
+      codec: 'opus',
+      sampleRate: this.config.sampleRate,
+      numberOfChannels: this.config.channelCount,
+      bitrate: this.config.bitrate,
+      frameDurationUs: Math.round(this.config.frameDurationMs * 1000),
+    };
   }
 
   /**
-   * Request microphone access and prepare for recording
+   * The shared capture ring + geometry to hand to the worker, or null if capture is
+   * not running / the SAB could not be allocated (not cross-origin isolated).
+   */
+  getCaptureHandoff(): CaptureHandoff | null {
+    if (!this.sharedStorage || !this.sharedWritePos || !this.sharedReadPos || !this.sharedSignal) {
+      return null;
+    }
+    return {
+      numChannels: this.numChannels,
+      capacityFrames: this.capacityFrames,
+      sharedStorage: this.sharedStorage,
+      sharedWritePos: this.sharedWritePos,
+      sharedReadPos: this.sharedReadPos,
+      sharedSignal: this.sharedSignal,
+    };
+  }
+
+  /**
+   * Request microphone access and prepare for capture.
    */
   async initialize(): Promise<void> {
     if (this.state !== AudioPublisherState.IDLE) {
-      throw new MoqClientError(
-        `Cannot initialize: already in state ${this.state}`,
-        'INVALID_STATE'
-      );
+      throw new MoqClientError(`Cannot initialize: already in state ${this.state}`, 'INVALID_STATE');
     }
 
-    // Check for getUserMedia support
     if (!navigator.mediaDevices || !navigator.mediaDevices.getUserMedia) {
-      throw new AudioNotSupportedError(
-        'getUserMedia is not supported in this browser'
-      );
+      throw new AudioNotSupportedError('getUserMedia is not supported in this browser');
     }
-
-    // Check for Opus support
-    if (!isOpusSupported()) {
+    if (!isWebCodecsOpusSupported()) {
       throw new AudioNotSupportedError(
-        'Opus encoding is not supported in this browser. Try Chrome, Firefox, or Edge.'
+        'WebCodecs Opus encoding is not supported in this browser. Try Chrome, Edge, Firefox, or Safari 26.4+.'
       );
     }
 
@@ -263,11 +279,7 @@ export class AudioPublisher {
 
     try {
       const deviceId = this.config.deviceId;
-
-      // Bluetooth mic check is handled by PanaudiaClient.connect() before
-      // transport setup, so both MOQ and WebRTC behave identically.
-
-      // Request microphone access
+      // Bluetooth mic check is handled by PanaudiaClient.connect() before transport setup.
       this.mediaStream = await navigator.mediaDevices.getUserMedia({
         audio: {
           channelCount: this.config.channelCount,
@@ -285,7 +297,6 @@ export class AudioPublisher {
       this.log('Microphone access granted');
     } catch (error) {
       this.setState(AudioPublisherState.ERROR);
-
       if (error instanceof DOMException) {
         if (error.name === 'NotAllowedError' || error.name === 'PermissionDeniedError') {
           throw new AudioPermissionError(
@@ -293,191 +304,122 @@ export class AudioPublisher {
             error
           );
         } else if (error.name === 'NotFoundError') {
-          throw new AudioPermissionError(
-            'No microphone found. Please connect a microphone and try again.',
-            error
-          );
+          throw new AudioPermissionError('No microphone found. Please connect a microphone and try again.', error);
         } else if (error.name === 'NotReadableError') {
-          throw new AudioPermissionError(
-            'Microphone is in use by another application.',
-            error
-          );
+          throw new AudioPermissionError('Microphone is in use by another application.', error);
         }
       }
-
-      throw new AudioPermissionError(
-        `Failed to access microphone: ${error}`,
-        error
-      );
+      throw new AudioPermissionError(`Failed to access microphone: ${error}`, error);
     }
   }
 
   /**
-   * Start recording and encoding audio
+   * Start capturing: build the AudioContext + capture worklet and allocate the SAB
+   * ring the worklet fills. Requires cross-origin isolation (the SAB is mandatory —
+   * there is no main-thread-encode fallback).
    */
-  start(): void {
+  async start(): Promise<void> {
     if (this.state !== AudioPublisherState.READY && this.state !== AudioPublisherState.PAUSED) {
       throw new MoqClientError(
         `Cannot start: must be in READY or PAUSED state, currently ${this.state}`,
         'INVALID_STATE'
       );
     }
-
     if (!this.mediaStream) {
       throw new MoqClientError('No media stream available', 'INVALID_STATE');
     }
+    if (typeof SharedArrayBuffer === 'undefined' || globalThis.crossOriginIsolated !== true) {
+      throw new AudioNotSupportedError(
+        'Microphone capture requires cross-origin isolation (COOP/COEP) for the SharedArrayBuffer ring'
+      );
+    }
+    if (typeof AudioWorkletNode === 'undefined') {
+      throw new AudioNotSupportedError('AudioWorklet is not supported in this browser');
+    }
 
-    // Use WebCodecs if available (produces raw Opus frames)
-    if (this.useWebCodecs) {
-      this.startWebCodecs();
+    // Resuming from PAUSED just reconnects the existing graph.
+    if (this.state === AudioPublisherState.PAUSED && this.audioContext && this.sourceNode && this.workletNode) {
+      this.sourceNode.connect(this.workletNode);
+      this.setState(AudioPublisherState.RECORDING);
+      this.log('Microphone resumed');
       return;
     }
 
-    // Fallback to MediaRecorder (produces WebM container - not recommended)
-    this.startMediaRecorder();
-  }
+    this.audioContext = new AudioContext({ sampleRate: this.config.sampleRate });
 
-  /**
-   * Start encoding using WebCodecs AudioEncoder (preferred - raw Opus)
-   */
-  private startWebCodecs(): void {
-    this.webCodecsEncoder = new AudioCaptureEncoder({
-      sampleRate: this.config.sampleRate,
-      channels: this.config.channelCount,
-      bitrate: this.config.bitrate,
-      frameDurationMs: this.config.frameDurationMs,
-      debug: this.config.debug,
-    });
-
-    // Set up frame handler to convert OpusFrame to AudioFrame
-    this.webCodecsEncoder.onFrame((opusFrame: OpusFrame) => {
-      if (this.frameHandler) {
-        const frame: AudioFrame = {
-          data: opusFrame.data,
-          timestamp: Math.floor(opusFrame.timestamp / 1000), // Convert us to ms
-          duration: Math.floor(opusFrame.duration / 1000),
-        };
-        this.frameHandler(frame);
-      }
-    });
-
-    this.webCodecsEncoder.start(this.mediaStream!).then(() => {
-      this.setState(AudioPublisherState.RECORDING);
-      this.log(`Recording started with WebCodecs, ${this.config.bitrate} bps (raw Opus)`);
-    }).catch((error) => {
-      console.error('Failed to start WebCodecs encoder:', error);
-      this.setState(AudioPublisherState.ERROR);
-    });
-  }
-
-  /**
-   * Start encoding using MediaRecorder (fallback - WebM container)
-   */
-  private startMediaRecorder(): void {
-    const mimeType = getBestOpusMimeType();
-    if (!mimeType) {
-      throw new AudioNotSupportedError('No supported Opus MIME type found');
+    // Load the capture worklet (Blob URL; addModule copies it, so revoke after).
+    const url = createCaptureWorkletUrl();
+    try {
+      await this.audioContext.audioWorklet.addModule(url);
+    } finally {
+      URL.revokeObjectURL(url);
     }
 
-    this.mediaRecorder = new MediaRecorder(this.mediaStream!, {
-      mimeType,
-      audioBitsPerSecond: this.config.bitrate,
+    // Allocate the SAB ring (interleaved storage + cumulative positions + wake signal).
+    const nc = this.numChannels;
+    const cap = this.capacityFrames;
+    this.sharedStorage = new Float32Array(new SharedArrayBuffer(cap * nc * 4));
+    this.sharedWritePos = new BigInt64Array(new SharedArrayBuffer(8));
+    this.sharedReadPos = new BigInt64Array(new SharedArrayBuffer(8));
+    this.sharedSignal = new Int32Array(new SharedArrayBuffer(4));
+
+    this.sourceNode = this.audioContext.createMediaStreamSource(this.mediaStream);
+    this.workletNode = new AudioWorkletNode(this.audioContext, CAPTURE_PROCESSOR_NAME, {
+      numberOfInputs: 1,
+      numberOfOutputs: 0,
+      processorOptions: {
+        numChannels: nc,
+        capacityFrames: cap,
+        sharedStorage: this.sharedStorage,
+        sharedWritePos: this.sharedWritePos,
+        sharedReadPos: this.sharedReadPos,
+        signal: this.sharedSignal,
+      } satisfies CaptureProcessorOptions,
     });
+    // Source → capture worklet (a sink; no output connection needed).
+    this.sourceNode.connect(this.workletNode);
 
-    // Handle encoded data
-    this.mediaRecorder.ondataavailable = (event) => {
-      if (event.data.size > 0) {
-        this.handleEncodedData(event.data);
-      }
-    };
-
-    this.mediaRecorder.onerror = (event) => {
-      console.error('MediaRecorder error:', event);
-      this.setState(AudioPublisherState.ERROR);
-    };
-
-    this.mediaRecorder.onstop = () => {
-      this.log('MediaRecorder stopped');
-    };
-
-    // Start recording with timeslice for regular data chunks
-    this.startTime = performance.now();
-    this.frameSequence = 0;
-    this.mediaRecorder.start(this.config.frameDurationMs);
     this.setState(AudioPublisherState.RECORDING);
-
-    this.log(`Recording started with ${mimeType}, ${this.config.bitrate} bps (WARNING: WebM container, server may not decode correctly)`);
+    this.log(`Capture started (SAB ring, ${nc}ch, capacity=${cap} frames)`);
   }
 
   /**
-   * Pause recording
+   * Pause capture: disconnect the mic from the worklet so the ring stops filling (the
+   * worker then has nothing to encode). The graph + SAB are kept for resume.
    */
   pause(): void {
     if (this.state !== AudioPublisherState.RECORDING) {
       return;
     }
-
-    // WebCodecs doesn't have pause - we just stop/start
-    // For now, we stop and rely on resume to restart
-    if (this.webCodecsEncoder) {
-      this.webCodecsEncoder.stop().catch(console.error);
-      this.setState(AudioPublisherState.PAUSED);
-      return;
+    if (this.sourceNode && this.workletNode) {
+      try {
+        this.sourceNode.disconnect(this.workletNode);
+      } catch {
+        /* already disconnected */
+      }
     }
-
-    if (this.mediaRecorder && this.mediaRecorder.state === 'recording') {
-      this.mediaRecorder.pause();
-      this.setState(AudioPublisherState.PAUSED);
-    }
+    this.setState(AudioPublisherState.PAUSED);
+    this.log('Microphone paused');
   }
 
   /**
-   * Resume recording
+   * Resume capture (reconnect the mic to the worklet).
    */
   resume(): void {
     if (this.state !== AudioPublisherState.PAUSED) {
       return;
     }
-
-    // WebCodecs: restart encoding
-    if (this.useWebCodecs && this.mediaStream) {
-      this.startWebCodecs();
-      return;
-    }
-
-    if (this.mediaRecorder && this.mediaRecorder.state === 'paused') {
-      this.mediaRecorder.resume();
+    if (this.sourceNode && this.workletNode) {
+      this.sourceNode.connect(this.workletNode);
       this.setState(AudioPublisherState.RECORDING);
+      this.log('Microphone resumed');
     }
   }
 
   /**
-   * Stop recording
-   */
-  stop(): void {
-    // Stop WebCodecs encoder
-    if (this.webCodecsEncoder) {
-      this.webCodecsEncoder.stop().catch((error) => {
-        console.error('Error stopping WebCodecs encoder:', error);
-      });
-      this.webCodecsEncoder = null;
-    }
-
-    // Stop MediaRecorder
-    if (this.mediaRecorder) {
-      if (this.mediaRecorder.state !== 'inactive') {
-        this.mediaRecorder.stop();
-      }
-      this.mediaRecorder = null;
-    }
-
-    this.setState(AudioPublisherState.READY);
-  }
-
-  /**
-   * Enable or disable the mic tracks. Disabling makes the source emit
-   * silent samples — the encoder + track publisher stay alive, MOQ
-   * frames keep flowing as Opus DTX comfort-noise.
+   * Enable or disable the mic tracks. Disabling makes the source emit silent samples —
+   * the capture graph + worker encoder stay alive, so MOQ frames keep flowing as Opus
+   * DTX comfort-noise.
    */
   setMicEnabled(enabled: boolean): void {
     if (!this.mediaStream) return;
@@ -487,62 +429,52 @@ export class AudioPublisher {
   }
 
   /**
-   * Release all resources
+   * Stop capturing: tear down the capture graph (keeps the media stream so it can be
+   * restarted). The SAB views are released; the worker should be told to `stopCapture`.
+   */
+  stop(): void {
+    if (this.workletNode) {
+      this.workletNode.disconnect();
+      this.workletNode = null;
+    }
+    if (this.sourceNode) {
+      this.sourceNode.disconnect();
+      this.sourceNode = null;
+    }
+    if (this.audioContext) {
+      void this.audioContext.close();
+      this.audioContext = null;
+    }
+    this.sharedStorage = null;
+    this.sharedWritePos = null;
+    this.sharedReadPos = null;
+    this.sharedSignal = null;
+    if (this.state !== AudioPublisherState.IDLE && this.state !== AudioPublisherState.ERROR) {
+      this.setState(AudioPublisherState.READY);
+    }
+  }
+
+  /**
+   * Release all resources (tears down the graph and stops the mic tracks).
    */
   dispose(): void {
     this.stop();
-
     if (this.mediaStream) {
       for (const track of this.mediaStream.getTracks()) {
         track.stop();
       }
       this.mediaStream = null;
     }
-
-    this.frameHandler = null;
     this.setState(AudioPublisherState.IDLE);
   }
 
-  /**
-   * Handle encoded audio data from MediaRecorder
-   */
-  private async handleEncodedData(blob: Blob): Promise<void> {
-    try {
-      // Convert Blob to Uint8Array
-      const arrayBuffer = await blob.arrayBuffer();
-      const data = new Uint8Array(arrayBuffer);
-
-      // Calculate timestamp
-      const timestamp = performance.now() - this.startTime;
-
-      // Create audio frame
-      const frame: AudioFrame = {
-        data,
-        timestamp: Math.floor(timestamp),
-        duration: this.config.frameDurationMs,
-      };
-
-      this.frameSequence++;
-
-      // Call handler if set
-      if (this.frameHandler) {
-        this.frameHandler(frame);
-      }
-    } catch (error) {
-      console.error('Error processing encoded audio:', error);
-    }
-  }
-
-  /**
-   * Update state
-   */
   private setState(state: AudioPublisherState): void {
     this.state = state;
   }
 }
 
 /**
- * Check browser audio capabilities
+ * Check browser audio capabilities (diagnostic helper).
  */
 export function getAudioCapabilities(): {
   getUserMedia: boolean;

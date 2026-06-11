@@ -262,6 +262,18 @@ export {
 } from './playout-worklet.js';
 export type { PlayoutProcessorOptions, PlayoutStatsMessage, PlayoutPcmPortMessage } from './playout-worklet.js';
 
+// Mic capture send ring + worklet (off-main-thread Opus encode — worker-capture-design.md)
+export { CaptureRing, captureCapacityFrames } from './capture-ring.js';
+export type { CaptureRingConfig } from './capture-ring.js';
+export {
+  CAPTURE_PROCESSOR_NAME,
+  buildCaptureWorkletCode,
+  createCaptureWorkletUrl,
+} from './capture-worklet.js';
+export type { CaptureProcessorOptions } from './capture-worklet.js';
+export { CaptureEncoder } from './capture-encoder.js';
+export type { CaptureEncoderConfig, FrameEncoder, EncodedChunkLike } from './capture-encoder.js';
+
 // Receive Worker (off-main-thread datagram read + Opus decode — design §11)
 export {
   buildReceiveWorkerCode,

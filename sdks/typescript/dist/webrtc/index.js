@@ -477,4 +477,3 @@ class WebRtcTransport {
 export {
   WebRtcTransport
 };
-//# sourceMappingURL=index.js.map

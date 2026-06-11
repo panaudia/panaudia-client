@@ -29,7 +29,7 @@ export declare class PanaudiaMoqClient {
     private sender;
     private state;
     private audioPublisher;
-    private audioTrackPublisher;
+    private micStarted;
     private stateTrackPublisher;
     private statePublishPending;
     private statePublishThrottleMs;
@@ -166,6 +166,12 @@ export declare class PanaudiaMoqClient {
      * @param config - Optional audio configuration
      */
     startMicrophone(config?: AudioPublisherConfig): Promise<void>;
+    /**
+     * (Re)start the worker's encode/send for the capture ring. Idempotent on the worker
+     * side (`setCaptureTrack` stops any prior capture first), so it is safe to call both
+     * when the mic starts and when the in/audio track alias is (re)assigned.
+     */
+    private startWorkerCapture;
     /**
      * Stop capturing microphone audio
      */

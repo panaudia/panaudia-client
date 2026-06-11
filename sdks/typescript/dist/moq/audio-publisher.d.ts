@@ -1,4 +1,5 @@
 import { MoqClientError } from './errors.js';
+import { WorkerEncoderConfig } from './moq-worker-protocol.js';
 import { MicrophoneType } from '../shared/microphone-selection.js';
 /**
  * Audio publisher configuration
@@ -12,11 +13,11 @@ export interface AudioPublisherConfig {
     bitrate?: number;
     /** Frame duration in milliseconds (default: 5). Valid: 2.5, 5, 10, 20, 40, 60 */
     frameDurationMs?: number;
-    /** Enable echo cancellation (default: true) */
+    /** Enable echo cancellation (default: false) */
     echoCancellation?: boolean;
-    /** Enable noise suppression (default: true) */
+    /** Enable noise suppression (default: false) */
     noiseSuppression?: boolean;
-    /** Enable auto gain control (default: true) */
+    /** Enable auto gain control (default: false) */
     autoGainControl?: boolean;
     /** Microphone device ID. Default: system default. */
     deviceId?: string;
@@ -35,20 +36,31 @@ export declare enum AudioPublisherState {
     ERROR = "error"
 }
 /**
- * Audio frame data ready for publishing
+ * @deprecated The publisher no longer emits encoded frames on the main thread —
+ * encoding moved to the worker (worker-capture-design.md). Kept as an exported type
+ * for API compatibility only.
  */
 export interface AudioFrame {
-    /** Opus-encoded audio data */
     data: Uint8Array;
-    /** Timestamp in milliseconds */
     timestamp: number;
-    /** Duration in milliseconds */
     duration: number;
 }
-/**
- * Event handler for audio frames
- */
+/** @deprecated See {@link AudioFrame}. */
 export type AudioFrameHandler = (frame: AudioFrame) => void;
+/**
+ * The shared capture ring + geometry handed to the worker (via `setCaptureTrack`). The
+ * worklet is the producer of this ring; the worker constructs a consumer `CaptureRing`
+ * over the same SAB cells.
+ */
+export interface CaptureHandoff {
+    numChannels: number;
+    capacityFrames: number;
+    sharedStorage: Float32Array;
+    sharedWritePos: BigInt64Array;
+    sharedReadPos: BigInt64Array;
+    /** §6.1 wake cell: the worklet notifies it, the worker waits on it. */
+    sharedSignal: Int32Array;
+}
 /**
  * Error types for audio publisher
  */
@@ -79,32 +91,32 @@ export declare class BluetoothMicDefaultError extends MoqClientError {
     }>);
 }
 /**
- * Check if Opus encoding is supported via MediaRecorder
+ * Check if Opus encoding is supported via MediaRecorder (diagnostic helper).
  */
 export declare function isOpusSupported(): boolean;
 /**
- * Get the best supported Opus MIME type
+ * Get the best supported Opus MIME type (diagnostic helper).
  */
 export declare function getBestOpusMimeType(): string | null;
 /**
  * Audio Publisher
  *
- * Captures audio from the microphone, encodes it to Opus, and provides
- * frames for publishing to the MOQ server.
- *
- * Uses WebCodecs AudioEncoder (preferred) for raw Opus output,
- * or MediaRecorder as fallback.
+ * Captures microphone audio into a SharedArrayBuffer ring (via a capture AudioWorklet)
+ * for the MOQ worker to encode and publish. Does not encode on the main thread.
  */
 export declare class AudioPublisher {
     private config;
     private state;
     private mediaStream;
-    private mediaRecorder;
-    private frameHandler;
-    private webCodecsEncoder;
-    private useWebCodecs;
-    private startTime;
-    private frameSequence;
+    private audioContext;
+    private sourceNode;
+    private workletNode;
+    private sharedStorage;
+    private sharedWritePos;
+    private sharedReadPos;
+    private sharedSignal;
+    private readonly numChannels;
+    private readonly capacityFrames;
     private log;
     constructor(config?: AudioPublisherConfig);
     /**
@@ -112,58 +124,53 @@ export declare class AudioPublisher {
      */
     getState(): AudioPublisherState;
     /**
-     * Set handler for audio frames
+     * The Opus encoder config the worker should use (worker constructs WebCodecs
+     * AudioEncoder from this). Matches the capture sample rate / channel count.
      */
-    onFrame(handler: AudioFrameHandler): void;
+    getEncoderConfig(): WorkerEncoderConfig;
     /**
-     * Request microphone access and prepare for recording
+     * The shared capture ring + geometry to hand to the worker, or null if capture is
+     * not running / the SAB could not be allocated (not cross-origin isolated).
+     */
+    getCaptureHandoff(): CaptureHandoff | null;
+    /**
+     * Request microphone access and prepare for capture.
      */
     initialize(): Promise<void>;
     /**
-     * Start recording and encoding audio
+     * Start capturing: build the AudioContext + capture worklet and allocate the SAB
+     * ring the worklet fills. Requires cross-origin isolation (the SAB is mandatory —
+     * there is no main-thread-encode fallback).
      */
-    start(): void;
+    start(): Promise<void>;
     /**
-     * Start encoding using WebCodecs AudioEncoder (preferred - raw Opus)
-     */
-    private startWebCodecs;
-    /**
-     * Start encoding using MediaRecorder (fallback - WebM container)
-     */
-    private startMediaRecorder;
-    /**
-     * Pause recording
+     * Pause capture: disconnect the mic from the worklet so the ring stops filling (the
+     * worker then has nothing to encode). The graph + SAB are kept for resume.
      */
     pause(): void;
     /**
-     * Resume recording
+     * Resume capture (reconnect the mic to the worklet).
      */
     resume(): void;
     /**
-     * Stop recording
-     */
-    stop(): void;
-    /**
-     * Enable or disable the mic tracks. Disabling makes the source emit
-     * silent samples — the encoder + track publisher stay alive, MOQ
-     * frames keep flowing as Opus DTX comfort-noise.
+     * Enable or disable the mic tracks. Disabling makes the source emit silent samples —
+     * the capture graph + worker encoder stay alive, so MOQ frames keep flowing as Opus
+     * DTX comfort-noise.
      */
     setMicEnabled(enabled: boolean): void;
     /**
-     * Release all resources
+     * Stop capturing: tear down the capture graph (keeps the media stream so it can be
+     * restarted). The SAB views are released; the worker should be told to `stopCapture`.
+     */
+    stop(): void;
+    /**
+     * Release all resources (tears down the graph and stops the mic tracks).
      */
     dispose(): void;
-    /**
-     * Handle encoded audio data from MediaRecorder
-     */
-    private handleEncodedData;
-    /**
-     * Update state
-     */
     private setState;
 }
 /**
- * Check browser audio capabilities
+ * Check browser audio capabilities (diagnostic helper).
  */
 export declare function getAudioCapabilities(): {
     getUserMedia: boolean;

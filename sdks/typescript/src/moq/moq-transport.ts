@@ -541,6 +541,133 @@ export function buildObjectDatagram(
 }
 
 // ============================================================================
+// Zero-allocation framing (audio send hot path — worker-capture-plan.md P1)
+// ============================================================================
+//
+// `buildObjectDatagram` above allocates ~6 Uint8Arrays per call (one per varint,
+// one for the priority byte, the builder's chunk array, and the final buffer). On
+// the mic send path that runs per Opus frame (~200/s). These helpers instead write
+// into a caller-owned, reused scratch buffer at a running offset — no allocation —
+// so the worker can frame every frame into one preallocated buffer (design §6). They
+// are byte-for-byte identical to `encodeVarint` / `buildObjectDatagram`; the
+// allocating versions stay for the low-rate publishers.
+
+/**
+ * Number of bytes the QUIC varint encoding of `value` occupies (1, 2, 4, or 8) —
+ * matching the thresholds in {@link encodeVarint}. Used to size scratch buffers.
+ */
+export function varintSize(value: number | bigint): number {
+  if (typeof value === 'number') {
+    if (value < 0x40) return 1;
+    if (value < 0x4000) return 2;
+    if (value < 0x40000000) return 4;
+    return 8;
+  }
+  if (value < 0x40n) return 1;
+  if (value < 0x4000n) return 2;
+  if (value < 0x40000000n) return 4;
+  return 8;
+}
+
+/**
+ * Write the QUIC varint encoding of `value` into `buf` starting at `offset`,
+ * returning the offset just past the last byte written. No allocation. Produces
+ * bytes identical to {@link encodeVarint}.
+ *
+ * A `number` ≤ the 4-byte range (< 2^30) takes a BigInt-free fast path (the common
+ * case: type, trackAlias, and realistic group/object IDs); larger values and the
+ * 8-byte case use BigInt arithmetic, exactly as `encodeVarint`.
+ */
+export function writeVarintInto(buf: Uint8Array, offset: number, value: number | bigint): number {
+  if (typeof value === 'number') {
+    if (!Number.isInteger(value) || value < 0) {
+      throw new RangeError(`writeVarintInto: value must be a non-negative integer, got ${value}`);
+    }
+    if (value < 0x40) {
+      buf[offset] = value;
+      return offset + 1;
+    }
+    if (value < 0x4000) {
+      buf[offset] = (value >> 8) | 0x40;
+      buf[offset + 1] = value & 0xff;
+      return offset + 2;
+    }
+    if (value < 0x40000000) {
+      buf[offset] = (value >>> 24) | 0x80;
+      buf[offset + 1] = (value >>> 16) & 0xff;
+      buf[offset + 2] = (value >>> 8) & 0xff;
+      buf[offset + 3] = value & 0xff;
+      return offset + 4;
+    }
+    // >= 2^30 — fall through to the BigInt 8-byte path.
+    value = BigInt(value);
+  }
+
+  const n = value;
+  if (n < 0n) {
+    throw new RangeError(`writeVarintInto: value must be non-negative, got ${n}`);
+  }
+  if (n < 0x40n) {
+    buf[offset] = Number(n);
+    return offset + 1;
+  }
+  if (n < 0x4000n) {
+    buf[offset] = Number((n >> 8n) | 0x40n);
+    buf[offset + 1] = Number(n & 0xffn);
+    return offset + 2;
+  }
+  if (n < 0x40000000n) {
+    buf[offset] = Number((n >> 24n) | 0x80n);
+    buf[offset + 1] = Number((n >> 16n) & 0xffn);
+    buf[offset + 2] = Number((n >> 8n) & 0xffn);
+    buf[offset + 3] = Number(n & 0xffn);
+    return offset + 4;
+  }
+  buf[offset] = Number((n >> 56n) | 0xc0n);
+  buf[offset + 1] = Number((n >> 48n) & 0xffn);
+  buf[offset + 2] = Number((n >> 40n) & 0xffn);
+  buf[offset + 3] = Number((n >> 32n) & 0xffn);
+  buf[offset + 4] = Number((n >> 24n) & 0xffn);
+  buf[offset + 5] = Number((n >> 16n) & 0xffn);
+  buf[offset + 6] = Number((n >> 8n) & 0xffn);
+  buf[offset + 7] = Number(n & 0xffn);
+  return offset + 8;
+}
+
+/**
+ * Upper bound on the encoded size of an OBJECT_DATAGRAM with a payload of at most
+ * `maxPayload` bytes: type(1) + trackAlias(≤8) + groupId(≤8) + objectId(≤8) +
+ * priority(1) + payload. Size one reused scratch buffer with this (design §6).
+ */
+export function maxObjectDatagramSize(maxPayload: number): number {
+  return 1 + 8 + 8 + 8 + 1 + maxPayload;
+}
+
+/**
+ * Write a full OBJECT_DATAGRAM into `buf` (caller-owned, reused) and return its
+ * total length. Allocation-free counterpart of {@link buildObjectDatagram} —
+ * byte-for-byte identical output. `buf` must be at least
+ * {@link maxObjectDatagramSize}(payload.length); send `buf.subarray(0, len)`.
+ */
+export function encodeObjectDatagramInto(
+  buf: Uint8Array,
+  trackAlias: number,
+  groupId: bigint,
+  objectId: bigint,
+  publisherPriority: number,
+  payload: Uint8Array
+): number {
+  let pos = 0;
+  pos = writeVarintInto(buf, pos, 0x00); // datagram type: no extension headers
+  pos = writeVarintInto(buf, pos, trackAlias);
+  pos = writeVarintInto(buf, pos, groupId);
+  pos = writeVarintInto(buf, pos, objectId);
+  buf[pos++] = publisherPriority & 0xff; // single byte, NOT varint
+  buf.set(payload, pos);
+  return pos + payload.length;
+}
+
+// ============================================================================
 // MOQ Message Parsing
 // ============================================================================
 

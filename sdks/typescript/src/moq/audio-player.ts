@@ -118,6 +118,14 @@ export class AudioPlayer {
   // Throttle counter for the [JBUF] observation log.
   private jbufLogCount = 0;
 
+  // CLOCKTEST (playout-drift investigation): audio-output (DAC) clock vs wall clock.
+  // Compares audioContext.currentTime advance to performance.now() advance over ~60s —
+  // the decisive check for whether the audio device clock really differs from the
+  // CPU/server clock by the suspected ~290 ppm. Fires once.
+  private clockT0Wall = 0;
+  private clockT0Ctx = 0;
+  private clockLogged = false;
+
   // Worker mode: when the receive Worker decodes (design §11), AudioPlayer's own
   // main-thread AudioDecoder is bypassed (decodeFrame becomes a no-op) and PCM
   // reaches the worklet ring via the SAB (or the pcmPort fallback).
@@ -300,7 +308,8 @@ export class AudioPlayer {
         const msg = e.data as PlayoutStatsMessage;
         if (msg && msg.type === 'stats') {
           this.lastSnapshot = msg.snapshot;
-          this.logJitter(msg.snapshot);
+          this.logJitter(msg.snapshot, msg.fillMin, msg.fillMax);
+          this.clockProbe();
         }
       };
 
@@ -487,11 +496,55 @@ export class AudioPlayer {
    * [JBUF] tuning line (design §10 / plan Phase 4). Gated by `debug`; throttled
    * to ~1/s (the worklet posts stats ~4/s). Filter devtools by "JBUF" during soak.
    */
-  private logJitter(s: JitterBufferSnapshot): void {
+  /**
+   * CLOCKTEST: compare the audio-output (DAC) clock to the wall clock. `currentTime`
+   * advances in the audio render domain; `performance.now()` in the CPU domain. Over
+   * ~60s, if the DAC is slower than the CPU/server clock, `currentTime` advances less →
+   * negative ppm — which is exactly what produces the drop-dominant ±1 splices. Fires
+   * once. Logged unconditionally (it's a deliberate diagnostic).
+   */
+  private clockProbe(): void {
+    if (this.clockLogged || !this.audioContext) return;
+    const wall = performance.now();
+    const ctxMs = this.audioContext.currentTime * 1000;
+    if (this.clockT0Wall === 0) {
+      this.clockT0Wall = wall;
+      this.clockT0Ctx = ctxMs;
+      // Reader-burst probe: the hardware render buffer. If baseLatency ≈ the [JBUF]
+      // `fill` swing amplitude (~10–15 ms), the drops are the worklet consuming in
+      // device-buffer-sized clumps (not drift) — frames pile up during its idle gaps
+      // and clip the high threshold.
+      const ctx = this.audioContext as AudioContext & { outputLatency?: number };
+      const base = (ctx.baseLatency ?? 0) * 1000;
+      const out = (ctx.outputLatency ?? 0) * 1000;
+      console.log(
+        `[CLOCKTEST] AudioContext baseLatency=${base.toFixed(2)}ms outputLatency=${out.toFixed(2)}ms ` +
+          `sampleRate=${this.audioContext.sampleRate} (render-buffer ≈ fill-swing if reader-burst is the cause)`
+      );
+      return;
+    }
+    const dWall = wall - this.clockT0Wall;
+    if (dWall < 60000) return;
+    const dCtx = ctxMs - this.clockT0Ctx;
+    const ppm = (dCtx / dWall - 1) * 1e6;
+    console.log(
+      `[CLOCKTEST] audio(DAC) clock vs wall: currentTime +${dCtx.toFixed(1)}ms vs performance.now +${dWall.toFixed(1)}ms over ~60s ` +
+        `→ DAC drift ${ppm >= 0 ? '+' : ''}${ppm.toFixed(1)} ppm (negative = DAC slower than CPU; that's the drop source)`
+    );
+    this.clockLogged = true;
+  }
+
+  private logJitter(s: JitterBufferSnapshot, fillMin?: number, fillMax?: number): void {
     if (!this.config.debug) return;
     if (this.jbufLogCount++ % 4 !== 0) return;
+    const srMs = this.config.sampleRate / 1000;
+    // True window swing (every read) — the real sawtooth the 250ms point-sample misses.
+    const swing =
+      fillMin !== undefined && fillMax !== undefined
+        ? ` swing=${(fillMin / srMs).toFixed(1)}-${(fillMax / srMs).toFixed(1)}ms`
+        : '';
     console.log(
-      `[JBUF] fill=${s.fillMs.toFixed(1)}ms L=${s.lowAllowanceMs.toFixed(1)} H=${s.highAllowanceMs.toFixed(1)} ` +
+      `[JBUF] fill=${s.fillMs.toFixed(1)}ms${swing} L=${s.lowAllowanceMs.toFixed(1)} H=${s.highAllowanceMs.toFixed(1)} ` +
         `tgt=${s.targetFrames}fr zone=${s.zone} win=${s.lastWindowInserts}/${s.lastWindowDrops} ` +
         `und=${s.underruns} ovr=${s.overruns} lap=${s.laps} ins=${s.samplesInserted} drop=${s.samplesDropped}`
     );

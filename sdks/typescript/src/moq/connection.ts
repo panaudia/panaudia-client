@@ -109,6 +109,13 @@ export class MoqConnection {
       // Wait for connection to be ready
       await this.transport.ready;
 
+      // DIAGNOSTIC: the negotiated WebTransport subprotocol. The server selects MOQ
+      // draft-16 only when this is 'moqt-16'; if a browser lacks WebTransport
+      // subprotocol negotiation (Firefox), this is empty → the server falls back to
+      // draft-14 → our draft-16 CLIENT_SETUP is rejected → "remote close".
+      const negotiated = (this.transport as { protocol?: string }).protocol;
+      console.log(`[MOQ] WebTransport ready — negotiated subprotocol: ${JSON.stringify(negotiated)}`);
+
       this.setState(ConnectionState.CONNECTED);
     } catch (error) {
       this.setState(ConnectionState.ERROR, error as Error);
@@ -190,6 +197,11 @@ export class MoqConnection {
   async sendDatagram(data: Uint8Array): Promise<void> {
     if (!this.transport) {
       throw new Error('Not connected');
+    }
+    // Never write a zero-length datagram: it carries no MOQ object and some
+    // WebTransport implementations (Firefox/Safari) reject/closeon an empty write.
+    if (data.length === 0) {
+      return;
     }
     if (!this.datagramWriter) {
       this.datagramWriter = this.transport.datagrams.writable.getWriter();

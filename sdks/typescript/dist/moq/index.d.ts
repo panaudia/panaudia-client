@@ -55,6 +55,12 @@ export { JitterBufferCore, PLAYOUT_TUNING, computeJitterCapacity } from './jitte
 export type { JitterBufferCoreConfig, JitterBufferSnapshot, Levels } from './jitter-buffer-core.js';
 export { PLAYOUT_PROCESSOR_NAME, buildPlayoutWorkletCode, createPlayoutWorkletUrl, } from './playout-worklet.js';
 export type { PlayoutProcessorOptions, PlayoutStatsMessage, PlayoutPcmPortMessage } from './playout-worklet.js';
+export { CaptureRing, captureCapacityFrames } from './capture-ring.js';
+export type { CaptureRingConfig } from './capture-ring.js';
+export { CAPTURE_PROCESSOR_NAME, buildCaptureWorkletCode, createCaptureWorkletUrl, } from './capture-worklet.js';
+export type { CaptureProcessorOptions } from './capture-worklet.js';
+export { CaptureEncoder } from './capture-encoder.js';
+export type { CaptureEncoderConfig, FrameEncoder, EncodedChunkLike } from './capture-encoder.js';
 export { buildReceiveWorkerCode, createReceiveWorkerUrl, audioReceiveWorkerSupported, routeDatagram, } from './audio-receive-worker.js';
 export type { ReceiveWorkerDecoderConfig, ReceiveWorkerInitMessage, ReceiveWorkerAudioMessage, ReceiveWorkerStopMessage, ReceiveWorkerInbound, ForwardedDatagramMessage, ReceiveWorkerNoticeMessage, ReceiveWorkerOutbound, } from './audio-receive-worker.js';
 export { MoqTransportAdapter } from './moq-transport-adapter.js';

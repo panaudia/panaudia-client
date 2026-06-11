@@ -12,6 +12,9 @@ export interface PlayoutProcessorOptions {
 export interface PlayoutStatsMessage {
     type: 'stats';
     snapshot: JitterBufferSnapshot;
+    /** True fill min/max (frames) across the window — every read, not point-sampled. */
+    fillMin?: number;
+    fillMax?: number;
 }
 /**
  * Handshake posted TO the worklet (`workletNode.port.postMessage(msg, [msg.port])`)

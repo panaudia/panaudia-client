@@ -44,7 +44,7 @@ import {
   AudioPublisherState,
   AudioPublisherConfig,
 } from './audio-publisher.js';
-import { AudioTrackPublisher, StateTrackPublisher } from './track-publisher.js';
+import { StateTrackPublisher } from './track-publisher.js';
 import { entityInfo3ToBytes, createEntityInfo3 } from '../shared/encoding.js';
 import { AudioSubscriber, AudioSubscriberStats } from './audio-subscriber.js';
 import { AudioPlayer, AudioPlayerState, AudioPlayerConfig, AudioPlayerStats } from './audio-player.js';
@@ -124,9 +124,10 @@ export class PanaudiaMoqClient {
   private sender: DatagramSender | null = null;
   private state: ConnectionState = ConnectionState.DISCONNECTED;
 
-  // Audio publishing
+  // Audio publishing — the capture worklet fills a SAB ring; the worker encodes/sends
+  // it (worker-capture-design.md). No main-thread track publisher for audio.
   private audioPublisher: AudioPublisher | null = null;
-  private audioTrackPublisher: AudioTrackPublisher | null = null;
+  private micStarted = false;
 
   // State publishing
   private stateTrackPublisher: StateTrackPublisher | null = null;
@@ -623,42 +624,55 @@ export class PanaudiaMoqClient {
       this.audioPublisher = new AudioPublisher({ ...config, debug: this.config.debug });
     }
 
-    // Create track publisher for audio input
-    if (!this.audioTrackPublisher) {
-      this.audioTrackPublisher = new AudioTrackPublisher({
-        trackAlias: this.audioInputTrackAlias,
-        publisherPriority: 0, // High priority for audio
-      });
-      this.audioTrackPublisher.attach(this.sender);
-    }
-
-    // Initialize audio publisher (requests microphone permission)
+    // Initialize (mic permission) + build the capture graph that fills the SAB ring.
+    // No main-thread encode: the worklet writes the ring, the worker encodes/sends.
     await this.audioPublisher.initialize();
+    await this.audioPublisher.start();
+    this.micStarted = true;
 
-    // Set up frame handler to publish audio frames
-    this.audioPublisher.onFrame((frame) => {
-      // Skip encoder warmup frames (WebCodecs produces tiny frames before stabilising)
-      if (frame.data.length < 10) return;
-
-      if (this.audioTrackPublisher && this.state === ConnectionState.AUTHENTICATED) {
-        this.audioTrackPublisher.publishAudioFrame(frame.data, frame.timestamp)
-          .catch((error) => {
-            console.error('Failed to publish audio frame:', error);
-          });
-      }
-    });
-
-    // Start recording
-    this.audioTrackPublisher.startSession();
-    this.audioPublisher.start();
+    // Hand the capture ring to the worker so it starts encoding/publishing. If the
+    // server hasn't subscribed to our in/audio track yet, this fires again from
+    // handleIncomingSubscribe once the real alias arrives.
+    this.startWorkerCapture();
 
     this.log('Microphone started');
+  }
+
+  /**
+   * (Re)start the worker's encode/send for the capture ring. Idempotent on the worker
+   * side (`setCaptureTrack` stops any prior capture first), so it is safe to call both
+   * when the mic starts and when the in/audio track alias is (re)assigned.
+   */
+  private startWorkerCapture(): void {
+    if (!this.workerClient || !this.audioPublisher || !this.micStarted) return;
+    const handoff = this.audioPublisher.getCaptureHandoff();
+    if (!handoff) {
+      this.logWarn('mic capture needs cross-origin isolation (SAB) — not publishing on this page');
+      return;
+    }
+    // SAB is shared by reference (NOT transferred — the worklet keeps writing it here).
+    void this.workerClient.call('setCaptureTrack', {
+      trackAlias: this.audioInputTrackAlias,
+      publisherPriority: 0, // high priority for audio
+      encoderConfig: this.audioPublisher.getEncoderConfig(),
+      numChannels: handoff.numChannels,
+      capacityFrames: handoff.capacityFrames,
+      sharedStorage: handoff.sharedStorage,
+      sharedWritePos: handoff.sharedWritePos,
+      sharedReadPos: handoff.sharedReadPos,
+      sharedSignal: handoff.sharedSignal,
+    });
+    this.log(`worker encoding mic → trackAlias=${this.audioInputTrackAlias} via SAB ring`);
   }
 
   /**
    * Stop capturing microphone audio
    */
   stopMicrophone(): void {
+    this.micStarted = false;
+    if (this.workerClient) {
+      void this.workerClient.call('stopCapture', {});
+    }
     if (this.audioPublisher) {
       this.audioPublisher.stop();
       this.log('Microphone stopped');
@@ -983,13 +997,9 @@ export class PanaudiaMoqClient {
 
     if (nsPath.includes('in/audio')) {
       this.audioInputTrackAlias = trackAlias;
-      if (this.audioTrackPublisher) {
-        this.audioTrackPublisher.detach();
-        this.audioTrackPublisher = new AudioTrackPublisher({ trackAlias, publisherPriority: 0 });
-        this.audioTrackPublisher.attach(this.sender);
-        this.audioTrackPublisher.startSession();
-        this.log(`Recreated audioTrackPublisher with trackAlias=${trackAlias}`);
-      }
+      // Re-point the worker's mic encoder at the assigned alias (no-op if the mic
+      // isn't started yet; setCaptureTrack restarts cleanly on the worker side).
+      this.startWorkerCapture();
     }
 
     if (nsPath.includes('state/') && !nsPath.includes('out/state')) {

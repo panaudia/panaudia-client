@@ -58,16 +58,28 @@ export class MoqTransportAdapter implements Transport {
 
     await this.client.connect();
 
-    // MOQ requires explicit audio start (unlike WebRTC where audio is
-    // negotiated as part of the SDP exchange during connect).
+    // MOQ requires explicit audio start (unlike WebRTC where audio is negotiated as
+    // part of the SDP exchange during connect). Audio setup must NOT be able to tear
+    // down the transport: a mic/codec/isolation failure in one browser (Safari
+    // permission, Firefox WebCodecs, …) would otherwise reject connect() and close the
+    // WebTransport → the server sees EOF. So each audio step is non-fatal — the session
+    // stays up and the real error surfaces as a warning.
     const audio = config.audio;
-    await this.client.startMicrophone({
-      ...(this.microphoneId ? { deviceId: this.microphoneId } : {}),
-      ...(audio?.echoCancellation !== undefined ? { echoCancellation: audio.echoCancellation } : {}),
-      ...(audio?.noiseSuppression !== undefined ? { noiseSuppression: audio.noiseSuppression } : {}),
-      ...(audio?.autoGainControl !== undefined ? { autoGainControl: audio.autoGainControl } : {}),
-    });
-    await this.client.startPlayback();
+    try {
+      await this.client.startMicrophone({
+        ...(this.microphoneId ? { deviceId: this.microphoneId } : {}),
+        ...(audio?.echoCancellation !== undefined ? { echoCancellation: audio.echoCancellation } : {}),
+        ...(audio?.noiseSuppression !== undefined ? { noiseSuppression: audio.noiseSuppression } : {}),
+        ...(audio?.autoGainControl !== undefined ? { autoGainControl: audio.autoGainControl } : {}),
+      });
+    } catch (e) {
+      console.warn('[panaudia] startMicrophone failed; staying connected without mic:', e);
+    }
+    try {
+      await this.client.startPlayback();
+    } catch (e) {
+      console.warn('[panaudia] startPlayback failed; staying connected without playback:', e);
+    }
   }
 
   async disconnect(): Promise<void> {

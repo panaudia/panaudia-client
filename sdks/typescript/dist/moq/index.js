@@ -1,6 +1,6 @@
-import { M as MoqClientError, J as JitterBufferCore, d as decodeVarint, p as parseObjectDatagram } from "../moq-transport-adapter.js";
-import { A, a, b, c, e, f, g, h, i, j, k, l, B, C, m, n, E, I, o, q, r, s, t, u, v, w, x, y, P, z, D, F, G, S, H, K, T, L, W, N, O, Q, R, U, V, X, Y, Z, _, $, a0, a1, a2, a3, a4, a5, a6, a7, a8, a9, aa, ab, ac, ad, ae, af, ag, ah, ai, aj, ak, al, am, an, ao, ap, aq, ar, as, at, au, av, aw, ax, ay, az, aA } from "../moq-transport-adapter.js";
-import { C as C2, a as a10, E as E2, b as b2, c as c2, d, e as e2, f as f2, g as g2, i as i2, h as h2, u as u2 } from "../topic-merger.js";
+import { M as MoqClientError, m as maxObjectDatagramSize, e as encodeObjectDatagramInto, J as JitterBufferCore, d as decodeVarint, p as parseObjectDatagram } from "../moq-transport-adapter.js";
+import { A, a, b, c, f, g, h, i, j, k, l, n, B, C, o, q, r, s, E, I, t, u, v, w, x, y, z, D, F, G, P, H, K, L, N, S, O, Q, T, R, W, U, V, X, Y, Z, _, $, a0, a1, a2, a3, a4, a5, a6, a7, a8, a9, aa, ab, ac, ad, ae, af, ag, ah, ai, aj, ak, al, am, an, ao, ap, aq, ar, as, at, au, av, aw, ax, ay, az, aA, aB, aC, aD, aE, aF, aG, aH } from "../moq-transport-adapter.js";
+import { C as C2, a as a10, E as E2, b as b2, c as c2, d, e, f as f2, g as g2, i as i2, h as h2, u as u2 } from "../topic-merger.js";
 var AudioSubscriberState = /* @__PURE__ */ ((AudioSubscriberState2) => {
   AudioSubscriberState2["IDLE"] = "idle";
   AudioSubscriberState2["SUBSCRIBING"] = "subscribing";
@@ -124,6 +124,105 @@ async function getAudioDecoderCapabilities() {
     };
   } catch {
     return { supported: true, opusSupported: false };
+  }
+}
+class CaptureEncoder {
+  ring;
+  trackAlias;
+  sampleRate;
+  nc;
+  priority;
+  encoder;
+  send;
+  // Reused scratch — the zero-alloc hot path (design §6/§8).
+  pcmScratch;
+  // drained interleaved PCM
+  bytesScratch;
+  // Opus bytes (encoder output copyTo)
+  dgPool;
+  // framed OBJECT_DATAGRAMs, round-robin (see config)
+  dgPoolIdx;
+  // Sequencing (lifted from AudioTrackPublisher): input timestamp is a running sample
+  // count; objectId is a monotonic counter; groupId is the chunk timestamp in ms.
+  samplesSent;
+  objectSeq;
+  // Observability.
+  encodedBatches;
+  sentDatagrams;
+  droppedOversize;
+  constructor(cfg) {
+    this.ring = cfg.ring;
+    this.trackAlias = cfg.trackAlias;
+    this.sampleRate = cfg.sampleRate;
+    this.nc = cfg.numChannels;
+    this.priority = cfg.publisherPriority ?? 0;
+    this.send = cfg.send;
+    const maxPayload = cfg.maxPayloadBytes ?? 4e3;
+    this.pcmScratch = new Float32Array(cfg.ring.capacity * this.nc);
+    this.bytesScratch = new Uint8Array(maxPayload);
+    const poolSize = cfg.datagramPoolSize ?? 8;
+    this.dgPool = [];
+    for (let i3 = 0; i3 < poolSize; i3++) {
+      this.dgPool.push(new Uint8Array(maxObjectDatagramSize(maxPayload)));
+    }
+    this.dgPoolIdx = 0;
+    this.samplesSent = 0;
+    this.objectSeq = 0n;
+    this.encodedBatches = 0;
+    this.sentDatagrams = 0;
+    this.droppedOversize = 0;
+    this.encoder = cfg.makeEncoder((chunk) => this.handleChunk(chunk));
+  }
+  /**
+   * Drain all PCM currently in the ring and feed it to the encoder as one AudioData.
+   * Called on each wake (design §6.1). Returns the interleaved sample count encoded (0
+   * if the ring was empty). Opus does the 240-frame packetization internally.
+   */
+  pump() {
+    const n2 = this.ring.drain(this.pcmScratch);
+    if (n2 <= 0) {
+      return 0;
+    }
+    const frames = n2 / this.nc;
+    const timestampUs = Math.round(this.samplesSent / this.sampleRate * 1e6);
+    this.encoder.encode(this.pcmScratch.subarray(0, n2), frames, timestampUs);
+    this.samplesSent += frames;
+    this.encodedBatches++;
+    return n2;
+  }
+  /** Encoder output: frame the Opus packet into reused scratch and send it. No alloc. */
+  handleChunk(chunk) {
+    const size = chunk.byteLength;
+    if (size === 0) {
+      return;
+    }
+    if (size > this.bytesScratch.length) {
+      this.droppedOversize++;
+      return;
+    }
+    chunk.copyTo(this.bytesScratch);
+    const groupId = BigInt(Math.floor(chunk.timestamp / 1e3));
+    const objectId = this.objectSeq++;
+    const dg = this.dgPool[this.dgPoolIdx];
+    this.dgPoolIdx = (this.dgPoolIdx + 1) % this.dgPool.length;
+    const len = encodeObjectDatagramInto(
+      dg,
+      this.trackAlias,
+      groupId,
+      objectId,
+      this.priority,
+      this.bytesScratch.subarray(0, size)
+    );
+    this.send(dg.subarray(0, len));
+    this.sentDatagrams++;
+  }
+  /** Flush any buffered Opus packet (fires `handleChunk`) and close the encoder. */
+  async stop() {
+    try {
+      await this.encoder.flush();
+    } catch {
+    }
+    this.encoder.close();
   }
 }
 function audioReceiveWorkerSupported() {
@@ -276,112 +375,117 @@ export {
   a as AttributesSubscriber,
   b as AudioDecoderNotSupportedError,
   c as AudioEncodingError,
-  e as AudioNotSupportedError,
-  f as AudioPermissionError,
-  g as AudioPlayer,
-  h as AudioPlayerState,
-  i as AudioPublisher,
-  j as AudioPublisherState,
+  f as AudioNotSupportedError,
+  g as AudioPermissionError,
+  h as AudioPlayer,
+  i as AudioPlayerState,
+  j as AudioPublisher,
+  k as AudioPublisherState,
   AudioSubscriber,
   AudioSubscriberState,
-  k as AudioTrackPublisher,
-  l as AuthenticationError,
+  l as AudioTrackPublisher,
+  n as AuthenticationError,
   B as BluetoothMicDefaultError,
+  C as CAPTURE_PROCESSOR_NAME,
   C2 as CacheMap,
-  C as CacheTopicSubscriber,
-  m as ConnectionError,
+  o as CacheTopicSubscriber,
+  CaptureEncoder,
+  q as CaptureRing,
+  r as ConnectionError,
   a10 as ConnectionState,
-  n as ControlTrackPublisher,
+  s as ControlTrackPublisher,
   E2 as ENTITY_INFO3_SIZE,
   E as EntitySubscriber,
   I as InvalidStateError,
   JitterBufferCore,
-  o as JwtParseError,
-  q as MOQ_TRANSPORT_VERSION,
-  r as MessageBuilder,
+  t as JwtParseError,
+  u as MOQ_TRANSPORT_VERSION,
+  v as MessageBuilder,
   MoqClientError,
-  s as MoqConnection,
-  t as MoqErrorCode,
-  u as MoqFilterType,
-  v as MoqForwardingPreference,
-  w as MoqMessageType,
-  x as MoqRole,
-  y as MoqTransportAdapter,
+  w as MoqConnection,
+  x as MoqErrorCode,
+  y as MoqFilterType,
+  z as MoqForwardingPreference,
+  D as MoqMessageType,
+  F as MoqRole,
+  G as MoqTransportAdapter,
   P as PLAYOUT_PROCESSOR_NAME,
-  z as PLAYOUT_TUNING,
-  D as PanaudiaMoqClient,
-  F as PanaudiaTrackType,
-  G as ProtocolError,
+  H as PLAYOUT_TUNING,
+  K as PanaudiaMoqClient,
+  L as PanaudiaTrackType,
+  N as ProtocolError,
   S as StateSubscriber,
-  H as StateTrackPublisher,
-  K as SubscriptionError,
+  O as StateTrackPublisher,
+  Q as SubscriptionError,
   T as TimeoutError,
-  L as TrackPublisher,
+  R as TrackPublisher,
   W as WebTransportNotSupportedError,
-  N as aframeToPanaudia,
-  O as ambisonicToWebglPosition,
-  Q as ambisonicToWebglRotation,
+  U as aframeToPanaudia,
+  V as ambisonicToWebglPosition,
+  X as ambisonicToWebglRotation,
   audioReceiveWorkerSupported,
-  R as babylonToPanaudia,
-  U as buildAnnounce,
-  V as buildClientSetup,
-  X as buildObjectDatagram,
-  Y as buildPlayoutWorkletCode,
+  Y as babylonToPanaudia,
+  Z as buildAnnounce,
+  _ as buildCaptureWorkletCode,
+  $ as buildClientSetup,
+  a0 as buildObjectDatagram,
+  a1 as buildPlayoutWorkletCode,
   buildReceiveWorkerCode,
-  Z as buildSubscribe,
-  _ as buildUnannounce,
-  $ as buildUnsubscribe,
+  a2 as buildSubscribe,
+  a3 as buildUnannounce,
+  a4 as buildUnsubscribe,
   b2 as bytesToUuid,
-  a0 as computeJitterCapacity,
+  a5 as captureCapacityFrames,
+  a6 as computeJitterCapacity,
+  a7 as createCaptureWorkletUrl,
   c2 as createEntityInfo3,
-  a1 as createPlayoutWorkletUrl,
+  a8 as createPlayoutWorkletUrl,
   createReceiveWorkerUrl,
-  a2 as decodeBytes,
+  a9 as decodeBytes,
   d as decodeCacheOp,
-  a3 as decodeString,
+  aa as decodeString,
   decodeVarint,
-  a4 as encodeBytes,
-  e2 as encodeCacheOp,
-  a5 as encodeString,
-  a6 as encodeVarint,
+  ab as encodeBytes,
+  e as encodeCacheOp,
+  ac as encodeString,
+  ad as encodeVarint,
   f2 as entityInfo3FromBytes,
   g2 as entityInfo3ToBytes,
-  a7 as generateTrackNamespace,
-  a8 as getAudioCapabilities,
+  ae as generateTrackNamespace,
+  af as getAudioCapabilities,
   getAudioDecoderCapabilities,
-  a9 as getAudioPlaybackCapabilities,
-  aa as getBestOpusMimeType,
-  ab as getMoqErrorMessage,
-  ac as getWebTransportSupport,
+  ag as getAudioPlaybackCapabilities,
+  ah as getBestOpusMimeType,
+  ai as getMoqErrorMessage,
+  aj as getWebTransportSupport,
   isAudioDecoderSupported,
-  ad as isAudioPlaybackSupported,
+  ak as isAudioPlaybackSupported,
   i2 as isCacheEnvelope,
-  ae as isOpusSupported,
+  al as isOpusSupported,
   h2 as isValidUuid,
-  af as isWebTransportSupported,
-  ag as panaudiaToAframe,
-  ah as panaudiaToBabylon,
-  ai as panaudiaToPixi,
-  aj as panaudiaToPlaycanvas,
-  ak as panaudiaToThreejs,
-  al as panaudiaToUnity,
-  am as panaudiaToUnreal,
-  an as parseAnnounceError,
-  ao as parseAnnounceOk,
-  ap as parseMessageType,
+  am as isWebTransportSupported,
+  an as panaudiaToAframe,
+  ao as panaudiaToBabylon,
+  ap as panaudiaToPixi,
+  aq as panaudiaToPlaycanvas,
+  ar as panaudiaToThreejs,
+  as as panaudiaToUnity,
+  at as panaudiaToUnreal,
+  au as parseAnnounceError,
+  av as parseAnnounceOk,
+  aw as parseMessageType,
   parseObjectDatagram,
-  aq as parseServerSetup,
-  ar as parseSubscribeError,
-  as as parseSubscribeOk,
-  at as pixiToPanaudia,
-  au as playcanvasToPanaudia,
+  ax as parseServerSetup,
+  ay as parseSubscribeError,
+  az as parseSubscribeOk,
+  aA as pixiToPanaudia,
+  aB as playcanvasToPanaudia,
   routeDatagram,
-  av as threejsToPanaudia,
-  aw as unityToPanaudia,
-  ax as unrealToPanaudia,
+  aC as threejsToPanaudia,
+  aD as unityToPanaudia,
+  aE as unrealToPanaudia,
   u2 as uuidToBytes,
-  ay as webglToAmbisonicPosition,
-  az as webglToAmbisonicRotation,
-  aA as wrapError
+  aF as webglToAmbisonicPosition,
+  aG as webglToAmbisonicRotation,
+  aH as wrapError
 };
-//# sourceMappingURL=index.js.map

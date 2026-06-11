@@ -36,6 +36,9 @@ export interface PlayoutProcessorOptions {
 export interface PlayoutStatsMessage {
   type: 'stats';
   snapshot: JitterBufferSnapshot;
+  /** True fill min/max (frames) across the window — every read, not point-sampled. */
+  fillMin?: number;
+  fillMax?: number;
 }
 
 /**
@@ -64,6 +67,10 @@ class PlayoutRingProcessor extends AudioWorkletProcessor {
     this.nc = this.core.nc;
     this.statsEvery = opts.statsEvery || 94;
     this.readsSinceStats = 0;
+    // CLOCKTEST: true fill min/max across the stats window (every read, not the
+    // 250ms point-sample) — reveals the real sawtooth amplitude from reader-burst.
+    this.winFillMin = 1e9;
+    this.winFillMax = 0;
     this.scratch = new Float32Array(128 * this.nc);
     this.pcmPort = null;
     // WRITER inputs arrive on this.port:
@@ -97,6 +104,9 @@ class PlayoutRingProcessor extends AudioWorkletProcessor {
     const block = this.scratch.subarray(0, need);
     // core.read zeroes the block on startup/underrun, so silence falls through.
     this.core.read(block);
+    const fill = this.core.fillFrames();
+    if (fill < this.winFillMin) this.winFillMin = fill;
+    if (fill > this.winFillMax) this.winFillMax = fill;
     for (let ch = 0; ch < out.length; ch++) {
       const dst = out[ch];
       const srcCh = ch < nc ? ch : nc - 1;
@@ -104,7 +114,9 @@ class PlayoutRingProcessor extends AudioWorkletProcessor {
     }
     if (++this.readsSinceStats >= this.statsEvery) {
       this.readsSinceStats = 0;
-      this.port.postMessage({ type: 'stats', snapshot: this.core.snapshot() });
+      this.port.postMessage({ type: 'stats', snapshot: this.core.snapshot(), fillMin: this.winFillMin, fillMax: this.winFillMax });
+      this.winFillMin = 1e9;
+      this.winFillMax = 0;
     }
     return true;
   }

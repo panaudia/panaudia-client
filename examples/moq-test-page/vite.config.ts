@@ -17,6 +17,9 @@ const httpsOptions = {
 // postMessage PCM path (works, but couples audio delivery to main-thread jank).
 const crossOriginIsolationHeaders = {
   'Cross-Origin-Opener-Policy': 'same-origin',
+  // require-corp: broadest cross-origin-isolation support (older Safari predates
+  // `credentialless`). The FF/Safari EOF was NOT this — credentialless didn't fix it;
+  // it was audio-setup coupled into connect (now made non-fatal in the MOQ adapter).
   'Cross-Origin-Embedder-Policy': 'require-corp',
 };
 

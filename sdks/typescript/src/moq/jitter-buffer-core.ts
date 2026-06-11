@@ -40,10 +40,22 @@
  */
 export const PLAYOUT_TUNING = {
   safetyMs: 1, // S — floor pad above the underrun edge
-  lowInitMs: 5, // warm-start L (server output is low-jitter MOQ datagrams)
-  lowMinMs: 2, // baseline late cushion
+  // Deepened 2026-06-10 to absorb the browser reader-burst sawtooth. Measured: the
+  // AudioWorklet consumes in ~device-buffer clumps (~13 ms swing; outputLatency 37 ms)
+  // while the worker feeds smoothly at 5 ms, so `fill` sawtooths ~13 ms. The operating
+  // band floor→dropLine (= L + W + H) must exceed that, and the MINIMUMS must hold it
+  // there: the controller narrows on one-sided drops, and a reader-burst looks exactly
+  // like one-sided drops, so without high minimums it shrinks the band into the sawtooth.
+  // Retuned 2026-06-10 (robustness > latency): the controller narrows to the MINIMUMS
+  // under a reader-burst (one-sided drops), so lowMin/highMin ARE the steady-state
+  // operating point and must hold the WORST observed swing (~19 ms), not the median
+  // (~12 ms). Inits govern the warm-up window before adaptation (cures early crackle).
+  lowInitMs: 10, // warm-start L — keeps the sawtooth trough off the floor during warm-up
+  lowMinMs: 7, // late-cushion floor (steady-state min)
   lowMaxMs: 30, // latency ceiling
-  highMaxMultiple: 3, // H_max = 3·W
+  highInitMs: 16, // warm-start H — headroom for the reader-burst peak + warm-up transients
+  highMinMs: 14, // H floor (steady-state min) — sized for the worst reader-burst swing
+  highMaxMs: 30, // H ceiling — headroom for deeper-buffered output devices
   windowReads: 750, // N — 2.0s at the 2.667ms worklet cadence (Go uses 400 = 2.0s at 5ms)
   widenThreshold: 5, // corrections/side/window to call it jitter
   widenStepMs: 2, // eager up
@@ -117,7 +129,7 @@ export function computeJitterCapacity(cfg: JitterBufferCoreConfig = {}): { capac
   const R = cfg.readerFrame ?? f(5);
   const S = cfg.safety ?? f(1);
   const lMax = cfg.lowMax ?? f(30);
-  const hMax = cfg.highMax ?? 3 * W;
+  const hMax = cfg.highMax ?? f(30); // PLAYOUT_TUNING.highMaxMs — MUST match the ctor default
   const maxWR = Math.max(W, R);
   const bandTopMax = R + S + lMax + 2 * W + hMax; // overrunAt at L_max, H_max
   return { capacity: 2 * bandTopMax + 2 * maxWR, nc };
@@ -231,14 +243,15 @@ export class JitterBufferCore {
     const R = cfg.readerFrame ?? f(5);
     const S = cfg.safety ?? f(1); // PLAYOUT_TUNING.safetyMs
 
-    const lInit = cfg.lowInit ?? f(5); // PLAYOUT_TUNING.lowInitMs
-    const lMin = cfg.lowMin ?? f(2); // PLAYOUT_TUNING.lowMinMs
+    const lInit = cfg.lowInit ?? f(10); // PLAYOUT_TUNING.lowInitMs
+    const lMin = cfg.lowMin ?? f(7); // PLAYOUT_TUNING.lowMinMs
     const lMax = cfg.lowMax ?? f(30); // PLAYOUT_TUNING.lowMaxMs
 
-    // High-side defaults are W-relative (cheap headroom, sized to a bunch).
-    const hInit = cfg.highInit ?? W;
-    const hMin = cfg.highMin ?? W;
-    const hMax = cfg.highMax ?? 3 * W; // PLAYOUT_TUNING.highMaxMultiple
+    // High-side defaults absorb the browser reader-burst sawtooth — ms-based, NOT
+    // W-relative (the burst is a hardware property, independent of the server frame).
+    const hInit = cfg.highInit ?? f(16); // PLAYOUT_TUNING.highInitMs
+    const hMin = cfg.highMin ?? f(14); // PLAYOUT_TUNING.highMinMs
+    const hMax = cfg.highMax ?? f(30); // PLAYOUT_TUNING.highMaxMs
 
     if (R <= 0 || W <= 0) {
       throw new Error('JitterBufferCore: readerFrame and writerFrame must be > 0');

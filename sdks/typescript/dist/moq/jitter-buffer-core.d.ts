@@ -39,10 +39,12 @@
  */
 export declare const PLAYOUT_TUNING: {
     readonly safetyMs: 1;
-    readonly lowInitMs: 5;
-    readonly lowMinMs: 2;
+    readonly lowInitMs: 10;
+    readonly lowMinMs: 7;
     readonly lowMaxMs: 30;
-    readonly highMaxMultiple: 3;
+    readonly highInitMs: 16;
+    readonly highMinMs: 14;
+    readonly highMaxMs: 30;
     readonly windowReads: 750;
     readonly widenThreshold: 5;
     readonly widenStepMs: 2;

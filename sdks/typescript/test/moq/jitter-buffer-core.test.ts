@@ -109,9 +109,14 @@ describe('geometry — worked examples', () => {
     over: number;
   }
   const cases: Array<{ name: string; cfg: JitterBufferCoreConfig; floor: number; capacity: number; atInit: LV; atMax: LV }> = [
+    // NOTE: these cases pin L/H EXPLICITLY (not via defaults) so they test the levels
+    // and capacity MATH independent of PLAYOUT_TUNING — which deepened 2026-06-10 for
+    // the browser reader-burst. The explicit values below are the pre-2026-06-10
+    // defaults, so the expected geometry is unchanged. Default VALUES are checked
+    // separately in the 'defaults' test.
     {
       name: 'MOQ 20/5',
-      cfg: { writerFrame: 20 * F, readerFrame: 5 * F },
+      cfg: { writerFrame: 20 * F, readerFrame: 5 * F, lowInit: 5 * F, lowMin: 2 * F, lowMax: 30 * F, highInit: 20 * F, highMin: 5 * F, highMax: 60 * F },
       floor: 288,
       capacity: 14976,
       atInit: { t: 528, snap: 1488, drop: 2448, over: 3408 },
@@ -119,7 +124,7 @@ describe('geometry — worked examples', () => {
     },
     {
       name: 'MOQ 5/5',
-      cfg: { writerFrame: 5 * F, readerFrame: 5 * F },
+      cfg: { writerFrame: 5 * F, readerFrame: 5 * F, lowInit: 5 * F, lowMin: 2 * F, lowMax: 30 * F, highInit: 5 * F, highMin: 5 * F, highMax: 15 * F },
       floor: 288,
       capacity: 6336,
       atInit: { t: 528, snap: 768, drop: 1008, over: 1248 },
@@ -127,7 +132,7 @@ describe('geometry — worked examples', () => {
     },
     {
       name: 'WebRTC 20/5, LowInit 10',
-      cfg: { writerFrame: 20 * F, readerFrame: 5 * F, lowInit: 10 * F },
+      cfg: { writerFrame: 20 * F, readerFrame: 5 * F, lowInit: 10 * F, lowMin: 2 * F, lowMax: 30 * F, highInit: 20 * F, highMin: 5 * F, highMax: 60 * F },
       floor: 288,
       capacity: 14976,
       atInit: { t: 768, snap: 1728, drop: 2688, over: 3648 },
@@ -135,7 +140,7 @@ describe('geometry — worked examples', () => {
     },
     {
       name: 'browser playout 240/128 (W=5ms, R=128)',
-      cfg: { writerFrame: 240, readerFrame: 128 },
+      cfg: { writerFrame: 240, readerFrame: 128, lowInit: 5 * F, lowMin: 2 * F, lowMax: 30 * F, highInit: 5 * F, highMin: 5 * F, highMax: 15 * F },
       floor: 176,
       // 2*(128+48+1440+480+720)+2*240 = 2*2816+480 = 6112
       capacity: 6112,
@@ -168,9 +173,9 @@ describe('geometry — worked examples', () => {
 
 describe('construction', () => {
   it('warm-start seed', () => {
-    const j = new JitterBufferCore({ writerFrame: 20 * F, readerFrame: 5 * F, lowInit: 5 * F });
-    expect(j.currentL).toBe(240); // 5ms
-    expect(j.currentH).toBe(960); // default H_init = W = 20ms
+    const j = new JitterBufferCore({ writerFrame: 20 * F, readerFrame: 5 * F, lowInit: 5 * F, lowMin: 2 * F });
+    expect(j.currentL).toBe(240); // 5ms (explicit lowInit)
+    expect(j.currentH).toBe(768); // default H_init = PLAYOUT_TUNING.highInitMs (16ms)
   });
 
   it('panics on bad input', () => {
@@ -180,16 +185,20 @@ describe('construction', () => {
     expect(() => new JitterBufferCore({ writerFrame: 20 * F, readerFrame: 5 * F, highMin: 100 * F, highMax: 30 * F })).toThrow();
   });
 
-  it('defaults (browser: N=750, the one divergence from Go)', () => {
+  it('defaults match PLAYOUT_TUNING (browser tuning, deepened for reader-burst)', () => {
     const j = new JitterBufferCore({});
+    const f = (ms: number) => Math.floor((48000 * ms) / 1000);
     expect(j.sampleRate).toBe(48000);
     expect(j.nc).toBe(1);
-    expect(j.w).toBe(960); // 20ms
+    expect(j.w).toBe(960); // 20ms (default W)
     expect(j.floor).toBe(288); // R(240)+S(48)
-    expect(j.lMin).toBe(96);
-    expect(j.lMax).toBe(1440);
-    expect(j.hMin).toBe(960);
-    expect(j.hMax).toBe(2880); // W and 3W
+    // Low/high allowances now ms-based and deepened — cross-checked against PLAYOUT_TUNING.
+    expect(j.lMin).toBe(f(PLAYOUT_TUNING.lowMinMs)); // 5ms = 240
+    expect(j.lMax).toBe(f(PLAYOUT_TUNING.lowMaxMs)); // 30ms = 1440
+    expect(j.hMin).toBe(f(PLAYOUT_TUNING.highMinMs)); // 10ms = 480
+    expect(j.hMax).toBe(f(PLAYOUT_TUNING.highMaxMs)); // 25ms = 1200
+    expect(j.currentL).toBe(f(PLAYOUT_TUNING.lowInitMs)); // 8ms = 384
+    expect(j.currentH).toBe(f(PLAYOUT_TUNING.highInitMs)); // 12ms = 576
     expect(j.windowReads).toBe(750); // browser default (Go: 400)
     expect(j.windowReads).toBe(PLAYOUT_TUNING.windowReads);
     expect(j.widenThreshold).toBe(5);
@@ -677,13 +686,13 @@ describe('clock-driven jitter sim', () => {
 
 describe('snapshot & stats', () => {
   it('exposes geometry and live allowances', () => {
-    const j = new JitterBufferCore({ writerFrame: 20 * F, readerFrame: 5 * F, lowInit: 5 * F });
+    const j = new JitterBufferCore({ writerFrame: 20 * F, readerFrame: 5 * F, lowInit: 5 * F, lowMin: 2 * F });
     const s = j.snapshot();
     expect(s.floorFrames).toBe(288);
     expect(s.lowAllowanceFrames).toBe(240);
     expect(s.lowAllowanceMs).toBe(5.0);
-    expect(s.highAllowanceFrames).toBe(960);
-    expect(s.highAllowanceMs).toBe(20.0);
+    expect(s.highAllowanceFrames).toBe(768); // default H_init = 16ms
+    expect(s.highAllowanceMs).toBe(16.0);
     expect(s.targetFrames).toBe(528); // floor 288 + L 240
     expect(s.started).toBe(false);
     expect(s.fillFrames).toBe(0);
@@ -741,7 +750,10 @@ describe('snapshot & stats', () => {
 });
 
 describe('SAB cross-thread mode (design §11.3)', () => {
-  const cfg: JitterBufferCoreConfig = { sampleRate: 48000, numChannels: 2, readerFrame: 128, writerFrame: 240 };
+  // lowInit/lowMin pinned to pre-2026-06-10 defaults so these cross-thread read/write/snap
+  // assertions keep their snapTarget=656 geometry (and lowMin<=lowInit); the deepened
+  // default is exercised in the 'defaults' test, not here.
+  const cfg: JitterBufferCoreConfig = { sampleRate: 48000, numChannels: 2, readerFrame: 128, writerFrame: 240, lowInit: 5 * F, lowMin: 2 * F };
 
   /** Allocate the shared ring + writePos and return a writer view and a reader view of it. */
   function sharedPair() {

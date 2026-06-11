@@ -78,6 +78,9 @@ export declare class AudioPlayer {
     private lastSnapshot;
     private decodeStats;
     private jbufLogCount;
+    private clockT0Wall;
+    private clockT0Ctx;
+    private clockLogged;
     private workerDecodeMode;
     private sharedStorage;
     private sharedWritePos;
@@ -169,6 +172,14 @@ export declare class AudioPlayer {
      * [JBUF] tuning line (design §10 / plan Phase 4). Gated by `debug`; throttled
      * to ~1/s (the worklet posts stats ~4/s). Filter devtools by "JBUF" during soak.
      */
+    /**
+     * CLOCKTEST: compare the audio-output (DAC) clock to the wall clock. `currentTime`
+     * advances in the audio render domain; `performance.now()` in the CPU domain. Over
+     * ~60s, if the DAC is slower than the CPU/server clock, `currentTime` advances less →
+     * negative ppm — which is exactly what produces the drop-dominant ±1 splices. Fires
+     * once. Logged unconditionally (it's a deliberate diagnostic).
+     */
+    private clockProbe;
     private logJitter;
     /**
      * Handle decode error
