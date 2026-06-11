@@ -12,6 +12,25 @@ import type {
   Rotation,
 } from './types.js';
 import type { MergeDebugInfo } from './shared/topic-merger.js';
+import type { StereoMeterReport } from './moq/stereo-meter-core.js';
+import type { DecodedFormatInfo } from './moq/moq-worker-protocol.js';
+import type { AudioGraphReport } from './moq/audio-player.js';
+
+/**
+ * Stereo diagnostics (plan/stereo-diagnostics). Tap A measures decoded stream
+ * content (worker), Tap B the rendered output (playout worklet); `graph` is the
+ * channel-count-relevant playout-graph snapshot. MOQ-only today — transports
+ * that don't measure simply omit `getStereoDiagnostics`.
+ */
+export interface StereoDiagnostics {
+  tapA: StereoMeterReport | null;
+  tapB: StereoMeterReport | null;
+  decodedFormat: DecodedFormatInfo | null;
+  graph: AudioGraphReport | null;
+  userAgent: string;
+  /** Negotiated WebTransport subprotocol ('moqt-16' when draft-16 negotiation worked). */
+  subprotocol: string | null;
+}
 
 /**
  * Configuration passed to a Transport when connecting.
@@ -86,6 +105,9 @@ export interface Transport {
 
   /** Get current playback volume. */
   getVolume(): number;
+
+  /** Stereo diagnostics (optional — implemented by the MOQ transport only). */
+  getStereoDiagnostics?(): StereoDiagnostics;
 
   /** Mute local microphone (keep connection, stop sending). */
   muteMic(): void;

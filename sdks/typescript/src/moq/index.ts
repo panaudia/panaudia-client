@@ -250,11 +250,17 @@ export {
 export type {
   AudioPlayerConfig,
   AudioPlayerStats,
+  AudioGraphReport,
 } from './audio-player.js';
 
 // v3 adaptive jitter buffer (ring-in-worklet playout)
 export { JitterBufferCore, PLAYOUT_TUNING, computeJitterCapacity } from './jitter-buffer-core.js';
 export type { JitterBufferCoreConfig, JitterBufferSnapshot, Levels } from './jitter-buffer-core.js';
+
+// Stereo diagnostics (mono-collapse localization — plan/stereo-diagnostics)
+export { StereoMeterCore } from './stereo-meter-core.js';
+export type { StereoMeterReport } from './stereo-meter-core.js';
+export type { DecodedFormatInfo } from './moq-worker-protocol.js';
 export {
   PLAYOUT_PROCESSOR_NAME,
   buildPlayoutWorkletCode,

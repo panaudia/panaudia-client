@@ -22,12 +22,15 @@ import { JitterBufferCore } from './jitter-buffer-core.js';
 import { CaptureRing } from './capture-ring.js';
 import { CaptureEncoder, type EncodedChunkLike, type FrameEncoder } from './capture-encoder.js';
 import { parseObjectDatagram } from './moq-transport.js';
+import { StereoMeterCore } from './stereo-meter-core.js';
 import type {
   WorkerRequest,
   WorkerEvent,
   WorkerOutbound,
   WorkerDecoderConfig,
+  DecodedFormatInfo,
   SubscribeResult,
+  ConnectResult,
 } from './moq-worker-protocol.js';
 
 // tsconfig lib is DOM (not WebWorker); type the worker globals locally.
@@ -47,6 +50,38 @@ let reading = false;
 // per-frame. jbuf.write copies into the ring synchronously, so the scratch is safe to
 // reuse on the next decoded frame — no `new Float32Array` per packet.
 let decodePcm = new Float32Array(0);
+
+// Stereo diagnostics (plan/stereo-diagnostics Phase 2) — Tap A + format watch.
+// The spec only mandates copyTo conversion to 'f32-planar'; the interleaved 'f32'
+// copy is optional and Firefox rejects it. Probe once per worker lifetime (an
+// engine property, not a stream property), then stick to the working path.
+let copyPath: 'f32' | 'f32-planar' | null = null;
+let planarScratch = new Float32Array(0); // grow-on-demand, one plane at a time
+let decodedFormatKey = ''; // last emitted format fingerprint (emit on change only)
+let tapAMeter: StereoMeterCore | null = null; // created per setAudioTrack, debug-gated
+let tapAWindowFrames = 12000; // ~250 ms; recomputed from the decoder sample rate
+
+/**
+ * Copy one decoded AudioData into `pcm` as interleaved f32, preferring the
+ * single interleaved copy and falling back to per-plane planar copies.
+ */
+function copyDecoded(audioData: AudioData, pcm: Float32Array, frames: number, channels: number): void {
+  if (copyPath !== 'f32-planar') {
+    try {
+      audioData.copyTo(pcm, { planeIndex: 0, format: 'f32' });
+      copyPath = 'f32';
+      return;
+    } catch {
+      copyPath = 'f32-planar'; // engine refuses interleaved copies — planar from now on
+    }
+  }
+  if (planarScratch.length < frames) planarScratch = new Float32Array(frames);
+  const plane = planarScratch.subarray(0, frames);
+  for (let ch = 0; ch < channels; ch++) {
+    audioData.copyTo(plane, { planeIndex: ch, format: 'f32-planar' });
+    for (let i = 0; i < frames; i++) pcm[i * channels + ch] = plane[i]!;
+  }
+}
 
 // Diagnostics are split into two gates:
 //   `diagEnabled` — the continuous timing data (decode-rate + burst). Useful, kept,
@@ -141,8 +176,35 @@ function configureDecoder(cfg: WorkerDecoderConfig): void {
         const need = frames * channels;
         if (decodePcm.length < need) decodePcm = new Float32Array(need); // grow only
         const pcm = decodePcm.subarray(0, need);
-        audioData.copyTo(pcm, { planeIndex: 0, format: 'f32' });
+        copyDecoded(audioData, pcm, frames, channels);
         jbuf?.write(pcm); // straight into the SAB ring — no postMessage, no per-frame alloc
+
+        // Format watch (always on, emits only on change): what the decoder is
+        // ACTUALLY producing — a configured-stereo decoder emitting mono, or a
+        // sample-rate surprise, is layer-2 mono collapse and shows up right here.
+        const fmtKey = `${channels}|${audioData.sampleRate}|${audioData.format ?? '?'}|${copyPath}`;
+        if (fmtKey !== decodedFormatKey) {
+          decodedFormatKey = fmtKey;
+          emit({
+            kind: 'evt',
+            type: 'decodedFormat',
+            format: {
+              numberOfChannels: channels,
+              sampleRate: audioData.sampleRate,
+              nativeFormat: audioData.format ?? null,
+              copyPath: copyPath as NonNullable<typeof copyPath>,
+            } satisfies DecodedFormatInfo,
+          });
+        }
+
+        // Tap A (debug-gated like the timing probes): stereo-ness of the decoded
+        // stream content, windowed to ~250 ms.
+        if (diagEnabled && tapAMeter) {
+          tapAMeter.writeInterleaved(pcm, channels);
+          if (tapAMeter.frameCount >= tapAWindowFrames) {
+            emit({ kind: 'evt', type: 'stereoMetrics', tap: 'decoded', report: tapAMeter.snapshotAndReset() });
+          }
+        }
 
         // Diagnostic: report frames/wall-second + burst buckets every ~2s. Gated on
         // `debug` so the decode hot path stays allocation- and work-free in production.
@@ -213,6 +275,12 @@ function configureDecoder(cfg: WorkerDecoderConfig): void {
     numberOfChannels: cfg.numberOfChannels,
     optimizeForLatency: true,
   } as AudioDecoderConfig & { optimizeForLatency: boolean });
+
+  // Fresh diagnostics per decoder: re-announce the observed format and restart
+  // the Tap A window. copyPath is kept — it's an engine property, not stream state.
+  decodedFormatKey = '';
+  tapAWindowFrames = Math.max(1, Math.round(cfg.sampleRate / 4)); // ~250 ms
+  tapAMeter = diagEnabled ? new StereoMeterCore() : null;
 }
 
 /** Read the datagram readable directly: audio → decode → SAB; everything else → main. */
@@ -335,7 +403,7 @@ async function handle(method: WorkerRequest['method'], args: WorkerRequest['args
       session.onIncomingSubscribe((namespace, trackAlias) =>
         emit({ kind: 'evt', type: 'incomingSubscribe', namespace, trackAlias })
       );
-      return;
+      return { subprotocol: connection.getNegotiatedSubprotocol() } satisfies ConnectResult;
     }
     case 'initSession': {
       const a = args as Extract<WorkerRequest, { method: 'initSession' }>['args'];

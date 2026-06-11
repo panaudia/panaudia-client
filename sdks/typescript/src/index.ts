@@ -99,7 +99,12 @@ export { resolveServer } from './gateway.js';
 export type { ResolveServerOptions } from './gateway.js';
 
 // Transport interface
-export type { Transport, TransportConfig, AudioCaptureConfig, AudioPlaybackConfig } from './transport.js';
+export type { Transport, TransportConfig, AudioCaptureConfig, AudioPlaybackConfig, StereoDiagnostics } from './transport.js';
+
+// Stereo diagnostics (mono-collapse localization — plan/stereo-diagnostics)
+export type { StereoMeterReport } from './moq/stereo-meter-core.js';
+export type { DecodedFormatInfo } from './moq/moq-worker-protocol.js';
+export type { AudioGraphReport } from './moq/audio-player.js';
 
 // Unified client
 export { PanaudiaClient } from './panaudia-client.js';

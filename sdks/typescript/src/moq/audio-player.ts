@@ -14,6 +14,7 @@
 import { MoqClientError } from './errors.js';
 import { createPlayoutWorkletUrl, PLAYOUT_PROCESSOR_NAME, type PlayoutProcessorOptions, type PlayoutStatsMessage } from './playout-worklet.js';
 import { computeJitterCapacity, type JitterBufferCoreConfig, type JitterBufferSnapshot } from './jitter-buffer-core.js';
+import type { StereoMeterReport } from './stereo-meter-core.js';
 
 /**
  * How the receive Worker should receive decoded PCM (design §11.3). `sab` is the
@@ -79,6 +80,46 @@ export enum AudioPlayerState {
 }
 
 /**
+ * Snapshot of every channel-count-relevant property of the playout graph
+ * (plan/stereo-diagnostics Phase 3). The graph is worklet → gain → destination;
+ * gain is scalar, so the worklet's Tap B ≡ pre-destination content, and the
+ * destination's own downmix (layer 3 of the failure model) is inferred from
+ * `destination.channelCount` here.
+ */
+export interface AudioGraphReport {
+  context: {
+    sampleRate: number;
+    state: string;
+    baseLatencyMs: number | null;
+    outputLatencyMs: number | null;
+  };
+  destination: {
+    channelCount: number;
+    maxChannelCount: number;
+    channelCountMode: string;
+    channelInterpretation: string;
+  };
+  worklet: {
+    /** From config — the worklet was created with outputChannelCount: [this]. */
+    outputChannelCount: number;
+    channelCount: number;
+    channelCountMode: string;
+    channelInterpretation: string;
+  } | null;
+  ring: {
+    /** 'sab' = shared ring (cross-origin isolated); 'port' = postMessage fallback. */
+    mode: 'sab' | 'port';
+    writerFrameSamples: number;
+    numChannels: number;
+  };
+  configured: {
+    sampleRate: number;
+    channelCount: number;
+    latencyHint: string;
+  };
+}
+
+/**
  * Audio player statistics
  */
 export interface AudioPlayerStats {
@@ -117,6 +158,9 @@ export class AudioPlayer {
 
   // Latest stats snapshot pushed from the worklet.
   private lastSnapshot: JitterBufferSnapshot | null = null;
+
+  // Latest Tap B stereo window (rendered output), piggybacked on worklet stats.
+  private lastTapB: StereoMeterReport | null = null;
 
   // Main-thread decode counters (the worklet owns playout/buffer stats).
   private decodeStats = { framesDecoded: 0, samplesPlayed: 0, decodeErrors: 0 };
@@ -196,6 +240,54 @@ export class AudioPlayer {
   /** The decoder config the receive Worker should use (mirrors this player's config). */
   getDecoderConfig(): { codec: string; sampleRate: number; numberOfChannels: number } {
     return { codec: 'opus', sampleRate: this.config.sampleRate, numberOfChannels: this.config.channelCount };
+  }
+
+  /** Latest Tap B window (stereo-ness of the worklet's rendered output), or null. */
+  getTapB(): StereoMeterReport | null {
+    return this.lastTapB ? { ...this.lastTapB } : null;
+  }
+
+  /**
+   * Snapshot the playout graph's channel-count-relevant state
+   * (plan/stereo-diagnostics Phase 3). Null before initialize()/after dispose().
+   */
+  getAudioGraphReport(): AudioGraphReport | null {
+    const ctx = this.audioContext;
+    if (!ctx) return null;
+    const dest = ctx.destination;
+    const extCtx = ctx as AudioContext & { outputLatency?: number };
+    return {
+      context: {
+        sampleRate: ctx.sampleRate,
+        state: ctx.state,
+        baseLatencyMs: typeof ctx.baseLatency === 'number' ? ctx.baseLatency * 1000 : null,
+        outputLatencyMs: typeof extCtx.outputLatency === 'number' ? extCtx.outputLatency * 1000 : null,
+      },
+      destination: {
+        channelCount: dest.channelCount,
+        maxChannelCount: dest.maxChannelCount,
+        channelCountMode: dest.channelCountMode,
+        channelInterpretation: dest.channelInterpretation,
+      },
+      worklet: this.workletNode
+        ? {
+            outputChannelCount: this.config.channelCount,
+            channelCount: this.workletNode.channelCount,
+            channelCountMode: this.workletNode.channelCountMode,
+            channelInterpretation: this.workletNode.channelInterpretation,
+          }
+        : null,
+      ring: {
+        mode: this.sharedStorage ? 'sab' : 'port',
+        writerFrameSamples: this.config.writerFrameSamples,
+        numChannels: this.config.channelCount,
+      },
+      configured: {
+        sampleRate: this.config.sampleRate,
+        channelCount: this.config.channelCount,
+        latencyHint: String(this.config.latencyHint),
+      },
+    };
   }
 
   /**
@@ -314,6 +406,7 @@ export class AudioPlayer {
         const msg = e.data as PlayoutStatsMessage;
         if (msg && msg.type === 'stats') {
           this.lastSnapshot = msg.snapshot;
+          if (msg.stereo) this.lastTapB = msg.stereo;
           this.logJitter(msg.snapshot, msg.fillMin, msg.fillMax);
           if (ENABLE_CLOCK_PROBE) this.clockProbe();
         }
@@ -470,6 +563,7 @@ export class AudioPlayer {
     }
 
     this.lastSnapshot = null;
+    this.lastTapB = null;
     this.state = AudioPlayerState.IDLE;
     this.log('disposed');
   }

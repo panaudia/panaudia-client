@@ -84,6 +84,7 @@ describe('playout worklet', () => {
   it('the generated source is self-contained and registers the processor', () => {
     const code = buildPlayoutWorkletCode();
     expect(code).toContain('class JitterBufferCore');
+    expect(code).toContain('class StereoMeterCore');
     expect(code).toContain('class PlayoutRingProcessor extends AudioWorkletProcessor');
     expect(code).toContain(`registerProcessor("${PLAYOUT_PROCESSOR_NAME}"`);
     // No leftover module references that would be undefined in the worklet.
@@ -134,6 +135,41 @@ describe('playout worklet', () => {
     expect(snap.fillFrames).toBeGreaterThan(0);
     expect(snap.floorFrames).toBe(176); // R 128 + S 48
     expect(snap.lowAllowanceFrames).toBe(240); // L_init 5ms
+  });
+
+  it('includes a Tap B stereo report measuring the rendered output', () => {
+    const p = instantiate(STEREO_CFG);
+    // Hard anti-phase content: L=+0.5, R=−0.5 every frame ⇒ corr −1, mid 0.
+    const pcm = new Float32Array(2000 * 2);
+    for (let i = 0; i < 2000; i++) {
+      pcm[i * 2] = 0.5;
+      pcm[i * 2 + 1] = -0.5;
+    }
+    p.port.onmessage!({ data: pcm });
+    for (let i = 0; i < 5; i++) p.process([], stereoOut());
+
+    const stats = p.port.posted.filter((m): m is PlayoutStatsMessage => (m as PlayoutStatsMessage).type === 'stats');
+    expect(stats.length).toBe(1);
+    const stereo = stats[0]!.stereo!;
+    expect(stereo.frames).toBe(5 * 128); // every rendered frame in the window
+    expect(stereo.rmsL).toBeCloseTo(0.5, 6);
+    expect(stereo.rmsR).toBeCloseTo(0.5, 6);
+    expect(stereo.correlation).toBeCloseTo(-1, 6);
+    expect(stereo.midRms).toBeLessThan(1e-6);
+    expect(stereo.sideRms).toBeCloseTo(0.5, 6);
+  });
+
+  it('Tap B reports mono collapse when the node renders a single channel', () => {
+    const p = instantiate(STEREO_CFG);
+    p.port.onmessage!({ data: rampPcm(2000) });
+    // One output channel only (e.g. a mono destination chain).
+    for (let i = 0; i < 5; i++) p.process([], [[new Float32Array(128)]]);
+
+    const stats = p.port.posted.filter((m): m is PlayoutStatsMessage => (m as PlayoutStatsMessage).type === 'stats');
+    const stereo = stats[0]!.stereo!;
+    expect(stereo.frames).toBe(5 * 128);
+    expect(stereo.correlation).toBeCloseTo(1, 6); // L treated as both channels
+    expect(stereo.sideRms).toBe(0);
   });
 
   it('accepts a transferred pcmPort and writes PCM arriving on it (worker mode)', () => {

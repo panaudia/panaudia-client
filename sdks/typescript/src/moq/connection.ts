@@ -115,8 +115,9 @@ export class MoqConnection {
       // draft-14 → our draft-16 CLIENT_SETUP is rejected → "remote close". Kept (it was
       // the key aid for the FF/Safari connect bug) but gated so it's silent in production.
       if (this.debug) {
-        const negotiated = (this.transport as { protocol?: string }).protocol;
-        console.log(`[MOQ] WebTransport ready — negotiated subprotocol: ${JSON.stringify(negotiated)}`);
+        console.log(
+          `[MOQ] WebTransport ready — negotiated subprotocol: ${JSON.stringify(this.getNegotiatedSubprotocol())}`
+        );
       }
 
       this.setState(ConnectionState.CONNECTED);
@@ -124,6 +125,16 @@ export class MoqConnection {
       this.setState(ConnectionState.ERROR, error as Error);
       throw error;
     }
+  }
+
+  /**
+   * The WebTransport subprotocol the server selected ('moqt-16' when draft-16
+   * negotiation worked; empty/undefined on engines without subprotocol support).
+   * Null before connect. Used by the stereo diagnostics snapshot.
+   */
+  getNegotiatedSubprotocol(): string | null {
+    if (!this.transport) return null;
+    return (this.transport as { protocol?: string }).protocol ?? null;
   }
 
   /**

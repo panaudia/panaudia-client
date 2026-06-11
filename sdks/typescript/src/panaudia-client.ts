@@ -5,7 +5,7 @@
  */
 
 import { v4 as uuidv4 } from 'uuid';
-import type { Transport, AudioCaptureConfig } from './transport.js';
+import type { Transport, AudioCaptureConfig, StereoDiagnostics } from './transport.js';
 import {
   ConnectionState,
   type Position,
@@ -389,6 +389,15 @@ export class PanaudiaClient {
    */
   getVolume(): number {
     return this.transport.getVolume();
+  }
+
+  /**
+   * Stereo diagnostics (plan/stereo-diagnostics): latest decoded-PCM stereo
+   * meter window + observed decoder format. Returns null on transports that
+   * don't measure (WebRTC today).
+   */
+  getStereoDiagnostics(): StereoDiagnostics | null {
+    return this.transport.getStereoDiagnostics?.() ?? null;
   }
 
   // ── Spatial ──────────────────────────────────────────────────────────

@@ -20,6 +20,7 @@
  */
 
 import { JitterBufferCore, type JitterBufferCoreConfig, type JitterBufferSnapshot } from './jitter-buffer-core.js';
+import { StereoMeterCore, type StereoMeterReport } from './stereo-meter-core.js';
 
 /** The name the processor registers under / that `AudioWorkletNode` references. */
 export const PLAYOUT_PROCESSOR_NAME = 'playout-processor';
@@ -39,6 +40,12 @@ export interface PlayoutStatsMessage {
   /** True fill min/max (frames) across the window — every read, not point-sampled. */
   fillMin?: number;
   fillMax?: number;
+  /**
+   * Tap B (plan/stereo-diagnostics): stereo-ness of the RENDERED output over
+   * the same window — measured on `outputs[0]` after deinterleave, i.e. what
+   * the graph delivers toward the destination.
+   */
+  stereo?: StereoMeterReport;
 }
 
 /**
@@ -72,6 +79,9 @@ class PlayoutRingProcessor extends AudioWorkletProcessor {
     this.winFillMin = 1e9;
     this.winFillMax = 0;
     this.scratch = new Float32Array(128 * this.nc);
+    // Tap B stereo meter over the rendered output (3 multiply-adds per frame —
+    // negligible, so it is unconditionally on; the main thread decides usage).
+    this.meter = new StereoMeterCore();
     this.pcmPort = null;
     // WRITER inputs arrive on this.port:
     //   • {type:'pcmPort', port} — a transferred MessagePort whose other end is
@@ -112,9 +122,18 @@ class PlayoutRingProcessor extends AudioWorkletProcessor {
       const srcCh = ch < nc ? ch : nc - 1;
       for (let i = 0; i < nFrames; i++) dst[i] = block[i * nc + srcCh];
     }
+    // Tap B: meter the planar output as rendered (mono if the node only has one
+    // output channel — that itself is a finding).
+    this.meter.writePlanar(out[0], out.length > 1 ? out[1] : null, nFrames);
     if (++this.readsSinceStats >= this.statsEvery) {
       this.readsSinceStats = 0;
-      this.port.postMessage({ type: 'stats', snapshot: this.core.snapshot(), fillMin: this.winFillMin, fillMax: this.winFillMax });
+      this.port.postMessage({
+        type: 'stats',
+        snapshot: this.core.snapshot(),
+        fillMin: this.winFillMin,
+        fillMax: this.winFillMax,
+        stereo: this.meter.snapshotAndReset(),
+      });
       this.winFillMin = 1e9;
       this.winFillMax = 0;
     }
@@ -131,10 +150,14 @@ registerProcessor(${JSON.stringify(PLAYOUT_PROCESSOR_NAME)}, PlayoutRingProcesso
  */
 export function buildPlayoutWorkletCode(): string {
   const coreSource = JitterBufferCore.toString();
+  const meterSource = StereoMeterCore.toString();
   if (!coreSource.startsWith('class')) {
     // Guards against a bundler wrapping the class such that .toString() is not
     // self-contained source (would break the worklet). Surfaces early/loudly.
     throw new Error('playout-worklet: JitterBufferCore.toString() is not a class declaration');
+  }
+  if (!meterSource.startsWith('class')) {
+    throw new Error('playout-worklet: StereoMeterCore.toString() is not a class declaration');
   }
   // The serialized class must not reference transpiler/bundler helpers that live
   // in module scope (e.g. esbuild's `__publicField` for class-field lowering, or
@@ -142,10 +165,12 @@ export function buildPlayoutWorkletCode(): string {
   // es2022 (vite.config) specifically to keep class fields native. If a future
   // build setting reintroduces a helper, fail loudly here rather than ship a
   // worklet that throws at runtime.
-  const helper = /\b__(publicField|privateField|decorateClass|decorateParam|name|esDecorate)\b/.exec(coreSource);
+  const helper = /\b__(publicField|privateField|decorateClass|decorateParam|name|esDecorate)\b/.exec(
+    coreSource + meterSource
+  );
   if (helper) {
     throw new Error(
-      `playout-worklet: serialized JitterBufferCore references the bundler helper "${helper[0]}" — ` +
+      `playout-worklet: serialized source references the bundler helper "${helper[0]}" — ` +
         'it would be undefined in the worklet. Ensure the build target keeps native class fields (es2022+).'
     );
   }
@@ -154,7 +179,7 @@ export function buildPlayoutWorkletCode(): string {
   // `.toString()` returns `class {…}` — a syntax error as a statement. Wrapping
   // it (`const JitterBufferCore = class {…};`) is valid for both the anonymous
   // and the named-declaration forms.
-  return `const JitterBufferCore = ${coreSource};\n${PLAYOUT_PROCESSOR_SOURCE}`;
+  return `const JitterBufferCore = ${coreSource};\nconst StereoMeterCore = ${meterSource};\n${PLAYOUT_PROCESSOR_SOURCE}`;
 }
 
 /**

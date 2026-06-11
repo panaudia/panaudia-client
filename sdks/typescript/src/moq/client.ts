@@ -9,7 +9,8 @@ import { isWebTransportSupported, type DatagramSender } from './connection.js';
 import { DatagramRouter } from './datagram-router.js';
 import { MoqWorkerClient } from './moq-worker-client.js';
 import { createMoqWorker } from './moq-worker-loader.js';
-import type { WorkerEvent } from './moq-worker-protocol.js';
+import type { WorkerEvent, DecodedFormatInfo } from './moq-worker-protocol.js';
+import type { StereoMeterReport } from './stereo-meter-core.js';
 import {
   PanaudiaConfig,
   ConnectionState,
@@ -47,7 +48,7 @@ import {
 import { StateTrackPublisher } from './track-publisher.js';
 import { entityInfo3ToBytes, createEntityInfo3 } from '../shared/encoding.js';
 import { AudioSubscriber, AudioSubscriberStats } from './audio-subscriber.js';
-import { AudioPlayer, AudioPlayerState, AudioPlayerConfig, AudioPlayerStats } from './audio-player.js';
+import { AudioPlayer, AudioPlayerState, AudioPlayerConfig, AudioPlayerStats, type AudioGraphReport } from './audio-player.js';
 import { StateSubscriber, EntityState, EntityStateHandler } from './state-subscriber.js';
 import { ControlTrackPublisher } from './control-publisher.js';
 import {
@@ -175,6 +176,13 @@ export class PanaudiaMoqClient {
   private position: Position;
   private rotation: Rotation;
 
+  // Stereo diagnostics (plan/stereo-diagnostics): latest Tap A window from the
+  // worker's decoded-PCM meter + the observed decoder output format.
+  private lastTapAReport: StereoMeterReport | null = null;
+  private lastDecodedFormat: DecodedFormatInfo | null = null;
+  private lastTapALogMs = 0;
+  private negotiatedSubprotocol: string | null = null;
+
   constructor(config: PanaudiaConfig) {
     // Validate config
     if (!config.serverUrl) {
@@ -268,7 +276,12 @@ export class PanaudiaMoqClient {
       this.workerClient = new MoqWorkerClient(createMoqWorker(), (evt) => this.handleWorkerEvent(evt));
       this.sender = { sendDatagram: (bytes) => this.workerClient!.call('sendDatagram', { bytes }) };
 
-      await this.workerClient.call('connect', { serverUrl: this.config.serverUrl, options, debug: this.config.debug });
+      const connectResult = await this.workerClient.call('connect', {
+        serverUrl: this.config.serverUrl,
+        options,
+        debug: this.config.debug,
+      });
+      this.negotiatedSubprotocol = connectResult?.subprotocol ?? null;
       this.setState(ConnectionState.CONNECTED);
       this.log('WebTransport connected (worker), initializing MOQ session...');
 
@@ -856,6 +869,35 @@ export class PanaudiaMoqClient {
   }
 
   /**
+   * Stereo diagnostics (plan/stereo-diagnostics): everything needed to localize
+   * a mono collapse —
+   *  - `tapA`: decoded-PCM stereo-ness (worker; debug mode only)
+   *  - `tapB`: rendered-output stereo-ness (playout worklet; always on)
+   *  - `decodedFormat`: the decoder's observed output format + copyTo path
+   *  - `graph`: channel-count-relevant state of context/destination/worklet/ring
+   *  - `userAgent` / `subprotocol`: per-matrix-cell identification
+   * Tap A stereo + Tap B mono → graph collapse; both stereo but it *sounds*
+   * mono → OS/device (e.g. Bluetooth HFP) or output routing.
+   */
+  getStereoDiagnostics(): {
+    tapA: StereoMeterReport | null;
+    tapB: StereoMeterReport | null;
+    decodedFormat: DecodedFormatInfo | null;
+    graph: AudioGraphReport | null;
+    userAgent: string;
+    subprotocol: string | null;
+  } {
+    return {
+      tapA: this.lastTapAReport,
+      tapB: this.audioPlayer?.getTapB() ?? null,
+      decodedFormat: this.lastDecodedFormat,
+      graph: this.audioPlayer?.getAudioGraphReport() ?? null,
+      userAgent: typeof navigator !== 'undefined' ? navigator.userAgent : '',
+      subprotocol: this.negotiatedSubprotocol,
+    };
+  }
+
+  /**
    * Schedule a state publish with throttling
    *
    * If called multiple times rapidly, only one publish will occur
@@ -982,6 +1024,28 @@ export class PanaudiaMoqClient {
       case 'notice':
         this.log(`[moq-worker] ${evt.event}${evt.detail ? ': ' + evt.detail : ''}`);
         break;
+      case 'stereoMetrics': {
+        this.lastTapAReport = evt.report;
+        const now = Date.now();
+        if (now - this.lastTapALogMs >= 1000) {
+          this.lastTapALogMs = now;
+          const r = evt.report;
+          this.log(
+            `[stereo] tapA rmsL=${r.rmsL.toFixed(4)} rmsR=${r.rmsR.toFixed(4)} ` +
+              `corr=${r.correlation.toFixed(3)} side=${r.sideRms.toFixed(4)} mid=${r.midRms.toFixed(4)}`
+          );
+        }
+        break;
+      }
+      case 'decodedFormat': {
+        this.lastDecodedFormat = evt.format;
+        const f = evt.format;
+        this.log(
+          `[stereo] decoded format: ${f.numberOfChannels}ch @ ${f.sampleRate}Hz ` +
+            `native=${f.nativeFormat ?? '?'} copy=${f.copyPath}`
+        );
+        break;
+      }
     }
   }
 

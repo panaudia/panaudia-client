@@ -2,7 +2,7 @@
  * MOQ Transport Adapter — wraps PanaudiaMoqClient to implement the Transport interface.
  */
 
-import type { Transport, TransportConfig, AudioCaptureConfig, AudioPlaybackConfig } from '../transport.js';
+import type { Transport, TransportConfig, AudioCaptureConfig, AudioPlaybackConfig, StereoDiagnostics } from '../transport.js';
 import { ConnectionState } from '../types.js';
 import type { EntityInfo3, ControlMessage, EntityState, WarningEvent, ClientEventType } from '../types.js';
 import { PanaudiaMoqClient } from './client.js';
@@ -130,6 +130,19 @@ export class MoqTransportAdapter implements Transport {
 
   getVolume(): number {
     return this.client?.getVolume() ?? 1;
+  }
+
+  getStereoDiagnostics(): StereoDiagnostics {
+    return (
+      this.client?.getStereoDiagnostics() ?? {
+        tapA: null,
+        tapB: null,
+        decodedFormat: null,
+        graph: null,
+        userAgent: typeof navigator !== 'undefined' ? navigator.userAgent : '',
+        subprotocol: null,
+      }
+    );
   }
 
   muteMic(): void {
