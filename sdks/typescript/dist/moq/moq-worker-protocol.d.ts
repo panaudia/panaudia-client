@@ -22,6 +22,7 @@ export type WorkerRequest = {
     args: {
         serverUrl: string;
         options?: WebTransportOptions;
+        debug?: boolean;
     };
 } | {
     kind: 'req';

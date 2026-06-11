@@ -277,8 +277,13 @@ export class PanaudiaClient {
     const microphoneId = this.config.microphoneId;
     if (navigator.mediaDevices?.getUserMedia) {
       try {
-        // Brief getUserMedia to populate device labels, then stop immediately
+        // Brief getUserMedia to populate device labels. With no deviceId constraint the
+        // browser opens the OS DEFAULT mic, so the resulting track tells us which device
+        // is actually the default — read it BEFORE stopping the track.
         const permStream = await navigator.mediaDevices.getUserMedia({ audio: true, video: false });
+        const defaultTrack = permStream.getAudioTracks()[0];
+        const defaultLabel = defaultTrack?.label ?? '';
+        const defaultDeviceId = defaultTrack?.getSettings().deviceId;
         for (const track of permStream.getTracks()) track.stop();
 
         const devices = await navigator.mediaDevices.enumerateDevices();
@@ -297,10 +302,15 @@ export class PanaudiaClient {
             });
           }
         } else {
-          // No explicit device — refuse if default is Bluetooth
-          const defaultMic = mics[0];
-          if (defaultMic && defaultMic.type === 'bluetooth') {
-            throw new BluetoothMicDefaultError(defaultMic.label, mics);
+          // No explicit device — refuse if the OS default is Bluetooth. Classify the
+          // device the permission stream actually opened, NOT mics[0]: only Chrome
+          // synthesizes a 'default' entry at index 0; on Firefox/Safari mics[0] is
+          // arbitrary, so the old check both missed real Bluetooth defaults and
+          // false-tripped on non-default Bluetooth devices. Fall back to the matched
+          // enumerated entry's label (stable id) for the picker.
+          if (classifyByLabel(defaultLabel) === 'bluetooth') {
+            const matched = defaultDeviceId ? mics.find((m) => m.deviceId === defaultDeviceId) : undefined;
+            throw new BluetoothMicDefaultError(matched?.label ?? defaultLabel, mics);
           }
         }
       } catch (e) {

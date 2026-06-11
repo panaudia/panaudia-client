@@ -48,6 +48,17 @@ let reading = false;
 // reuse on the next decoded frame — no `new Float32Array` per packet.
 let decodePcm = new Float32Array(0);
 
+// Diagnostics are split into two gates:
+//   `diagEnabled` — the continuous timing data (decode-rate + burst). Useful, kept,
+//     but gated on the client's `debug` flag (set from the `connect` request) so it is
+//     a TRUE no-op in production: when false the decode hot path does zero diagnostic
+//     work (no performance.now(), no gap bucketing, no cross-thread notice posting).
+//   `ENABLE_CLOCK_PROBE` — the one-shot 60s clock-drift probe (see clocktest below).
+//     A deliberately-disconnected investigation tool: the code stays in the tree for
+//     future use but never runs. Flip to true (and rebuild) to re-arm it.
+let diagEnabled = false;
+const ENABLE_CLOCK_PROBE: boolean = false;
+
 // DIAGNOSTIC (playout-drift investigation): frames written to the ring per
 // performance.now() wall-second. performance.now() shares the CPU clock domain with
 // the server's 5ms send ticker, so this measures the server's true emit rate as the
@@ -133,52 +144,60 @@ function configureDecoder(cfg: WorkerDecoderConfig): void {
         audioData.copyTo(pcm, { planeIndex: 0, format: 'f32' });
         jbuf?.write(pcm); // straight into the SAB ring — no postMessage, no per-frame alloc
 
-        // Diagnostic: report frames/wall-second + burst buckets every ~2s.
-        decFrames += frames;
-        const tNow = performance.now();
-        recordGap(outGaps, tNow); // decode-emit cadence
-        if (frames < outFmin) outFmin = frames;
-        if (frames > outFmax) outFmax = frames;
-        if (decRateStart === 0) decRateStart = tNow;
-        const elapsed = tNow - decRateStart;
-        if (elapsed >= 2000) {
-          const fps = (decFrames / elapsed) * 1000;
-          emit({
-            kind: 'evt',
-            type: 'notice',
-            event: 'decode-rate',
-            detail: `${fps.toFixed(1)} frames/wall-sec (${decFrames} frames / ${(elapsed / 1000).toFixed(2)}s)`,
-          });
-          // Burst probe: gap distribution for delivery (dg) vs decode emit (out).
-          const fmt = (s: GapStats) =>
-            `n=${s.count} <1:${s.clumped} 1-4:${s.tight} ~5:${s.cadence} >6:${s.gap}`;
-          emit({
-            kind: 'evt',
-            type: 'notice',
-            event: 'burst',
-            detail: `dg[${fmt(dgGaps)}] out[${fmt(outGaps)}] fpo=${outFmin === Number.MAX_SAFE_INTEGER ? 0 : outFmin}-${outFmax}`,
-          });
-          decFrames = 0;
-          decRateStart = tNow;
-          resetGapBuckets(dgGaps);
-          resetGapBuckets(outGaps);
-          outFmin = Number.MAX_SAFE_INTEGER;
-          outFmax = 0;
+        // Diagnostic: report frames/wall-second + burst buckets every ~2s. Gated on
+        // `debug` so the decode hot path stays allocation- and work-free in production.
+        if (diagEnabled) {
+          decFrames += frames;
+          const tNow = performance.now();
+          recordGap(outGaps, tNow); // decode-emit cadence
+          if (frames < outFmin) outFmin = frames;
+          if (frames > outFmax) outFmax = frames;
+          if (decRateStart === 0) decRateStart = tNow;
+          const elapsed = tNow - decRateStart;
+          if (elapsed >= 2000) {
+            const fps = (decFrames / elapsed) * 1000;
+            emit({
+              kind: 'evt',
+              type: 'notice',
+              event: 'decode-rate',
+              detail: `${fps.toFixed(1)} frames/wall-sec (${decFrames} frames / ${(elapsed / 1000).toFixed(2)}s)`,
+            });
+            // Burst probe: gap distribution for delivery (dg) vs decode emit (out).
+            const fmt = (s: GapStats) =>
+              `n=${s.count} <1:${s.clumped} 1-4:${s.tight} ~5:${s.cadence} >6:${s.gap}`;
+            emit({
+              kind: 'evt',
+              type: 'notice',
+              event: 'burst',
+              detail: `dg[${fmt(dgGaps)}] out[${fmt(outGaps)}] fpo=${outFmin === Number.MAX_SAFE_INTEGER ? 0 : outFmin}-${outFmax}`,
+            });
+            decFrames = 0;
+            decRateStart = tNow;
+            resetGapBuckets(dgGaps);
+            resetGapBuckets(outGaps);
+            outFmin = Number.MAX_SAFE_INTEGER;
+            outFmax = 0;
+          }
         }
-        // CLOCKTEST one-shot: 60s decode total vs expected (CPU clock).
-        decTotal += frames;
-        if (decTotalStart === 0) decTotalStart = tNow;
-        if (!decTotalDone && tNow - decTotalStart >= 60000) {
-          const el = (tNow - decTotalStart) / 1000;
-          const expected = 48000 * el;
-          const ppm = (decTotal / expected - 1) * 1e6;
-          emit({
-            kind: 'evt',
-            type: 'notice',
-            event: 'clocktest',
-            detail: `client decode wrote ${decTotal} frames in ${el.toFixed(2)}s; expected ${expected.toFixed(0)}; drift ${ppm >= 0 ? '+' : ''}${ppm.toFixed(1)} ppm`,
-          });
-          decTotalDone = true;
+        // CLOCKTEST one-shot: 60s decode total vs expected (CPU clock). Disconnected by
+        // default (ENABLE_CLOCK_PROBE); kept for future drift investigation. Uses its own
+        // clock read so it's independent of the diagEnabled block above.
+        if (ENABLE_CLOCK_PROBE && !decTotalDone) {
+          const tProbe = performance.now();
+          decTotal += frames;
+          if (decTotalStart === 0) decTotalStart = tProbe;
+          if (tProbe - decTotalStart >= 60000) {
+            const el = (tProbe - decTotalStart) / 1000;
+            const expected = 48000 * el;
+            const ppm = (decTotal / expected - 1) * 1e6;
+            emit({
+              kind: 'evt',
+              type: 'notice',
+              event: 'clocktest',
+              detail: `client decode wrote ${decTotal} frames in ${el.toFixed(2)}s; expected ${expected.toFixed(0)}; drift ${ppm >= 0 ? '+' : ''}${ppm.toFixed(1)} ppm`,
+            });
+            decTotalDone = true;
+          }
         }
       } catch (e) {
         emit({ kind: 'evt', type: 'notice', event: 'decode-error', detail: String(e) });
@@ -218,7 +237,7 @@ function startReadLoop(): void {
           continue; // malformed — skip
         }
         if (audioTrackAlias !== undefined && parsed.trackAlias === audioTrackAlias && jbuf && decoder) {
-          recordGap(dgGaps, performance.now()); // burst probe: audio-datagram delivery cadence
+          if (diagEnabled) recordGap(dgGaps, performance.now()); // burst probe: audio-datagram delivery cadence
           try {
             decoder.decode(
               new EncodedAudioChunk({
@@ -305,7 +324,8 @@ async function handle(method: WorkerRequest['method'], args: WorkerRequest['args
   switch (method) {
     case 'connect': {
       const a = args as Extract<WorkerRequest, { method: 'connect' }>['args'];
-      connection = new MoqConnection(a.serverUrl);
+      diagEnabled = a.debug ?? false; // arm the continuous timing diagnostics in debug only
+      connection = new MoqConnection(a.serverUrl, a.debug ?? false);
       connection.setHandlers({
         onStateChange: (state, error) =>
           emit({ kind: 'evt', type: 'connectionState', state: String(state), detail: error?.message }),

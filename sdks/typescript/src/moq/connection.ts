@@ -49,7 +49,7 @@ export class MoqConnection {
   // (handler map + SUBSCRIBE_OK race buffer), unchanged.
   private datagramMode: 'main' | 'worker' = 'main';
 
-  constructor(private readonly serverUrl: string) {}
+  constructor(private readonly serverUrl: string, private readonly debug: boolean = false) {}
 
   /**
    * Get current connection state
@@ -109,12 +109,15 @@ export class MoqConnection {
       // Wait for connection to be ready
       await this.transport.ready;
 
-      // DIAGNOSTIC: the negotiated WebTransport subprotocol. The server selects MOQ
-      // draft-16 only when this is 'moqt-16'; if a browser lacks WebTransport
+      // DIAGNOSTIC (debug only): the negotiated WebTransport subprotocol. The server
+      // selects MOQ draft-16 only when this is 'moqt-16'; if a browser lacks WebTransport
       // subprotocol negotiation (Firefox), this is empty → the server falls back to
-      // draft-14 → our draft-16 CLIENT_SETUP is rejected → "remote close".
-      const negotiated = (this.transport as { protocol?: string }).protocol;
-      console.log(`[MOQ] WebTransport ready — negotiated subprotocol: ${JSON.stringify(negotiated)}`);
+      // draft-14 → our draft-16 CLIENT_SETUP is rejected → "remote close". Kept (it was
+      // the key aid for the FF/Safari connect bug) but gated so it's silent in production.
+      if (this.debug) {
+        const negotiated = (this.transport as { protocol?: string }).protocol;
+        console.log(`[MOQ] WebTransport ready — negotiated subprotocol: ${JSON.stringify(negotiated)}`);
+      }
 
       this.setState(ConnectionState.CONNECTED);
     } catch (error) {

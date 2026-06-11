@@ -1,5 +1,6 @@
-import { describe, it, expect, vi, beforeEach } from 'vitest';
+import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
 import { PanaudiaClient } from '../src/panaudia-client.js';
+import { BluetoothMicDefaultError } from '../src/moq/audio-publisher.js';
 import type { Transport, TransportConfig, AudioCaptureConfig, AudioPlaybackConfig } from '../src/transport.js';
 import type { ConnectionState, EntityInfo3, ControlMessage, EntityState } from '../src/types.js';
 
@@ -102,6 +103,86 @@ describe('PanaudiaClient', () => {
     it('should delegate getEntityId to transport', () => {
       const client = new PanaudiaClient(defaultConfig);
       expect(client.getEntityId()).toBe('test-node-id');
+    });
+  });
+
+  describe('Bluetooth default mic detection', () => {
+    // The permission stream (getUserMedia with no deviceId) opens the OS DEFAULT mic;
+    // `defaultLabel`/`defaultDeviceId` model the track that comes back. `mics` is what
+    // enumerateDevices reports, in order. The bug being guarded: classifying mics[0]
+    // instead of the actual default — wrong on Firefox/Safari, which (unlike Chrome)
+    // don't synthesize a 'default' entry at index 0.
+    function stubMediaDevices(opts: {
+      defaultLabel: string;
+      defaultDeviceId: string;
+      mics: Array<{ deviceId: string; label: string }>;
+    }): void {
+      const track = {
+        kind: 'audio',
+        label: opts.defaultLabel,
+        getSettings: () => ({ deviceId: opts.defaultDeviceId }),
+        stop: vi.fn(),
+      };
+      const stream = { getTracks: () => [track], getAudioTracks: () => [track] };
+      vi.stubGlobal('navigator', {
+        mediaDevices: {
+          getUserMedia: vi.fn().mockResolvedValue(stream),
+          enumerateDevices: vi.fn().mockResolvedValue(
+            opts.mics.map((m, i) => ({ kind: 'audioinput', deviceId: m.deviceId, label: m.label, groupId: String(i) })),
+          ),
+        },
+      });
+    }
+
+    afterEach(() => {
+      vi.unstubAllGlobals();
+    });
+
+    it('throws when the OS default is Bluetooth even though it is NOT first in enumerateDevices (FF/Safari)', async () => {
+      // Default = AirPods, but enumerateDevices lists the built-in mic first.
+      stubMediaDevices({
+        defaultLabel: 'AirPods Pro',
+        defaultDeviceId: 'bt-1',
+        mics: [
+          { deviceId: 'builtin-1', label: 'MacBook Pro Microphone' },
+          { deviceId: 'bt-1', label: 'AirPods Pro' },
+        ],
+      });
+      const client = new PanaudiaClient(defaultConfig);
+      await expect(client.connect()).rejects.toBeInstanceOf(BluetoothMicDefaultError);
+      expect(mockTransport.connect).not.toHaveBeenCalled();
+    });
+
+    it('does NOT throw when mics[0] is Bluetooth but the actual default is built-in (old false-positive)', async () => {
+      // enumerateDevices lists AirPods first, but the default the browser opened is built-in.
+      stubMediaDevices({
+        defaultLabel: 'MacBook Pro Microphone',
+        defaultDeviceId: 'builtin-1',
+        mics: [
+          { deviceId: 'bt-1', label: 'AirPods Pro' },
+          { deviceId: 'builtin-1', label: 'MacBook Pro Microphone' },
+        ],
+      });
+      const client = new PanaudiaClient(defaultConfig);
+      await client.connect();
+      expect(mockTransport.connect).toHaveBeenCalled();
+    });
+
+    it('warns (does not throw) when an explicit microphoneId is Bluetooth', async () => {
+      stubMediaDevices({
+        defaultLabel: 'MacBook Pro Microphone',
+        defaultDeviceId: 'builtin-1',
+        mics: [
+          { deviceId: 'builtin-1', label: 'MacBook Pro Microphone' },
+          { deviceId: 'bt-1', label: 'AirPods Pro' },
+        ],
+      });
+      const client = new PanaudiaClient({ ...defaultConfig, microphoneId: 'bt-1' });
+      const warnings: Array<{ code: string }> = [];
+      client.on('warning', (w) => warnings.push(w));
+      await client.connect();
+      expect(mockTransport.connect).toHaveBeenCalled();
+      expect(warnings.some((w) => w.code === 'BLUETOOTH_MIC')).toBe(true);
     });
   });
 

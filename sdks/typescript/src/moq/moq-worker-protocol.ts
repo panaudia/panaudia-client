@@ -34,7 +34,7 @@ export interface WorkerEncoderConfig {
 // ---- RPC: main → worker requests (each gets exactly one response) ----
 
 export type WorkerRequest =
-  | { kind: 'req'; id: number; method: 'connect'; args: { serverUrl: string; options?: WebTransportOptions } }
+  | { kind: 'req'; id: number; method: 'connect'; args: { serverUrl: string; options?: WebTransportOptions; debug?: boolean } }
   | { kind: 'req'; id: number; method: 'initSession'; args: { role: number; maxSubscribeId?: number } }
   | {
       kind: 'req';

@@ -29,6 +29,12 @@ const RENDER_QUANTUM = 128;
 /** Default writer frame for geometry: the server's Opus output frame (5 ms @ 48 kHz). */
 const DEFAULT_WRITER_FRAME = 240;
 
+// One-shot 60s clock-drift probe (clockProbe): disconnected by default. The function is
+// retained for future drift investigation; flip this to true (and rebuild) to re-arm it.
+// Deliberately independent of `debug` — it's a heavy investigation tool, not routine
+// timing data.
+const ENABLE_CLOCK_PROBE: boolean = false;
+
 /**
  * Audio player configuration
  */
@@ -309,7 +315,7 @@ export class AudioPlayer {
         if (msg && msg.type === 'stats') {
           this.lastSnapshot = msg.snapshot;
           this.logJitter(msg.snapshot, msg.fillMin, msg.fillMax);
-          this.clockProbe();
+          if (ENABLE_CLOCK_PROBE) this.clockProbe();
         }
       };
 

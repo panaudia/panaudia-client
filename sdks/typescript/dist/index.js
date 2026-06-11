@@ -667,6 +667,9 @@ class PanaudiaClient {
     if (navigator.mediaDevices?.getUserMedia) {
       try {
         const permStream = await navigator.mediaDevices.getUserMedia({ audio: true, video: false });
+        const defaultTrack = permStream.getAudioTracks()[0];
+        const defaultLabel = defaultTrack?.label ?? "";
+        const defaultDeviceId = defaultTrack?.getSettings().deviceId;
         for (const track of permStream.getTracks()) track.stop();
         const devices = await navigator.mediaDevices.enumerateDevices();
         const mics = devices.filter((d) => d.kind === "audioinput").map((d) => ({ deviceId: d.deviceId, label: d.label, type: classifyByLabel(d.label) }));
@@ -680,9 +683,9 @@ class PanaudiaClient {
             });
           }
         } else {
-          const defaultMic = mics[0];
-          if (defaultMic && defaultMic.type === "bluetooth") {
-            throw new BluetoothMicDefaultError(defaultMic.label, mics);
+          if (classifyByLabel(defaultLabel) === "bluetooth") {
+            const matched = defaultDeviceId ? mics.find((m) => m.deviceId === defaultDeviceId) : void 0;
+            throw new BluetoothMicDefaultError(matched?.label ?? defaultLabel, mics);
           }
         }
       } catch (e) {

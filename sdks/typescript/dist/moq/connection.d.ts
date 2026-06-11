@@ -21,6 +21,7 @@ export interface ConnectionEventHandlers {
  */
 export declare class MoqConnection {
     private readonly serverUrl;
+    private readonly debug;
     private transport;
     private state;
     private handlers;
@@ -28,7 +29,7 @@ export declare class MoqConnection {
     private router;
     private datagramDispatcherRunning;
     private datagramMode;
-    constructor(serverUrl: string);
+    constructor(serverUrl: string, debug?: boolean);
     /**
      * Get current connection state
      */

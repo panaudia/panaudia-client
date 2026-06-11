@@ -268,7 +268,7 @@ export class PanaudiaMoqClient {
       this.workerClient = new MoqWorkerClient(createMoqWorker(), (evt) => this.handleWorkerEvent(evt));
       this.sender = { sendDatagram: (bytes) => this.workerClient!.call('sendDatagram', { bytes }) };
 
-      await this.workerClient.call('connect', { serverUrl: this.config.serverUrl, options });
+      await this.workerClient.call('connect', { serverUrl: this.config.serverUrl, options, debug: this.config.debug });
       this.setState(ConnectionState.CONNECTED);
       this.log('WebTransport connected (worker), initializing MOQ session...');
 
