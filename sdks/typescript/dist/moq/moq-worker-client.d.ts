@@ -1,10 +1,10 @@
-import { WorkerRequest, WorkerEvent, SubscribeResult } from './moq-worker-protocol.js';
+import { WorkerRequest, WorkerEvent, SubscribeResult, ConnectResult } from './moq-worker-protocol.js';
 /** Args type for a given method, sans the envelope fields. */
 type ArgsOf<M extends WorkerRequest['method']> = Extract<WorkerRequest, {
     method: M;
 }>['args'];
-/** Result type for a given method (only `subscribe` returns a value today). */
-type ResultOf<M extends WorkerRequest['method']> = M extends 'subscribe' ? SubscribeResult : void;
+/** Result type for a given method (`subscribe` and `connect` return values today). */
+type ResultOf<M extends WorkerRequest['method']> = M extends 'subscribe' ? SubscribeResult : M extends 'connect' ? ConnectResult : void;
 /**
  * Promise-based RPC over the worker's postMessage channel + an event sink.
  * Inject the `Worker` (so it's unit-testable with a fake); production passes

@@ -1,4 +1,4 @@
-import { AudioCaptureConfig } from './transport.js';
+import { AudioCaptureConfig, StereoDiagnostics } from './transport.js';
 import { ConnectionState, Position, Rotation, ErrorEvent, WarningEvent, EntityState } from './types.js';
 import { PanaudiaPose } from './shared/coordinates.js';
 import { TopicNode } from './shared/topic-tree.js';
@@ -117,6 +117,12 @@ export declare class PanaudiaClient {
      * Get current playback volume.
      */
     getVolume(): number;
+    /**
+     * Stereo diagnostics (plan/stereo-diagnostics): latest decoded-PCM stereo
+     * meter window + observed decoder format. Returns null on transports that
+     * don't measure (WebRTC today).
+     */
+    getStereoDiagnostics(): StereoDiagnostics | null;
     /**
      * Set pose in Panaudia coordinates (position 0-1 range, rotation in degrees).
      * If worldBounds is configured, positions are normalized from world space to 0-1 range.

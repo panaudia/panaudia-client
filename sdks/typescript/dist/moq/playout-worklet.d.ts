@@ -1,4 +1,5 @@
 import { JitterBufferCoreConfig, JitterBufferSnapshot } from './jitter-buffer-core.js';
+import { StereoMeterReport } from './stereo-meter-core.js';
 /** The name the processor registers under / that `AudioWorkletNode` references. */
 export declare const PLAYOUT_PROCESSOR_NAME = "playout-processor";
 /** `processorOptions` passed to the worklet via `new AudioWorkletNode(...)`. */
@@ -15,6 +16,12 @@ export interface PlayoutStatsMessage {
     /** True fill min/max (frames) across the window — every read, not point-sampled. */
     fillMin?: number;
     fillMax?: number;
+    /**
+     * Tap B (plan/stereo-diagnostics): stereo-ness of the RENDERED output over
+     * the same window — measured on `outputs[0]` after deinterleave, i.e. what
+     * the graph delivers toward the destination.
+     */
+    stereo?: StereoMeterReport;
 }
 /**
  * Handshake posted TO the worklet (`workletNode.port.postMessage(msg, [msg.port])`)

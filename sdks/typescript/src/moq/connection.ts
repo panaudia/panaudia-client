@@ -94,20 +94,24 @@ export class MoqConnection {
         ...options,
       };
 
-      // Create WebTransport connection
-      this.transport = new WebTransport(this.serverUrl, wtOptions);
-
-      // Set up close handler
-      this.transport.closed
-        .then((info: WebTransportCloseInfo) => {
-          this.handleClose(info);
-        })
-        .catch((error: Error) => {
-          this.handleError(error);
-        });
-
-      // Wait for connection to be ready
-      await this.transport.ready;
+      try {
+        this.transport = await this.openTransport(wtOptions);
+      } catch (firstError) {
+        // Subprotocol-negotiation fallback: some engines fail the WT upgrade
+        // when `protocols` is present (negotiation-extension draft mismatch with
+        // the server) rather than ignoring it. The server forces draft-16 for
+        // WebTransport connections with an EMPTY subprotocol (server.go
+        // NegotiatedALPN), so retrying without `protocols` is safe — and which
+        // path connected is visible in the diagnostics (`subprotocol: null`).
+        if (wtOptions.protocols === undefined) throw firstError;
+        if (this.debug) {
+          console.log(
+            `[MOQ] WebTransport connect failed with protocols=${JSON.stringify(wtOptions.protocols)} (${String(firstError)}) — retrying without subprotocol negotiation`
+          );
+        }
+        const { protocols: _omitted, ...withoutProtocols } = wtOptions;
+        this.transport = await this.openTransport(withoutProtocols);
+      }
 
       // DIAGNOSTIC (debug only): the negotiated WebTransport subprotocol. The server
       // selects MOQ draft-16 only when this is 'moqt-16'; if a browser lacks WebTransport
@@ -125,6 +129,39 @@ export class MoqConnection {
       this.setState(ConnectionState.ERROR, error as Error);
       throw error;
     }
+  }
+
+  /**
+   * Open one WebTransport and await `ready`; wires the close handler. On
+   * failure the instance is discarded (closed defensively) so connect() can
+   * retry with different options.
+   */
+  private async openTransport(wtOptions: WebTransportOptions): Promise<WebTransport> {
+    const transport = new WebTransport(this.serverUrl, wtOptions);
+    try {
+      await transport.ready;
+    } catch (error) {
+      // Discarded attempt: swallow its closed rejection (it would otherwise be
+      // an unhandled rejection) and DON'T route it to handleClose/handleError —
+      // a retry with different options may still succeed.
+      transport.closed.catch(() => undefined);
+      try {
+        transport.close();
+      } catch {
+        /* already failed */
+      }
+      throw error;
+    }
+    // Wire the close handlers only for the transport we actually keep. `closed`
+    // is a sticky promise, so attaching after `ready` cannot miss a close.
+    transport.closed
+      .then((info: WebTransportCloseInfo) => {
+        this.handleClose(info);
+      })
+      .catch((error: Error) => {
+        this.handleError(error);
+      });
+    return transport;
   }
 
   /**
@@ -218,7 +255,15 @@ export class MoqConnection {
       return;
     }
     if (!this.datagramWriter) {
-      this.datagramWriter = this.transport.datagrams.writable.getWriter();
+      // Legacy spec exposes `datagrams.writable` (Chrome/Firefox); the current
+      // spec replaced it with `datagrams.createWritable()` (Safari has only
+      // this). Prefer the legacy property, fall back to createWritable().
+      const dg = this.transport.datagrams;
+      const writable = dg.writable ?? dg.createWritable?.();
+      if (!writable) {
+        throw new Error('WebTransport datagrams are not writable in this browser');
+      }
+      this.datagramWriter = writable.getWriter();
     }
     try {
       await this.datagramWriter.write(data);

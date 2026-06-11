@@ -1,7 +1,7 @@
 import { a as ConnectionState, c as createEntityInfo3 } from "./topic-merger.js";
 import { E, T, b, f, g, h, u } from "./topic-merger.js";
-import { am as isWebTransportSupported, G as MoqTransportAdapter, B as BluetoothMicDefaultError } from "./moq-transport-adapter.js";
-import { U, V, X, Y, aj, an, ao, ap, aq, ar, as, at, aA, aB, aC, aD, aE, aF, aG } from "./moq-transport-adapter.js";
+import { an as isWebTransportSupported, G as MoqTransportAdapter, B as BluetoothMicDefaultError } from "./moq-transport-adapter.js";
+import { V, X, Y, Z, ak, ao, ap, aq, ar, as, at, au, aB, aC, aD, aE, aF, aG, aH } from "./moq-transport-adapter.js";
 import { WebRtcTransport } from "./webrtc/index.js";
 const BLUETOOTH_KEYWORDS = [
   "bluetooth",
@@ -749,6 +749,14 @@ class PanaudiaClient {
   getVolume() {
     return this.transport.getVolume();
   }
+  /**
+   * Stereo diagnostics (plan/stereo-diagnostics): latest decoded-PCM stereo
+   * meter window + observed decoder format. Returns null on transports that
+   * don't measure (WebRTC today).
+   */
+  getStereoDiagnostics() {
+    return this.transport.getStereoDiagnostics?.() ?? null;
+  }
   // ── Spatial ──────────────────────────────────────────────────────────
   /**
    * Set pose in Panaudia coordinates (position 0-1 range, rotation in degrees).
@@ -914,33 +922,33 @@ export {
   SingleRecordTree,
   T as TopicMerger,
   TopicTree,
-  U as aframeToPanaudia,
-  V as ambisonicToWebglPosition,
-  X as ambisonicToWebglRotation,
-  Y as babylonToPanaudia,
+  V as aframeToPanaudia,
+  X as ambisonicToWebglPosition,
+  Y as ambisonicToWebglRotation,
+  Z as babylonToPanaudia,
   b as bytesToUuid,
   classifyByLabel,
   createEntityInfo3,
   f as entityInfo3FromBytes,
   g as entityInfo3ToBytes,
-  aj as getWebTransportSupport,
+  ak as getWebTransportSupport,
   h as isValidUuid,
   isWebTransportSupported,
-  an as panaudiaToAframe,
-  ao as panaudiaToBabylon,
-  ap as panaudiaToPixi,
-  aq as panaudiaToPlaycanvas,
-  ar as panaudiaToThreejs,
-  as as panaudiaToUnity,
-  at as panaudiaToUnreal,
-  aA as pixiToPanaudia,
-  aB as playcanvasToPanaudia,
+  ao as panaudiaToAframe,
+  ap as panaudiaToBabylon,
+  aq as panaudiaToPixi,
+  ar as panaudiaToPlaycanvas,
+  as as panaudiaToThreejs,
+  at as panaudiaToUnity,
+  au as panaudiaToUnreal,
+  aB as pixiToPanaudia,
+  aC as playcanvasToPanaudia,
   resolveServer,
   selectBestMicrophone,
-  aC as threejsToPanaudia,
-  aD as unityToPanaudia,
-  aE as unrealToPanaudia,
+  aD as threejsToPanaudia,
+  aE as unityToPanaudia,
+  aF as unrealToPanaudia,
   u as uuidToBytes,
-  aF as webglToAmbisonicPosition,
-  aG as webglToAmbisonicRotation
+  aG as webglToAmbisonicPosition,
+  aH as webglToAmbisonicRotation
 };

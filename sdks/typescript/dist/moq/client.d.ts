@@ -1,7 +1,9 @@
+import { DecodedFormatInfo } from './moq-worker-protocol.js';
+import { StereoMeterReport } from './stereo-meter-core.js';
 import { PanaudiaConfig, ConnectionState, ClientEventType, ClientEventHandler, Position, Rotation, Vec3, WebTransportOptions } from './types.js';
 import { AudioPublisherConfig } from './audio-publisher.js';
 import { AudioSubscriberStats } from './audio-subscriber.js';
-import { AudioPlayerConfig, AudioPlayerStats } from './audio-player.js';
+import { AudioPlayerConfig, AudioPlayerStats, AudioGraphReport } from './audio-player.js';
 import { EntityState, EntityStateHandler } from './state-subscriber.js';
 import { ValuesHandler, RemovedHandler } from './cache-topic-subscriber.js';
 /**
@@ -54,6 +56,10 @@ export declare class PanaudiaMoqClient {
     private stateOutputTrackAlias;
     private position;
     private rotation;
+    private lastTapAReport;
+    private lastDecodedFormat;
+    private lastTapALogMs;
+    private negotiatedSubprotocol;
     constructor(config: PanaudiaConfig);
     private log;
     private logWarn;
@@ -244,6 +250,25 @@ export declare class PanaudiaMoqClient {
         subscriber: AudioSubscriberStats;
         player: AudioPlayerStats;
     } | null;
+    /**
+     * Stereo diagnostics (plan/stereo-diagnostics): everything needed to localize
+     * a mono collapse —
+     *  - `tapA`: decoded-PCM stereo-ness (worker; debug mode only)
+     *  - `tapB`: rendered-output stereo-ness (playout worklet; always on)
+     *  - `decodedFormat`: the decoder's observed output format + copyTo path
+     *  - `graph`: channel-count-relevant state of context/destination/worklet/ring
+     *  - `userAgent` / `subprotocol`: per-matrix-cell identification
+     * Tap A stereo + Tap B mono → graph collapse; both stereo but it *sounds*
+     * mono → OS/device (e.g. Bluetooth HFP) or output routing.
+     */
+    getStereoDiagnostics(): {
+        tapA: StereoMeterReport | null;
+        tapB: StereoMeterReport | null;
+        decodedFormat: DecodedFormatInfo | null;
+        graph: AudioGraphReport | null;
+        userAgent: string;
+        subprotocol: string | null;
+    };
     /**
      * Schedule a state publish with throttling
      *

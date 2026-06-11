@@ -1,4 +1,4 @@
-import { Transport, TransportConfig, AudioCaptureConfig, AudioPlaybackConfig } from '../transport.js';
+import { Transport, TransportConfig, AudioCaptureConfig, AudioPlaybackConfig, StereoDiagnostics } from '../transport.js';
 import { ConnectionState, EntityInfo3, ControlMessage, EntityState, WarningEvent } from '../types.js';
 export declare class MoqTransportAdapter implements Transport {
     private client;
@@ -13,6 +13,7 @@ export declare class MoqTransportAdapter implements Transport {
     stopAudioPlayback(): Promise<void>;
     setVolume(volume: number): void;
     getVolume(): number;
+    getStereoDiagnostics(): StereoDiagnostics;
     muteMic(): void;
     unmuteMic(): void;
     publishState(state: EntityInfo3): Promise<void>;

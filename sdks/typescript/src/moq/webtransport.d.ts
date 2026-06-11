@@ -27,7 +27,10 @@ declare global {
 
   interface WebTransportDatagramDuplexStream {
     readable: ReadableStream<Uint8Array>;
-    writable: WritableStream<Uint8Array>;
+    /** Legacy spec API (Chrome/Firefox). Absent in Safari — use createWritable there. */
+    writable?: WritableStream<Uint8Array>;
+    /** Current spec API (Safari; Chrome behind flag). */
+    createWritable?: () => WritableStream<Uint8Array>;
     maxDatagramSize: number;
     incomingMaxAge: number | null;
     outgoingMaxAge: number | null;

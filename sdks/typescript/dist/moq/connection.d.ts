@@ -47,6 +47,18 @@ export declare class MoqConnection {
      */
     connect(options?: WebTransportOptions): Promise<void>;
     /**
+     * Open one WebTransport and await `ready`; wires the close handler. On
+     * failure the instance is discarded (closed defensively) so connect() can
+     * retry with different options.
+     */
+    private openTransport;
+    /**
+     * The WebTransport subprotocol the server selected ('moqt-16' when draft-16
+     * negotiation worked; empty/undefined on engines without subprotocol support).
+     * Null before connect. Used by the stereo diagnostics snapshot.
+     */
+    getNegotiatedSubprotocol(): string | null;
+    /**
      * Close the connection gracefully
      */
     close(closeInfo?: WebTransportCloseInfo): void;

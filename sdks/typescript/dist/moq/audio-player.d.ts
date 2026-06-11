@@ -1,5 +1,6 @@
 import { MoqClientError } from './errors.js';
 import { JitterBufferCoreConfig, JitterBufferSnapshot } from './jitter-buffer-core.js';
+import { StereoMeterReport } from './stereo-meter-core.js';
 /**
  * How the receive Worker should receive decoded PCM (design §11.3). `sab` is the
  * real-time-safe path (shared ring, no postMessage) used when the page is
@@ -49,6 +50,45 @@ export declare enum AudioPlayerState {
     ERROR = "error"
 }
 /**
+ * Snapshot of every channel-count-relevant property of the playout graph
+ * (plan/stereo-diagnostics Phase 3). The graph is worklet → gain → destination;
+ * gain is scalar, so the worklet's Tap B ≡ pre-destination content, and the
+ * destination's own downmix (layer 3 of the failure model) is inferred from
+ * `destination.channelCount` here.
+ */
+export interface AudioGraphReport {
+    context: {
+        sampleRate: number;
+        state: string;
+        baseLatencyMs: number | null;
+        outputLatencyMs: number | null;
+    };
+    destination: {
+        channelCount: number;
+        maxChannelCount: number;
+        channelCountMode: string;
+        channelInterpretation: string;
+    };
+    worklet: {
+        /** From config — the worklet was created with outputChannelCount: [this]. */
+        outputChannelCount: number;
+        channelCount: number;
+        channelCountMode: string;
+        channelInterpretation: string;
+    } | null;
+    ring: {
+        /** 'sab' = shared ring (cross-origin isolated); 'port' = postMessage fallback. */
+        mode: 'sab' | 'port';
+        writerFrameSamples: number;
+        numChannels: number;
+    };
+    configured: {
+        sampleRate: number;
+        channelCount: number;
+        latencyHint: string;
+    };
+}
+/**
  * Audio player statistics
  */
 export interface AudioPlayerStats {
@@ -76,6 +116,7 @@ export declare class AudioPlayer {
     private workletNode;
     private decoder;
     private lastSnapshot;
+    private lastTapB;
     private decodeStats;
     private jbufLogCount;
     private clockT0Wall;
@@ -106,6 +147,13 @@ export declare class AudioPlayer {
         sampleRate: number;
         numberOfChannels: number;
     };
+    /** Latest Tap B window (stereo-ness of the worklet's rendered output), or null. */
+    getTapB(): StereoMeterReport | null;
+    /**
+     * Snapshot the playout graph's channel-count-relevant state
+     * (plan/stereo-diagnostics Phase 3). Null before initialize()/after dispose().
+     */
+    getAudioGraphReport(): AudioGraphReport | null;
     /**
      * Prepare to hand decode off to the receive Worker (design §11.3) and flip this
      * player into worker-decode mode (its own `decodeFrame` becomes a no-op).
