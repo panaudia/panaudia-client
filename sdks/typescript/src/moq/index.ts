@@ -259,6 +259,7 @@ export type { JitterBufferCoreConfig, JitterBufferSnapshot, Levels } from './jit
 
 // Stereo diagnostics (mono-collapse localization — plan/stereo-diagnostics)
 export { StereoMeterCore } from './stereo-meter-core.js';
+export { probeOutputDeviceSampleRate } from './audio-player.js';
 export type { StereoMeterReport } from './stereo-meter-core.js';
 export type { DecodedFormatInfo } from './moq-worker-protocol.js';
 export {

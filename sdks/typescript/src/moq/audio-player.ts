@@ -670,6 +670,31 @@ export class AudioDecoderNotSupportedError extends MoqClientError {
 }
 
 /**
+ * Probe the OUTPUT device's native sample rate (plan/stereo-diagnostics).
+ *
+ * The playout AudioContext requests 48 kHz explicitly, so its `sampleRate`
+ * never reflects the device. A throwaway default-rate context inherits the
+ * current output device's rate — a Bluetooth headset stuck in HFP typically
+ * reports 16–24 kHz instead of 44.1/48 k. This is the only in-browser signal
+ * for the "both taps stereo but it SOUNDS mono" state: HFP collapse happens in
+ * the OS below every Web Audio observable. Heuristic — a low rate strongly
+ * suggests HFP; a normal rate does not fully rule it out.
+ *
+ * Returns null where AudioContext is unavailable or construction fails.
+ */
+export async function probeOutputDeviceSampleRate(): Promise<number | null> {
+  if (typeof AudioContext === 'undefined') return null;
+  try {
+    const ctx = new AudioContext(); // no sampleRate option → device rate
+    const rate = ctx.sampleRate;
+    await ctx.close();
+    return rate;
+  } catch {
+    return null;
+  }
+}
+
+/**
  * Check if audio playback is supported
  */
 export function isAudioPlaybackSupported(): boolean {

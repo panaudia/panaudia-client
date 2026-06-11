@@ -54,6 +54,7 @@ export type { AudioPlayerConfig, AudioPlayerStats, AudioGraphReport, } from './a
 export { JitterBufferCore, PLAYOUT_TUNING, computeJitterCapacity } from './jitter-buffer-core.js';
 export type { JitterBufferCoreConfig, JitterBufferSnapshot, Levels } from './jitter-buffer-core.js';
 export { StereoMeterCore } from './stereo-meter-core.js';
+export { probeOutputDeviceSampleRate } from './audio-player.js';
 export type { StereoMeterReport } from './stereo-meter-core.js';
 export type { DecodedFormatInfo } from './moq-worker-protocol.js';
 export { PLAYOUT_PROCESSOR_NAME, buildPlayoutWorkletCode, createPlayoutWorkletUrl, } from './playout-worklet.js';

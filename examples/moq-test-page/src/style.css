@@ -384,6 +384,18 @@ button:disabled {
   font-family: monospace;
 }
 
+/* HFP banner — output device collapsed to Bluetooth mono */
+.hfp-banner {
+  background: #3a2a12;
+  border: 1px solid #e0a030;
+  border-radius: 4px;
+  color: #e0a030;
+  font-size: 0.8rem;
+  line-height: 1.4;
+  padding: 8px 10px;
+  margin-bottom: 10px;
+}
+
 /* Stereo Diagnostics panel */
 .tap-block {
   margin-bottom: 14px;

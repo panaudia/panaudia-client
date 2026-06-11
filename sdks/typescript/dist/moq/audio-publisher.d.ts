@@ -74,9 +74,14 @@ export declare class AudioNotSupportedError extends MoqClientError {
     constructor(message: string);
 }
 /**
- * Error thrown when the default microphone is Bluetooth and no explicit device was chosen.
- * The `availableDevices` field contains all mics with their classification so the app
- * can immediately show a mic picker.
+ * @deprecated No longer thrown (2026-06-11). Pre-connect Bluetooth gating was
+ * removed after cross-browser testing showed it helps nowhere: Chrome manages
+ * a Bluetooth default sensibly itself, Firefox collapses to mono regardless of
+ * mic choice, and on Safari the gating flow itself triggered HFP.
+ * `PanaudiaClient.connect()` now emits a non-blocking 'warning'
+ * (BLUETOOTH_MIC / BLUETOOTH_MIC_DEFAULT) instead, and an actual collapse is
+ * detected post-connect via `probeOutputDeviceSampleRate()`. Kept only so
+ * existing imports keep compiling; will be removed in a future release.
  */
 export declare class BluetoothMicDefaultError extends MoqClientError {
     readonly availableDevices: Array<{

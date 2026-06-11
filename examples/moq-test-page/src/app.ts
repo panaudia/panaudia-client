@@ -4,6 +4,8 @@ import {
   ConnectionState,
   isWebTransportSupported,
   getWebTransportSupport,
+  micPermissionGranted,
+  probeOutputDeviceSampleRate,
 } from '@panaudia/client';
 import type {
   ErrorEvent,
@@ -36,6 +38,8 @@ const entityIdDisplay = $<HTMLSpanElement>('entity-id');
 const connectBtn = $<HTMLButtonElement>('connect-btn');
 const disconnectBtn = $<HTMLButtonElement>('disconnect-btn');
 const connectionStatus = $<HTMLDivElement>('connection-status');
+const micSelect = $<HTMLSelectElement>('mic-select');
+const hfpBanner = $<HTMLDivElement>('hfp-banner');
 
 const micBtn = $<HTMLButtonElement>('mic-btn');
 const inputMeter = $<HTMLDivElement>('input-meter');
@@ -103,6 +107,25 @@ let stereoPollTimer = 0;
 // Latest diagnostics snapshot — kept for the "Copy report" button.
 let lastStereoDiag: StereoDiagnostics | null = null;
 
+// Output-device sample-rate probe (HFP detection): a throwaway default-rate
+// AudioContext inherits the device's native rate. ≤24 kHz strongly suggests a
+// Bluetooth headset stuck in HFP — the mono collapse no graph tap can see.
+let lastDeviceProbeHz: number | null = null;
+let deviceProbeBusy = false;
+
+function runDeviceProbe(): void {
+  if (deviceProbeBusy) return;
+  deviceProbeBusy = true;
+  void probeOutputDeviceSampleRate()
+    .then((rate) => {
+      lastDeviceProbeHz = rate;
+      updateHfpBanner(rate);
+    })
+    .finally(() => {
+      deviceProbeBusy = false;
+    });
+}
+
 /** RMS (linear) → dBFS string, or '−∞' for silence. */
 function rmsDb(rms: number): string {
   return rms > 0 ? (20 * Math.log10(rms)).toFixed(1) : '−∞';
@@ -163,6 +186,13 @@ function renderGraphSnapshot(diag: StereoDiagnostics): string {
       : 'decoded      (no frames yet)'
   );
   lines.push(`subprotocol  ${JSON.stringify(diag.subprotocol)}`);
+  if (lastDeviceProbeHz !== null) {
+    lines.push(
+      lastDeviceProbeHz <= 24000
+        ? `device probe ${lastDeviceProbeHz} Hz ⚠ ≤24kHz — Bluetooth HFP (mono) suspected`
+        : `device probe ${lastDeviceProbeHz} Hz`
+    );
+  }
   return lines.join('\n');
 }
 
@@ -198,7 +228,10 @@ function applyStereoVerdict(
 
 function startStereoPoll(): void {
   stopStereoPoll();
+  runDeviceProbe(); // immediate first probe; then refreshed every ~2 s below
+  let tick = 0;
   stereoPollTimer = window.setInterval(() => {
+    if (++tick % 8 === 0) runDeviceProbe(); // ~2 s cadence (poll is 250 ms)
     const diag = client?.getStereoDiagnostics() ?? null;
     lastStereoDiag = diag;
 
@@ -238,6 +271,7 @@ copyStereoBtn.addEventListener('click', () => {
     timestamp: new Date().toISOString(),
     serverHost: serverHostInput.value.trim(),
     transport: transportResolvedEl.textContent,
+    deviceProbeHz: lastDeviceProbeHz,
     ...(lastStereoDiag ?? { note: 'not connected — no diagnostics captured' }),
   };
   const json = JSON.stringify(report, null, 2);
@@ -491,6 +525,67 @@ serverHostInput.addEventListener('input', updateResolution);
 transportSelect.addEventListener('change', updateResolution);
 colourInput.addEventListener('input', updateResolution);
 
+// ── Mic picker (manual control) ───────────────────────────────────────
+// Pre-connect Bluetooth gating was removed (2026-06-11 cross-browser tests:
+// Chrome self-manages, Firefox collapses regardless, Safari's gating flow
+// itself triggered HFP). The dropdown is now an always-available manual
+// override, populated ONLY when mic permission is already granted — labels are
+// then readable from enumerateDevices without opening any device. Actual HFP
+// collapse is detected post-connect by the output-device probe (banner below).
+
+/** The user's mic choice. Undefined = system default. */
+function selectedMicrophoneId(): string | undefined {
+  return micSelect.value || undefined;
+}
+
+async function populateMicSelect(): Promise<void> {
+  if (!(await micPermissionGranted())) return; // no labels without a device open — keep just "System default"
+  try {
+    const mics = await PanaudiaClient.listMicrophones(); // no-open path when permission granted
+    const previous = micSelect.value;
+    micSelect.innerHTML = '';
+    const def = document.createElement('option');
+    def.value = '';
+    def.textContent = 'System default';
+    micSelect.appendChild(def);
+    for (const mic of mics) {
+      if (mic.deviceId === 'default') continue; // Chrome's synthetic mirror of the default
+      const opt = document.createElement('option');
+      opt.value = mic.deviceId;
+      opt.textContent = mic.type === 'bluetooth' ? `${mic.label} — bluetooth ⚠ (mono)` : `${mic.label} — ${mic.type}`;
+      micSelect.appendChild(opt);
+    }
+    // Keep the user's choice across repopulations when the device still exists.
+    if (previous && [...micSelect.options].some((o) => o.value === previous)) {
+      micSelect.value = previous;
+    }
+  } catch {
+    /* enumeration failure — leave the dropdown as-is */
+  }
+}
+
+// Populate on load when permission is already granted (returning visitor).
+void populateMicSelect();
+
+// ── HFP banner ────────────────────────────────────────────────────────
+// The output-device probe is the only in-browser signal for "both taps stereo
+// but it SOUNDS mono": a Bluetooth headset in HFP reports a 16–24 kHz device
+// rate. Advice is browser-specific — in Firefox no mic choice avoids it.
+function hfpAdvice(): string {
+  if (/firefox/i.test(navigator.userAgent)) {
+    return 'Firefox forces a Bluetooth headset to mono whenever any microphone is in use — use wired output or another browser.';
+  }
+  return 'Set Input to the built-in microphone in System Settings → Sound, put the headset in its case for ~10 s, then reconnect.';
+}
+
+function updateHfpBanner(rate: number | null): void {
+  const stuck = rate !== null && rate <= 24000;
+  hfpBanner.hidden = !stuck;
+  if (stuck) {
+    hfpBanner.textContent = `Output device is at ${rate} Hz — Bluetooth mono (HFP) suspected. ${hfpAdvice()}`;
+  }
+}
+
 connectBtn.addEventListener('click', async () => {
   const host = serverHostInput.value.trim();
   const ticket = jwtTokenInput.value.trim();
@@ -519,6 +614,8 @@ connectBtn.addEventListener('click', async () => {
       transport: choice,
       initialPosition: { x: pose.x, y: pose.y, z: pose.z },
       initialRotation: { yaw: pose.yaw, pitch: 0, roll: 0 },
+      // Set once the mic picker has been shown (Bluetooth-default recovery).
+      microphoneId: selectedMicrophoneId(),
       // debug enables the v3 playout [JBUF] log (filter devtools console by "JBUF")
       // for jitter-buffer soak/tuning — see playout-v3 plan Phase 4/5.
       debug: true,
@@ -540,6 +637,9 @@ connectBtn.addEventListener('click', async () => {
       applyVolume();
       startInputMeter();
       startStereoPoll();
+      // Mic permission is granted by now (capture starts during connect) —
+      // labels are readable without opening a device, so fill the picker.
+      void populateMicSelect();
       // Console access for diagnostics, e.g. `panaudia.getStereoDiagnostics()`.
       (window as unknown as { panaudia?: PanaudiaClient | null }).panaudia = client;
       // Pull the current entity record in case ops landed before our

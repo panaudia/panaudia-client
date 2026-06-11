@@ -26,9 +26,9 @@ import { WebRtcTransport } from './webrtc/webrtc-transport.js';
 import {
   selectBestMicrophone,
   classifyByLabel,
+  micPermissionGranted,
   type MicrophoneType,
 } from './shared/microphone-selection.js';
-import { BluetoothMicDefaultError } from './moq/audio-publisher.js';
 import { createCommandsAPI, type CommandsAPI } from './commands.js';
 
 export type TransportType = 'moq' | 'webrtc';
@@ -101,14 +101,18 @@ export class PanaudiaClient {
    * Requests mic permission if not already granted (one prompt, briefly opens default mic).
    */
   static async listMicrophones(): Promise<MicrophoneInfo[]> {
-    // Ensure mic permission is granted so device labels are populated.
-    let stream: MediaStream | null = null;
-    try {
-      stream = await navigator.mediaDevices.getUserMedia({ audio: true, video: false });
-    } finally {
-      if (stream) {
-        for (const track of stream.getTracks()) {
-          track.stop();
+    // Ensure mic permission is granted so device labels are populated. Skip
+    // the probe when already granted — opening the default mic flips a
+    // Bluetooth headset into HFP (mono), which the OS/device can hold on to.
+    if (!(await micPermissionGranted())) {
+      let stream: MediaStream | null = null;
+      try {
+        stream = await navigator.mediaDevices.getUserMedia({ audio: true, video: false });
+      } finally {
+        if (stream) {
+          for (const track of stream.getTracks()) {
+            track.stop();
+          }
         }
       }
     }
@@ -272,20 +276,18 @@ export class PanaudiaClient {
   // ── Connection lifecycle ─────────────────────────────────────────────
 
   async connect(): Promise<void> {
-    // Check Bluetooth mic status before any transport setup.
-    // This ensures both MOQ and WebRTC fail identically (clean, nothing connected).
+    // Bluetooth mic awareness — NON-BLOCKING, and it never opens a microphone:
+    // opening the default mic (even briefly) flips a Bluetooth headset into
+    // HFP (mono), which the OS/device can then hold on to. Pre-connect GATING
+    // was removed (2026-06-11) after cross-browser testing: Chrome manages a
+    // Bluetooth default sensibly by itself, Firefox collapses to mono
+    // regardless of which mic is chosen, and on Safari the gating flow itself
+    // triggered HFP. Detection moved post-connect (probeOutputDeviceSampleRate);
+    // here we only WARN, and only when labels are readable without opening
+    // anything (permission already granted).
     const microphoneId = this.config.microphoneId;
-    if (navigator.mediaDevices?.getUserMedia) {
+    if (navigator.mediaDevices?.enumerateDevices && (await micPermissionGranted())) {
       try {
-        // Brief getUserMedia to populate device labels. With no deviceId constraint the
-        // browser opens the OS DEFAULT mic, so the resulting track tells us which device
-        // is actually the default — read it BEFORE stopping the track.
-        const permStream = await navigator.mediaDevices.getUserMedia({ audio: true, video: false });
-        const defaultTrack = permStream.getAudioTracks()[0];
-        const defaultLabel = defaultTrack?.label ?? '';
-        const defaultDeviceId = defaultTrack?.getSettings().deviceId;
-        for (const track of permStream.getTracks()) track.stop();
-
         const devices = await navigator.mediaDevices.enumerateDevices();
         const mics = devices
           .filter((d) => d.kind === 'audioinput')
@@ -302,20 +304,20 @@ export class PanaudiaClient {
             });
           }
         } else {
-          // No explicit device — refuse if the OS default is Bluetooth. Classify the
-          // device the permission stream actually opened, NOT mics[0]: only Chrome
-          // synthesizes a 'default' entry at index 0; on Firefox/Safari mics[0] is
-          // arbitrary, so the old check both missed real Bluetooth defaults and
-          // false-tripped on non-default Bluetooth devices. Fall back to the matched
-          // enumerated entry's label (stable id) for the picker.
-          if (classifyByLabel(defaultLabel) === 'bluetooth') {
-            const matched = defaultDeviceId ? mics.find((m) => m.deviceId === defaultDeviceId) : undefined;
-            throw new BluetoothMicDefaultError(matched?.label ?? defaultLabel, mics);
+          // Chrome synthesizes a 'default' entry mirroring the OS default;
+          // Firefox/Safari don't (the default stays unknown there — silent,
+          // the post-connect device probe catches an actual collapse).
+          const defaultEntry = mics.find((m) => m.deviceId === 'default');
+          if (defaultEntry && defaultEntry.type === 'bluetooth') {
+            this.emit('warning', {
+              code: 'BLUETOOTH_MIC_DEFAULT',
+              message: `Default microphone is Bluetooth (${defaultEntry.label}). The headset may switch to mono (HFP) when the mic starts.`,
+              details: { label: defaultEntry.label },
+            });
           }
         }
-      } catch (e) {
-        // Re-throw our own errors, swallow enumeration failures
-        if (e instanceof BluetoothMicDefaultError) throw e;
+      } catch {
+        // Enumeration failures are non-fatal — this is advisory only.
       }
     }
 

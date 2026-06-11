@@ -1,7 +1,7 @@
 import { a as ConnectionState, c as createEntityInfo3 } from "./topic-merger.js";
 import { E, T, b, f, g, h, u } from "./topic-merger.js";
-import { an as isWebTransportSupported, G as MoqTransportAdapter, B as BluetoothMicDefaultError } from "./moq-transport-adapter.js";
-import { V, X, Y, Z, ak, ao, ap, aq, ar, as, at, au, aB, aC, aD, aE, aF, aG, aH } from "./moq-transport-adapter.js";
+import { an as isWebTransportSupported, G as MoqTransportAdapter } from "./moq-transport-adapter.js";
+import { B, V, X, Y, Z, ak, ao, ap, aq, ar, as, at, au, aB, aC, aD, aE, aF, aG, aH, aI } from "./moq-transport-adapter.js";
 import { WebRtcTransport } from "./webrtc/index.js";
 const BLUETOOTH_KEYWORDS = [
   "bluetooth",
@@ -132,19 +132,31 @@ const TYPE_PRIORITY = {
 function compareMicrophones(a, b2) {
   return TYPE_PRIORITY[a.type] - TYPE_PRIORITY[b2.type];
 }
+async function micPermissionGranted() {
+  try {
+    const permissions = navigator.permissions;
+    if (!permissions?.query) return false;
+    const status = await permissions.query({ name: "microphone" });
+    return status.state === "granted";
+  } catch {
+    return false;
+  }
+}
 async function selectBestMicrophone(debug = false) {
   const log = debug ? (...args) => console.log("[MicSelection]", ...args) : () => {
   };
-  let permissionStream = null;
-  try {
-    permissionStream = await navigator.mediaDevices.getUserMedia({
-      audio: true,
-      video: false
-    });
-  } finally {
-    if (permissionStream) {
-      for (const track of permissionStream.getTracks()) {
-        track.stop();
+  if (!await micPermissionGranted()) {
+    let permissionStream = null;
+    try {
+      permissionStream = await navigator.mediaDevices.getUserMedia({
+        audio: true,
+        video: false
+      });
+    } finally {
+      if (permissionStream) {
+        for (const track of permissionStream.getTracks()) {
+          track.stop();
+        }
       }
     }
   }
@@ -511,13 +523,15 @@ class PanaudiaClient {
    * Requests mic permission if not already granted (one prompt, briefly opens default mic).
    */
   static async listMicrophones() {
-    let stream = null;
-    try {
-      stream = await navigator.mediaDevices.getUserMedia({ audio: true, video: false });
-    } finally {
-      if (stream) {
-        for (const track of stream.getTracks()) {
-          track.stop();
+    if (!await micPermissionGranted()) {
+      let stream = null;
+      try {
+        stream = await navigator.mediaDevices.getUserMedia({ audio: true, video: false });
+      } finally {
+        if (stream) {
+          for (const track of stream.getTracks()) {
+            track.stop();
+          }
         }
       }
     }
@@ -664,13 +678,8 @@ class PanaudiaClient {
   // ── Connection lifecycle ─────────────────────────────────────────────
   async connect() {
     const microphoneId = this.config.microphoneId;
-    if (navigator.mediaDevices?.getUserMedia) {
+    if (navigator.mediaDevices?.enumerateDevices && await micPermissionGranted()) {
       try {
-        const permStream = await navigator.mediaDevices.getUserMedia({ audio: true, video: false });
-        const defaultTrack = permStream.getAudioTracks()[0];
-        const defaultLabel = defaultTrack?.label ?? "";
-        const defaultDeviceId = defaultTrack?.getSettings().deviceId;
-        for (const track of permStream.getTracks()) track.stop();
         const devices = await navigator.mediaDevices.enumerateDevices();
         const mics = devices.filter((d) => d.kind === "audioinput").map((d) => ({ deviceId: d.deviceId, label: d.label, type: classifyByLabel(d.label) }));
         if (microphoneId) {
@@ -683,13 +692,16 @@ class PanaudiaClient {
             });
           }
         } else {
-          if (classifyByLabel(defaultLabel) === "bluetooth") {
-            const matched = defaultDeviceId ? mics.find((m) => m.deviceId === defaultDeviceId) : void 0;
-            throw new BluetoothMicDefaultError(matched?.label ?? defaultLabel, mics);
+          const defaultEntry = mics.find((m) => m.deviceId === "default");
+          if (defaultEntry && defaultEntry.type === "bluetooth") {
+            this.emit("warning", {
+              code: "BLUETOOTH_MIC_DEFAULT",
+              message: `Default microphone is Bluetooth (${defaultEntry.label}). The headset may switch to mono (HFP) when the mic starts.`,
+              details: { label: defaultEntry.label }
+            });
           }
         }
-      } catch (e) {
-        if (e instanceof BluetoothMicDefaultError) throw e;
+      } catch {
       }
     }
     let entityId = this.config.entityId;
@@ -915,7 +927,7 @@ class PanaudiaClient {
   }
 }
 export {
-  BluetoothMicDefaultError,
+  B as BluetoothMicDefaultError,
   ConnectionState,
   E as ENTITY_INFO3_SIZE,
   PanaudiaClient,
@@ -934,6 +946,7 @@ export {
   ak as getWebTransportSupport,
   h as isValidUuid,
   isWebTransportSupported,
+  micPermissionGranted,
   ao as panaudiaToAframe,
   ap as panaudiaToBabylon,
   aq as panaudiaToPixi,
@@ -943,12 +956,13 @@ export {
   au as panaudiaToUnreal,
   aB as pixiToPanaudia,
   aC as playcanvasToPanaudia,
+  aD as probeOutputDeviceSampleRate,
   resolveServer,
   selectBestMicrophone,
-  aD as threejsToPanaudia,
-  aE as unityToPanaudia,
-  aF as unrealToPanaudia,
+  aE as threejsToPanaudia,
+  aF as unityToPanaudia,
+  aG as unrealToPanaudia,
   u as uuidToBytes,
-  aG as webglToAmbisonicPosition,
-  aH as webglToAmbisonicRotation
+  aH as webglToAmbisonicPosition,
+  aI as webglToAmbisonicRotation
 };

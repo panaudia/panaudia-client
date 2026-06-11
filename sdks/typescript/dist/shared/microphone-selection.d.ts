@@ -29,6 +29,15 @@ export interface MicrophoneSelectionResult {
  */
 export declare function classifyByLabel(label: string): MicrophoneType;
 /**
+ * Whether mic permission is ALREADY granted. When it is, enumerateDevices()
+ * returns full labels without opening any microphone — critical for Bluetooth
+ * headsets, where merely opening the mic (even our brief label-population
+ * probe) flips the headset into HFP and collapses its output to mono, a state
+ * macOS/the device can then hold on to. Returns false when the Permissions API
+ * is unavailable (the caller falls back to the one-time getUserMedia probe).
+ */
+export declare function micPermissionGranted(): Promise<boolean>;
+/**
  * Select the best non-Bluetooth microphone.
  *
  * Flow:

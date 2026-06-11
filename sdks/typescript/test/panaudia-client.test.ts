@@ -1,6 +1,5 @@
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
 import { PanaudiaClient } from '../src/panaudia-client.js';
-import { BluetoothMicDefaultError } from '../src/moq/audio-publisher.js';
 import type { Transport, TransportConfig, AudioCaptureConfig, AudioPlaybackConfig } from '../src/transport.js';
 import type { ConnectionState, EntityInfo3, ControlMessage, EntityState } from '../src/types.js';
 
@@ -106,72 +105,87 @@ describe('PanaudiaClient', () => {
     });
   });
 
-  describe('Bluetooth default mic detection', () => {
-    // The permission stream (getUserMedia with no deviceId) opens the OS DEFAULT mic;
-    // `defaultLabel`/`defaultDeviceId` model the track that comes back. `mics` is what
-    // enumerateDevices reports, in order. The bug being guarded: classifying mics[0]
-    // instead of the actual default — wrong on Firefox/Safari, which (unlike Chrome)
-    // don't synthesize a 'default' entry at index 0.
+  describe('Bluetooth mic awareness (non-blocking, never opens a mic)', () => {
+    // Pre-connect GATING was removed 2026-06-11 (see panaudia-client.ts):
+    // connect() must NEVER call getUserMedia (opening the default mic flips a
+    // Bluetooth headset into HFP/mono), must never throw for Bluetooth mics,
+    // and only WARNS — and only when labels are readable without a device
+    // open, i.e. permission is already granted.
     function stubMediaDevices(opts: {
-      defaultLabel: string;
-      defaultDeviceId: string;
+      permission: 'granted' | 'prompt' | 'unavailable';
       mics: Array<{ deviceId: string; label: string }>;
-    }): void {
-      const track = {
-        kind: 'audio',
-        label: opts.defaultLabel,
-        getSettings: () => ({ deviceId: opts.defaultDeviceId }),
-        stop: vi.fn(),
-      };
-      const stream = { getTracks: () => [track], getAudioTracks: () => [track] };
+    }): { getUserMedia: ReturnType<typeof vi.fn> } {
+      const getUserMedia = vi.fn().mockRejectedValue(new Error('connect() must not open a microphone'));
       vi.stubGlobal('navigator', {
         mediaDevices: {
-          getUserMedia: vi.fn().mockResolvedValue(stream),
+          getUserMedia,
           enumerateDevices: vi.fn().mockResolvedValue(
             opts.mics.map((m, i) => ({ kind: 'audioinput', deviceId: m.deviceId, label: m.label, groupId: String(i) })),
           ),
         },
+        ...(opts.permission === 'unavailable'
+          ? {}
+          : { permissions: { query: vi.fn().mockResolvedValue({ state: opts.permission }) } }),
       });
+      return { getUserMedia };
     }
 
     afterEach(() => {
       vi.unstubAllGlobals();
     });
 
-    it('throws when the OS default is Bluetooth even though it is NOT first in enumerateDevices (FF/Safari)', async () => {
-      // Default = AirPods, but enumerateDevices lists the built-in mic first.
-      stubMediaDevices({
-        defaultLabel: 'AirPods Pro',
-        defaultDeviceId: 'bt-1',
+    it('connects without opening a mic and warns when the Chrome default entry is Bluetooth', async () => {
+      const { getUserMedia } = stubMediaDevices({
+        permission: 'granted',
         mics: [
+          { deviceId: 'default', label: 'Default - AirPods Pro' },
           { deviceId: 'builtin-1', label: 'MacBook Pro Microphone' },
           { deviceId: 'bt-1', label: 'AirPods Pro' },
         ],
       });
       const client = new PanaudiaClient(defaultConfig);
-      await expect(client.connect()).rejects.toBeInstanceOf(BluetoothMicDefaultError);
-      expect(mockTransport.connect).not.toHaveBeenCalled();
-    });
-
-    it('does NOT throw when mics[0] is Bluetooth but the actual default is built-in (old false-positive)', async () => {
-      // enumerateDevices lists AirPods first, but the default the browser opened is built-in.
-      stubMediaDevices({
-        defaultLabel: 'MacBook Pro Microphone',
-        defaultDeviceId: 'builtin-1',
-        mics: [
-          { deviceId: 'bt-1', label: 'AirPods Pro' },
-          { deviceId: 'builtin-1', label: 'MacBook Pro Microphone' },
-        ],
-      });
-      const client = new PanaudiaClient(defaultConfig);
+      const warnings: Array<{ code: string }> = [];
+      client.on('warning', (w) => warnings.push(w));
       await client.connect();
       expect(mockTransport.connect).toHaveBeenCalled();
+      expect(getUserMedia).not.toHaveBeenCalled();
+      expect(warnings.some((w) => w.code === 'BLUETOOTH_MIC_DEFAULT')).toBe(true);
+    });
+
+    it('stays silent when the default is unknown (FF/Safari: no synthetic default entry)', async () => {
+      const { getUserMedia } = stubMediaDevices({
+        permission: 'granted',
+        mics: [
+          { deviceId: 'bt-1', label: 'AirPods Pro' },
+          { deviceId: 'builtin-1', label: 'MacBook Pro Microphone' },
+        ],
+      });
+      const client = new PanaudiaClient(defaultConfig);
+      const warnings: Array<{ code: string }> = [];
+      client.on('warning', (w) => warnings.push(w));
+      await client.connect();
+      expect(mockTransport.connect).toHaveBeenCalled();
+      expect(getUserMedia).not.toHaveBeenCalled();
+      expect(warnings).toEqual([]);
+    });
+
+    it('skips the check entirely (no mic open, no warning) when permission is not yet granted', async () => {
+      const { getUserMedia } = stubMediaDevices({
+        permission: 'prompt',
+        mics: [{ deviceId: 'bt-1', label: 'AirPods Pro' }],
+      });
+      const client = new PanaudiaClient(defaultConfig);
+      const warnings: Array<{ code: string }> = [];
+      client.on('warning', (w) => warnings.push(w));
+      await client.connect();
+      expect(mockTransport.connect).toHaveBeenCalled();
+      expect(getUserMedia).not.toHaveBeenCalled();
+      expect(warnings).toEqual([]);
     });
 
     it('warns (does not throw) when an explicit microphoneId is Bluetooth', async () => {
       stubMediaDevices({
-        defaultLabel: 'MacBook Pro Microphone',
-        defaultDeviceId: 'builtin-1',
+        permission: 'granted',
         mics: [
           { deviceId: 'builtin-1', label: 'MacBook Pro Microphone' },
           { deviceId: 'bt-1', label: 'AirPods Pro' },

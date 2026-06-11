@@ -188,6 +188,29 @@ function compareMicrophones(a: ClassifiedMicrophone, b: ClassifiedMicrophone): n
   return TYPE_PRIORITY[a.type] - TYPE_PRIORITY[b.type];
 }
 
+// ── Permission state ─────────────────────────────────────────────────────────
+
+/**
+ * Whether mic permission is ALREADY granted. When it is, enumerateDevices()
+ * returns full labels without opening any microphone — critical for Bluetooth
+ * headsets, where merely opening the mic (even our brief label-population
+ * probe) flips the headset into HFP and collapses its output to mono, a state
+ * macOS/the device can then hold on to. Returns false when the Permissions API
+ * is unavailable (the caller falls back to the one-time getUserMedia probe).
+ */
+export async function micPermissionGranted(): Promise<boolean> {
+  try {
+    const permissions = (navigator as Navigator & {
+      permissions?: { query(desc: { name: string }): Promise<{ state: string }> };
+    }).permissions;
+    if (!permissions?.query) return false;
+    const status = await permissions.query({ name: 'microphone' });
+    return status.state === 'granted';
+  } catch {
+    return false;
+  }
+}
+
 // ── Main selection function ─────────────────────────────────────────────────
 
 /**
@@ -208,18 +231,21 @@ export async function selectBestMicrophone(
     ? (...args: unknown[]) => console.log('[MicSelection]', ...args)
     : () => {};
 
-  // Step 1: Get permission so labels are populated.
-  // We open the default mic, then immediately close it.
-  let permissionStream: MediaStream | null = null;
-  try {
-    permissionStream = await navigator.mediaDevices.getUserMedia({
-      audio: true,
-      video: false,
-    });
-  } finally {
-    if (permissionStream) {
-      for (const track of permissionStream.getTracks()) {
-        track.stop();
+  // Step 1: Get permission so labels are populated. Skip the probe entirely
+  // when permission is already granted — opening the default mic would flip a
+  // Bluetooth headset into HFP (mono), the very state we're trying to avoid.
+  if (!(await micPermissionGranted())) {
+    let permissionStream: MediaStream | null = null;
+    try {
+      permissionStream = await navigator.mediaDevices.getUserMedia({
+        audio: true,
+        video: false,
+      });
+    } finally {
+      if (permissionStream) {
+        for (const track of permissionStream.getTracks()) {
+          track.stop();
+        }
       }
     }
   }

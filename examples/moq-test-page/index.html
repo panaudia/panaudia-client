@@ -65,6 +65,14 @@
       <div class="form-group">
         <span id="resolved-url" class="mono">—</span>
       </div>
+      <!-- Mic picker — manual control, passed as microphoneId on Connect.
+           Populated from enumerateDevices only when mic permission is already
+           granted (labels readable without opening a device — opening a
+           Bluetooth mic would flip the headset to mono HFP). -->
+      <div class="form-group" id="mic-select-group">
+        <label for="mic-select">Microphone</label>
+        <select id="mic-select"><option value="">System default</option></select>
+      </div>
       <div class="button-group">
         <button id="connect-btn">Connect</button>
         <button id="disconnect-btn" hidden>Disconnect</button>
@@ -111,6 +119,9 @@
     <!-- Audio -->
     <div class="panel" id="audio-panel">
       <h2>Audio</h2>
+      <!-- Shown when the output-device probe detects an HFP-grade sample rate
+           (Bluetooth headset collapsed to mono) — the state no graph tap can see. -->
+      <div id="hfp-banner" class="hfp-banner" hidden></div>
       <div class="button-group">
         <button id="mic-btn" disabled>Mute Mic</button>
       </div>
