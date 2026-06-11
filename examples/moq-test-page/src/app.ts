@@ -10,6 +10,8 @@ import type {
   WarningEvent,
   EntityState,
   MergeDebugInfo,
+  StereoDiagnostics,
+  StereoMeterReport,
 } from '@panaudia/client';
 import type { TopicNode, SingleRecordNode } from '@panaudia/client';
 
@@ -40,6 +42,21 @@ const inputMeter = $<HTMLDivElement>('input-meter');
 const micStatusEl = $<HTMLSpanElement>('mic-status');
 const volumeSlider = $<HTMLInputElement>('volume');
 const volumeVal = $<HTMLSpanElement>('volume-val');
+const stereoVerdictEl = $<HTMLSpanElement>('stereo-verdict');
+const stereoVerdictBEl = $<HTMLSpanElement>('stereo-verdict-b');
+const stereoCorrEl = $<HTMLSpanElement>('stereo-corr');
+
+// Stereo Diagnostics panel
+const tapAVerdictEl = $<HTMLSpanElement>('tapa-verdict');
+const tapAMeterL = $<HTMLDivElement>('tapa-meter-l');
+const tapAMeterR = $<HTMLDivElement>('tapa-meter-r');
+const tapANumsEl = $<HTMLDivElement>('tapa-nums');
+const tapBVerdictEl = $<HTMLSpanElement>('tapb-verdict');
+const tapBMeterL = $<HTMLDivElement>('tapb-meter-l');
+const tapBMeterR = $<HTMLDivElement>('tapb-meter-r');
+const tapBNumsEl = $<HTMLDivElement>('tapb-nums');
+const stereoGraphEl = $<HTMLPreElement>('stereo-graph');
+const copyStereoBtn = $<HTMLButtonElement>('copy-stereo-btn');
 
 const xyPad = $<HTMLDivElement>('xy-pad');
 const xyDot = $<HTMLDivElement>('xy-dot');
@@ -78,6 +95,160 @@ let inputAnalyser: AnalyserNode | null = null;
 let inputStream: MediaStream | null = null;
 let inputAudioCtx: AudioContext | null = null;
 let inputAnimFrame = 0;
+
+// Stereo diagnostics readout (Tap A — decoded stream content, measured in the
+// MOQ worker; needs the client's debug flag, which this page sets).
+let stereoPollTimer = 0;
+
+// Latest diagnostics snapshot — kept for the "Copy report" button.
+let lastStereoDiag: StereoDiagnostics | null = null;
+
+/** RMS (linear) → dBFS string, or '−∞' for silence. */
+function rmsDb(rms: number): string {
+  return rms > 0 ? (20 * Math.log10(rms)).toFixed(1) : '−∞';
+}
+
+/** RMS → meter percentage, mapping −60…0 dBFS onto 0…100%. */
+function rmsToPct(rms: number): number {
+  if (rms <= 0) return 0;
+  const db = 20 * Math.log10(rms);
+  return Math.max(0, Math.min(100, 100 + (db * 100) / 60));
+}
+
+/** One tap's row in the diagnostics panel: verdict + L/R meters + numbers. */
+function renderTap(
+  tap: StereoMeterReport | null,
+  verdictEl: HTMLSpanElement,
+  meterL: HTMLDivElement,
+  meterR: HTMLDivElement,
+  numsEl: HTMLDivElement
+): void {
+  applyStereoVerdict(verdictEl, tap);
+  meterL.style.width = `${rmsToPct(tap?.rmsL ?? 0)}%`;
+  meterR.style.width = `${rmsToPct(tap?.rmsR ?? 0)}%`;
+  if (!tap || tap.frames === 0) {
+    numsEl.textContent = '—';
+    return;
+  }
+  // side−mid in dB: 0 ⇒ fully decorrelated stereo; −∞ ⇒ mono.
+  const sideMid =
+    tap.midRms > 0 && tap.sideRms > 0 ? (20 * Math.log10(tap.sideRms / tap.midRms)).toFixed(1) : '−∞';
+  numsEl.textContent =
+    `rms ${rmsDb(tap.rmsL)} / ${rmsDb(tap.rmsR)} dBFS · corr ${tap.correlation.toFixed(2)} · side−mid ${sideMid} dB`;
+}
+
+/** The graph snapshot as aligned key/value lines. */
+function renderGraphSnapshot(diag: StereoDiagnostics): string {
+  const g = diag.graph;
+  const f = diag.decodedFormat;
+  const lines: string[] = [];
+  if (g) {
+    const lat = `base ${g.context.baseLatencyMs?.toFixed(1) ?? '?'} ms · output ${g.context.outputLatencyMs?.toFixed(1) ?? '?'} ms`;
+    lines.push(`context      ${g.context.sampleRate} Hz · ${g.context.state} · ${lat}`);
+    lines.push(
+      `destination  ch ${g.destination.channelCount} (max ${g.destination.maxChannelCount}) · ${g.destination.channelCountMode} · ${g.destination.channelInterpretation}`
+    );
+    if (g.worklet) {
+      lines.push(
+        `worklet      out [${g.worklet.outputChannelCount}] · ch ${g.worklet.channelCount} · ${g.worklet.channelCountMode} · ${g.worklet.channelInterpretation}`
+      );
+    }
+    lines.push(`ring         ${g.ring.mode} · writer ${g.ring.writerFrameSamples} · nc ${g.ring.numChannels}`);
+  } else {
+    lines.push('graph        (player not initialized)');
+  }
+  lines.push(
+    f
+      ? `decoded      ${f.numberOfChannels}ch @ ${f.sampleRate} Hz · native ${f.nativeFormat ?? '?'} · copy ${f.copyPath}`
+      : 'decoded      (no frames yet)'
+  );
+  lines.push(`subprotocol  ${JSON.stringify(diag.subprotocol)}`);
+  return lines.join('\n');
+}
+
+// Verdict heuristic (plan/stereo-diagnostics): silence first, then side energy
+// (the unambiguous collapse signal), then correlation.
+function applyStereoVerdict(
+  el: HTMLSpanElement,
+  tap: { frames: number; rmsL: number; rmsR: number; midRms: number; sideRms: number; correlation: number } | null
+): void {
+  if (!tap || tap.frames === 0) {
+    el.textContent = '—';
+    el.style.color = '';
+    return;
+  }
+  let label: string;
+  let color: string;
+  if (Math.max(tap.rmsL, tap.rmsR) < 0.001) {
+    label = 'SILENT';
+    color = '#888';
+  } else if (tap.sideRms < tap.midRms * 0.01) {
+    label = 'MONO';
+    color = '#e05555';
+  } else if (tap.correlation > 0.95) {
+    label = 'CORRELATED';
+    color = '#e0a030';
+  } else {
+    label = 'STEREO';
+    color = '#3fbf5f';
+  }
+  el.textContent = label;
+  el.style.color = color;
+}
+
+function startStereoPoll(): void {
+  stopStereoPoll();
+  stereoPollTimer = window.setInterval(() => {
+    const diag = client?.getStereoDiagnostics() ?? null;
+    lastStereoDiag = diag;
+
+    // Audio-card at-a-glance chips
+    applyStereoVerdict(stereoVerdictEl, diag?.tapA ?? null);
+    applyStereoVerdict(stereoVerdictBEl, diag?.tapB ?? null);
+    const tapA = diag?.tapA;
+    stereoCorrEl.textContent = tapA && tapA.frames > 0 ? `corr ${tapA.correlation.toFixed(2)}` : '';
+
+    // Diagnostics panel
+    renderTap(diag?.tapA ?? null, tapAVerdictEl, tapAMeterL, tapAMeterR, tapANumsEl);
+    renderTap(diag?.tapB ?? null, tapBVerdictEl, tapBMeterL, tapBMeterR, tapBNumsEl);
+    stereoGraphEl.textContent = diag ? renderGraphSnapshot(diag) : '(no data)';
+  }, 250);
+}
+
+function stopStereoPoll(): void {
+  if (stereoPollTimer) {
+    clearInterval(stereoPollTimer);
+    stereoPollTimer = 0;
+  }
+  lastStereoDiag = null;
+  stereoVerdictEl.textContent = '—';
+  stereoVerdictEl.style.color = '';
+  stereoVerdictBEl.textContent = '—';
+  stereoVerdictBEl.style.color = '';
+  stereoCorrEl.textContent = '';
+  renderTap(null, tapAVerdictEl, tapAMeterL, tapAMeterR, tapANumsEl);
+  renderTap(null, tapBVerdictEl, tapBMeterL, tapBMeterR, tapBNumsEl);
+  stereoGraphEl.textContent = '(no data)';
+}
+
+// Copy a self-contained, comparable artifact for one matrix cell
+// (browser × device × transport) — paste into notes/issues.
+copyStereoBtn.addEventListener('click', () => {
+  const report = {
+    timestamp: new Date().toISOString(),
+    serverHost: serverHostInput.value.trim(),
+    transport: transportResolvedEl.textContent,
+    ...(lastStereoDiag ?? { note: 'not connected — no diagnostics captured' }),
+  };
+  const json = JSON.stringify(report, null, 2);
+  navigator.clipboard
+    .writeText(json)
+    .then(() => log('Stereo report copied to clipboard'))
+    .catch((err: unknown) => {
+      log(`Clipboard write failed: ${err instanceof Error ? err.message : String(err)}`, 'warn');
+      console.log('[stereo report]', json); // fallback: grab it from the console
+    });
+});
 
 // Participants and attributes tracking
 const participants = new Map<string, EntityState>();
@@ -368,6 +539,9 @@ connectBtn.addEventListener('click', async () => {
       updateMicUI();
       applyVolume();
       startInputMeter();
+      startStereoPoll();
+      // Console access for diagnostics, e.g. `panaudia.getStereoDiagnostics()`.
+      (window as unknown as { panaudia?: PanaudiaClient | null }).panaudia = client;
       // Pull the current entity record in case ops landed before our
       // event handlers were wired (rare with the synchronous mock setup
       // but possible if the SDK adds buffering later).
@@ -443,8 +617,10 @@ disconnectBtn.addEventListener('click', async () => {
 
 function handleDisconnect() {
   stopInputMeter();
+  stopStereoPoll();
   micMuted = false;
   client = null;
+  (window as unknown as { panaudia?: PanaudiaClient | null }).panaudia = null;
   updateMicUI();
   micStatusEl.textContent = 'Off';
   inputMeter.style.width = '0%';

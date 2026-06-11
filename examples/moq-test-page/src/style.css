@@ -384,6 +384,46 @@ button:disabled {
   font-family: monospace;
 }
 
+/* Stereo Diagnostics panel */
+.tap-block {
+  margin-bottom: 14px;
+}
+
+.tap-head {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  margin-bottom: 6px;
+}
+
+.tap-name {
+  color: #aaa;
+  font-size: 0.85rem;
+}
+
+.tap-verdict {
+  font-family: monospace;
+  font-size: 0.85rem;
+  font-weight: bold;
+}
+
+.tap-nums {
+  color: #888;
+  font-size: 0.75rem;
+  margin-top: 2px;
+}
+
+.graph-snapshot {
+  background: #0f0f23;
+  border-radius: 4px;
+  padding: 8px 10px;
+  font-size: 0.75rem;
+  line-height: 1.5;
+  color: #ccc;
+  overflow-x: auto;
+  margin: 6px 0 0;
+}
+
 /* Position Controls */
 .slider-row {
   display: flex;

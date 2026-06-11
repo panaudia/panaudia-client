@@ -127,6 +127,7 @@
       </div>
       <div id="audio-stats" class="stats">
         <span>Mic: <span id="mic-status">Off</span></span>
+        <span>Stereo in: <span id="stereo-verdict">—</span> out: <span id="stereo-verdict-b">—</span> <span id="stereo-corr"></span></span>
       </div>
     </div>
 
@@ -161,6 +162,30 @@
       <div id="participants-list" class="participants-list">
         <p class="placeholder" id="participants-placeholder">Connect to see participants.</p>
       </div>
+    </div>
+
+    <!-- Stereo Diagnostics — mono-collapse localization (plan/stereo-diagnostics).
+         Tap A = decoded stream content (measured in the MOQ worker, debug only);
+         Tap B = rendered output (measured in the playout worklet). A stereo /
+         B mono ⇒ graph collapse; both stereo but it SOUNDS mono ⇒ OS/device. -->
+    <div class="panel" id="stereo-panel">
+      <h2>Stereo Diagnostics <button id="copy-stereo-btn" class="small-btn">Copy report</button></h2>
+      <div class="tap-block">
+        <div class="tap-head"><span class="tap-name">Tap A — decoded stream</span><span class="tap-verdict" id="tapa-verdict">—</span></div>
+        <div class="meter-row"><span class="meter-label">L</span><div class="meter"><div class="meter-fill" id="tapa-meter-l"></div></div></div>
+        <div class="meter-row"><span class="meter-label">R</span><div class="meter"><div class="meter-fill" id="tapa-meter-r"></div></div></div>
+        <div class="tap-nums mono" id="tapa-nums">—</div>
+      </div>
+      <div class="tap-block">
+        <div class="tap-head"><span class="tap-name">Tap B — rendered output</span><span class="tap-verdict" id="tapb-verdict">—</span></div>
+        <div class="meter-row"><span class="meter-label">L</span><div class="meter"><div class="meter-fill" id="tapb-meter-l"></div></div></div>
+        <div class="meter-row"><span class="meter-label">R</span><div class="meter"><div class="meter-fill" id="tapb-meter-r"></div></div></div>
+        <div class="tap-nums mono" id="tapb-nums">—</div>
+      </div>
+      <details class="form-group" open>
+        <summary>Graph snapshot</summary>
+        <pre id="stereo-graph" class="graph-snapshot mono">(no data)</pre>
+      </details>
     </div>
 
     </div><!-- /column right -->
