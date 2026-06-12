@@ -21,14 +21,14 @@ Before answering, read these files for the current API surface:
 
 2. **Authentication**: The user needs a JWT ticket. Ask what auth flow they're using. The JWT must contain a `jti` field (entity UUID) and optionally `preferred_username`. Don't help them generate JWTs — that's server-side. Just explain what the client expects.
 
-3. **Server resolution**: For production, use `resolveServer(ticket)` to get a server URL from the gateway. For local dev, pass `serverUrl` directly (e.g. `quic://localhost:4433/moq`).
+3. **Server resolution**: For production, use `resolveServer(ticket)` to get `{ serverUrl, transport }` from the gateway — it picks the transport (MOQ if WebTransport is supported, else WebRTC) and resolves a matching server URL. Pass both to the constructor. For local dev, pass `serverUrl` directly (e.g. `quic://localhost:4433/moq`) plus `transport` if known.
 
 4. **Create and connect**:
    ```typescript
    import { PanaudiaClient, resolveServer } from '@panaudia/client';
 
-   const serverUrl = await resolveServer(ticket);
-   const client = new PanaudiaClient({ serverUrl, ticket });
+   const server = await resolveServer(ticket); // { serverUrl, transport }
+   const client = new PanaudiaClient({ ...server, ticket });
    await client.connect();
    ```
    Audio capture and playback start automatically on connect — no separate calls needed.

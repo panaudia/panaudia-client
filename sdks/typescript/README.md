@@ -15,11 +15,11 @@ npm install @panaudia/client
 ```typescript
 import {PanaudiaClient, resolveServer} from '@panaudia/client';
 
-// Resolve server URL via gateway
-const serverUrl = await resolveServer(ticket);
+// Resolve server URL + transport via gateway
+const server = await resolveServer(ticket); // { serverUrl, transport }
 
 // Create and connect (audio starts automatically)
-const client = new PanaudiaClient({serverUrl, ticket});
+const client = new PanaudiaClient({...server, ticket});
 await client.connect();
 
 // Set spatial pose (Panaudia coordinates: position 0-1, rotation in degrees)
@@ -74,36 +74,30 @@ const client = new PanaudiaClient({
 
 ### Microphone Selection
 
-Bluetooth microphones force stereo audio to collapse to mono (the HFP/SCO profile replaces A2DP). The client detects this and refuses to connect with a Bluetooth default mic — instead throwing a `BluetoothMicDefaultError` that includes the full device list so you can show a mic picker.
+Bluetooth microphones can force stereo audio to collapse to mono (the
+HFP/SCO profile replaces A2DP). The client never blocks on this —
+`connect()` always proceeds — but it warns when it can see a Bluetooth
+mic is (or is likely to be) in use, without ever opening a device to
+check (opening one is itself what triggers the HFP switch):
 
 ```typescript
-import { PanaudiaClient, BluetoothMicDefaultError } from '@panaudia/client';
-
 const client = new PanaudiaClient({ serverUrl, ticket });
 
-try {
-  await client.connect();
-} catch (err) {
-  if (err instanceof BluetoothMicDefaultError) {
-    // Default mic is Bluetooth — show a picker with the available devices
-    console.log('Please select a microphone:', err.availableDevices);
-    // err.availableDevices → [{ deviceId, label, type: 'bluetooth'|'usb'|'builtin'|'unknown' }, ...]
-
-    // After the user picks one, reconnect with their choice:
-    const client2 = new PanaudiaClient({ serverUrl, ticket, microphoneId: chosenDeviceId });
-    await client2.connect();
-  }
-}
-
-// If the user explicitly chooses a Bluetooth mic, it connects but emits a warning
 client.on('warning', (w) => {
-  if (w.code === 'BLUETOOTH_MIC') {
+  if (w.code === 'BLUETOOTH_MIC' || w.code === 'BLUETOOTH_MIC_DEFAULT') {
+    // BLUETOOTH_MIC — the explicitly chosen microphoneId is Bluetooth
+    // BLUETOOTH_MIC_DEFAULT — the system default mic looks Bluetooth
     showWarningBanner(w.message);
   }
 });
+
+await client.connect();
 ```
 
-You can also proactively show a mic picker before connecting:
+An actual stereo→mono collapse is detected after connecting — see
+`getStereoDiagnostics()` and `probeOutputDeviceSampleRate()`.
+
+To steer users to a better device, show a mic picker before connecting:
 
 ```typescript
 // List all mics with type classification
@@ -170,15 +164,28 @@ The client supports two transports:
 | **MOQ** (default) | WebTransport + QUIC | Chrome, Edge, Firefox |
 | **WebRTC** (fallback) | WebSocket signaling + RTCPeerConnection | All browsers          |
 
-```typescript
-// Auto-detect (default): MOQ if WebTransport supported, else WebRTC
-const client = new PanaudiaClient({ serverUrl, ticket });
+Transport selection happens in `resolveServer()` — it auto-detects by
+default (MOQ if WebTransport is supported, else WebRTC), asks the gateway
+for a server URL for that transport, and returns both. Pass the result
+straight to the constructor so the client uses the transport the URL was
+resolved for:
 
-// Force MOQ
-const client = new PanaudiaClient({ serverUrl, ticket, transport: 'moq' });
+```typescript
+// Auto-detect (default)
+const server = await resolveServer(ticket); // { serverUrl, transport }
+const client = new PanaudiaClient({ ...server, ticket });
 
 // Force WebRTC
-const client = new PanaudiaClient({ serverUrl, ticket, transport: 'webrtc' });
+const server = await resolveServer(ticket, { transport: 'webrtc' });
+const client = new PanaudiaClient({ ...server, ticket });
+
+// Hardcoded dev URL (no gateway) — say which transport the URL is for,
+// or omit it to auto-detect
+const client = new PanaudiaClient({
+  serverUrl: 'quic://dev.panaudia.com:4433/moq',
+  ticket,
+  transport: 'moq',
+});
 ```
 
 ## API Reference

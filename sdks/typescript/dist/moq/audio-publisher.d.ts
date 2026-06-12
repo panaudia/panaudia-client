@@ -1,6 +1,5 @@
 import { MoqClientError } from './errors.js';
 import { WorkerEncoderConfig } from './moq-worker-protocol.js';
-import { MicrophoneType } from '../shared/microphone-selection.js';
 /**
  * Audio publisher configuration
  */
@@ -72,28 +71,6 @@ export declare class AudioEncodingError extends MoqClientError {
 }
 export declare class AudioNotSupportedError extends MoqClientError {
     constructor(message: string);
-}
-/**
- * @deprecated No longer thrown (2026-06-11). Pre-connect Bluetooth gating was
- * removed after cross-browser testing showed it helps nowhere: Chrome manages
- * a Bluetooth default sensibly itself, Firefox collapses to mono regardless of
- * mic choice, and on Safari the gating flow itself triggered HFP.
- * `PanaudiaClient.connect()` now emits a non-blocking 'warning'
- * (BLUETOOTH_MIC / BLUETOOTH_MIC_DEFAULT) instead, and an actual collapse is
- * detected post-connect via `probeOutputDeviceSampleRate()`. Kept only so
- * existing imports keep compiling; will be removed in a future release.
- */
-export declare class BluetoothMicDefaultError extends MoqClientError {
-    readonly availableDevices: Array<{
-        deviceId: string;
-        label: string;
-        type: MicrophoneType;
-    }>;
-    constructor(defaultLabel: string, availableDevices: Array<{
-        deviceId: string;
-        label: string;
-        type: MicrophoneType;
-    }>);
 }
 /**
  * Check if Opus encoding is supported via MediaRecorder (diagnostic helper).

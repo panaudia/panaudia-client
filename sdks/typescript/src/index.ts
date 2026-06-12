@@ -8,8 +8,8 @@
  * ```typescript
  * import { PanaudiaClient, resolveServer } from '@panaudia/client';
  *
- * const serverUrl = await resolveServer(ticket);
- * const client = new PanaudiaClient({ serverUrl, ticket });
+ * const server = await resolveServer(ticket); // { serverUrl, transport }
+ * const client = new PanaudiaClient({ ...server, ticket });
  * await client.connect();
  * ```
  *
@@ -89,14 +89,13 @@ export type {
   ClassifiedMicrophone,
   MicrophoneSelectionResult,
 } from './shared/microphone-selection.js';
-export { BluetoothMicDefaultError } from './moq/audio-publisher.js';
 
 // Transport support detection
 export { isWebTransportSupported, getWebTransportSupport } from './moq/connection.js';
 
 // Gateway resolution
 export { resolveServer } from './gateway.js';
-export type { ResolveServerOptions } from './gateway.js';
+export type { ResolveServerOptions, ResolvedServer } from './gateway.js';
 
 // Transport interface
 export type { Transport, TransportConfig, AudioCaptureConfig, AudioPlaybackConfig, StereoDiagnostics } from './transport.js';

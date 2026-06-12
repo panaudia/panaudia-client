@@ -316,668 +316,6 @@ function ambisonicToWebglRotation(rot) {
   const euler = quaternionToEuler(q, "XYZ");
   return { x: euler.x, y: euler.y, z: euler.z };
 }
-class MoqClientError extends Error {
-  constructor(message, code, details) {
-    super(message);
-    this.code = code;
-    this.details = details;
-    this.name = "MoqClientError";
-  }
-}
-class WebTransportNotSupportedError extends MoqClientError {
-  constructor() {
-    super(
-      "WebTransport is not supported in this browser. Try Chrome 97+, Edge 97+, or Safari 16.4+.",
-      "WEBTRANSPORT_NOT_SUPPORTED"
-    );
-    this.name = "WebTransportNotSupportedError";
-  }
-}
-class ConnectionError extends MoqClientError {
-  constructor(message, details) {
-    super(message, "CONNECTION_FAILED", details);
-    this.name = "ConnectionError";
-  }
-}
-class AuthenticationError extends MoqClientError {
-  constructor(message, moqErrorCode, details) {
-    super(message, "AUTHENTICATION_FAILED", details);
-    this.moqErrorCode = moqErrorCode;
-    this.name = "AuthenticationError";
-  }
-  /**
-   * Check if this is an invalid token error
-   */
-  isInvalidToken() {
-    return this.moqErrorCode === 2 || this.moqErrorCode === 1027;
-  }
-  /**
-   * Check if this is an expired token error
-   */
-  isExpiredToken() {
-    return this.message.toLowerCase().includes("expired");
-  }
-}
-class JwtParseError extends MoqClientError {
-  constructor(message, details) {
-    super(message, "JWT_PARSE_FAILED", details);
-    this.name = "JwtParseError";
-  }
-}
-class ProtocolError extends MoqClientError {
-  constructor(message, moqErrorCode, details) {
-    super(message, "PROTOCOL_ERROR", details);
-    this.moqErrorCode = moqErrorCode;
-    this.name = "ProtocolError";
-  }
-}
-class SubscriptionError extends MoqClientError {
-  constructor(message, moqErrorCode, trackNamespace, details) {
-    super(message, "SUBSCRIPTION_FAILED", details);
-    this.moqErrorCode = moqErrorCode;
-    this.trackNamespace = trackNamespace;
-    this.name = "SubscriptionError";
-  }
-}
-class AnnouncementError extends MoqClientError {
-  constructor(message, moqErrorCode, namespace, details) {
-    super(message, "ANNOUNCEMENT_FAILED", details);
-    this.moqErrorCode = moqErrorCode;
-    this.namespace = namespace;
-    this.name = "AnnouncementError";
-  }
-}
-class InvalidStateError extends MoqClientError {
-  constructor(expectedState, actualState) {
-    super(
-      `Invalid state: expected ${expectedState}, but was ${actualState}`,
-      "INVALID_STATE",
-      { expectedState, actualState }
-    );
-    this.name = "InvalidStateError";
-  }
-}
-class TimeoutError extends MoqClientError {
-  constructor(operation, timeoutMs) {
-    super(
-      `Operation '${operation}' timed out after ${timeoutMs}ms`,
-      "TIMEOUT",
-      { operation, timeoutMs }
-    );
-    this.name = "TimeoutError";
-  }
-}
-function getMoqErrorMessage(code) {
-  switch (code) {
-    case 0:
-      return "No error";
-    case 1:
-      return "Internal error";
-    case 2:
-      return "Unauthorized";
-    case 3:
-      return "Protocol violation";
-    case 4:
-      return "Duplicate track alias";
-    case 5:
-      return "Parameter length mismatch";
-    case 6:
-      return "Too many subscribes";
-    case 16:
-      return "GOAWAY timeout";
-    case 1027:
-      return "Invalid token (custom)";
-    default:
-      return `Unknown error (0x${code.toString(16)})`;
-  }
-}
-function wrapError(error, defaultCode = "UNKNOWN") {
-  if (error instanceof MoqClientError) {
-    return error;
-  }
-  if (error instanceof Error) {
-    return new MoqClientError(error.message, defaultCode, error);
-  }
-  return new MoqClientError(String(error), defaultCode);
-}
-function isWebCodecsOpusSupported() {
-  return typeof AudioEncoder !== "undefined";
-}
-function captureCapacityFrames() {
-  return 2048;
-}
-class CaptureRing {
-  nc;
-  capacity;
-  data;
-  wpCell;
-  rpCell;
-  /** Count of quanta dropped because the consumer stalled past capacity (§5.1). */
-  overflows;
-  constructor(cfg) {
-    const nc = cfg.numChannels ?? 1;
-    const capacity = cfg.capacityFrames ?? 2048;
-    if (nc < 1) {
-      throw new Error("CaptureRing: numChannels must be >= 1");
-    }
-    if (capacity < 1) {
-      throw new Error("CaptureRing: capacityFrames must be >= 1");
-    }
-    if (cfg.sharedStorage.length !== capacity * nc) {
-      throw new Error(
-        `CaptureRing: sharedStorage length ${cfg.sharedStorage.length} != capacity*nc ${capacity * nc} (allocate capacityFrames * numChannels floats)`
-      );
-    }
-    if (cfg.sharedWritePos.length < 1 || cfg.sharedReadPos.length < 1) {
-      throw new Error("CaptureRing: sharedWritePos/sharedReadPos must be length-1 BigInt64Arrays");
-    }
-    this.nc = nc;
-    this.capacity = capacity;
-    this.data = cfg.sharedStorage;
-    this.wpCell = cfg.sharedWritePos;
-    this.rpCell = cfg.sharedReadPos;
-    this.overflows = 0;
-  }
-  /** Cumulative producer position (frames), acquire-loaded. */
-  get writePos() {
-    return Number(Atomics.load(this.wpCell, 0));
-  }
-  /** Cumulative consumer position (frames), acquire-loaded. */
-  get readPos() {
-    return Number(Atomics.load(this.rpCell, 0));
-  }
-  /** Current fill in frames (unambiguous: positions are cumulative). */
-  fillFrames() {
-    return this.writePos - this.readPos;
-  }
-  /**
-   * PRODUCER (capture worklet). Interleave one render quantum of planar channels into
-   * the ring. `planar[ch]` is a Float32Array of `nFrames` samples (Web Audio is
-   * planar; all channels equal length). Channels beyond `planar.length` reuse the last
-   * (mono→stereo dup); channels beyond `nc` are ignored. If the consumer has stalled
-   * and the quantum would not fit, the WHOLE quantum is dropped and `overflows` is
-   * bumped — never blocks, never overwrites unread data (§5.1). Returns true if written.
-   */
-  write(planar) {
-    if (!planar || planar.length === 0 || !planar[0]) {
-      return false;
-    }
-    const nc = this.nc;
-    const cap = this.capacity;
-    const nFrames = planar[0].length;
-    if (nFrames === 0) {
-      return false;
-    }
-    const wp = this.writePos;
-    const rp = this.readPos;
-    if (wp - rp + nFrames > cap) {
-      this.overflows++;
-      return false;
-    }
-    const data = this.data;
-    const startFrame = wp % cap;
-    for (let i = 0; i < nFrames; i++) {
-      const ringBase = (startFrame + i) % cap * nc;
-      for (let ch = 0; ch < nc; ch++) {
-        const src = planar[ch < planar.length ? ch : planar.length - 1];
-        data[ringBase + ch] = src[i];
-      }
-    }
-    Atomics.store(this.wpCell, 0, BigInt(wp + nFrames));
-    return true;
-  }
-  /**
-   * CONSUMER (MOQ worker). Copy all whole frames currently available into `dst`
-   * (interleaved), up to `dst`'s capacity, then free that space. Returns the number of
-   * interleaved SAMPLES written (`frames * nc`), or 0 if nothing was ready. Drain to
-   * empty: leaves only what the producer hasn't yet published.
-   */
-  drain(dst) {
-    const nc = this.nc;
-    const cap = this.capacity;
-    const wp = this.writePos;
-    const rp = this.readPos;
-    const avail = wp - rp;
-    const room = Math.floor(dst.length / nc);
-    const nFrames = avail < room ? avail : room;
-    if (nFrames <= 0) {
-      return 0;
-    }
-    const data = this.data;
-    const startFrame = rp % cap;
-    if (startFrame + nFrames <= cap) {
-      dst.set(data.subarray(startFrame * nc, (startFrame + nFrames) * nc));
-    } else {
-      const first = cap - startFrame;
-      dst.set(data.subarray(startFrame * nc, cap * nc), 0);
-      dst.set(data.subarray(0, (nFrames - first) * nc), first * nc);
-    }
-    Atomics.store(this.rpCell, 0, BigInt(rp + nFrames));
-    return nFrames * nc;
-  }
-}
-const CAPTURE_PROCESSOR_NAME = "capture-processor";
-const CAPTURE_PROCESSOR_SOURCE = `
-class CaptureRingProcessor extends AudioWorkletProcessor {
-  constructor(options) {
-    super();
-    const opts = (options && options.processorOptions) || {};
-    this.signal = opts.signal;
-    this.ring = new CaptureRing({
-      numChannels: opts.numChannels,
-      capacityFrames: opts.capacityFrames,
-      sharedStorage: opts.sharedStorage,
-      sharedWritePos: opts.sharedWritePos,
-      sharedReadPos: opts.sharedReadPos,
-    });
-  }
-
-  // PRODUCER: interleave the input quantum into the ring; wake the worker if we wrote.
-  // inputs[0] is the planar input (array of per-channel Float32Arrays); empty when no
-  // source is connected. CaptureRing.write guards the empty/overflow cases.
-  process(inputs) {
-    const input = inputs[0];
-    if (input && this.ring.write(input)) {
-      // Clock-free wake (design §6.1): bump + notify the signal cell. One bounded
-      // futex wake, one waiter (the MOQ worker's Atomics.waitAsync). Real-time-safe:
-      // no allocation, no lock, the caller never blocks.
-      Atomics.add(this.signal, 0, 1);
-      Atomics.notify(this.signal, 0, 1);
-    }
-    return true; // keep the processor alive
-  }
-}
-registerProcessor(${JSON.stringify(CAPTURE_PROCESSOR_NAME)}, CaptureRingProcessor);
-`;
-function buildCaptureWorkletCode() {
-  const coreSource = CaptureRing.toString();
-  if (!coreSource.startsWith("class")) {
-    throw new Error("capture-worklet: CaptureRing.toString() is not a class declaration");
-  }
-  const helper = /\b__(publicField|privateField|decorateClass|decorateParam|name|esDecorate)\b/.exec(coreSource);
-  if (helper) {
-    throw new Error(
-      `capture-worklet: serialized CaptureRing references the bundler helper "${helper[0]}" — it would be undefined in the worklet. Ensure the build keeps native class output.`
-    );
-  }
-  return `const CaptureRing = ${coreSource};
-${CAPTURE_PROCESSOR_SOURCE}`;
-}
-function createCaptureWorkletUrl() {
-  const blob2 = new Blob([buildCaptureWorkletCode()], { type: "application/javascript" });
-  return URL.createObjectURL(blob2);
-}
-var AudioPublisherState = /* @__PURE__ */ ((AudioPublisherState2) => {
-  AudioPublisherState2["IDLE"] = "idle";
-  AudioPublisherState2["REQUESTING_PERMISSION"] = "requesting_permission";
-  AudioPublisherState2["READY"] = "ready";
-  AudioPublisherState2["RECORDING"] = "recording";
-  AudioPublisherState2["PAUSED"] = "paused";
-  AudioPublisherState2["ERROR"] = "error";
-  return AudioPublisherState2;
-})(AudioPublisherState || {});
-class AudioPermissionError extends MoqClientError {
-  constructor(message, details) {
-    super(message, "AUDIO_PERMISSION_DENIED", details);
-    this.name = "AudioPermissionError";
-  }
-}
-class AudioEncodingError extends MoqClientError {
-  constructor(message, details) {
-    super(message, "AUDIO_ENCODING_FAILED", details);
-    this.name = "AudioEncodingError";
-  }
-}
-class AudioNotSupportedError extends MoqClientError {
-  constructor(message) {
-    super(message, "AUDIO_NOT_SUPPORTED");
-    this.name = "AudioNotSupportedError";
-  }
-}
-class BluetoothMicDefaultError extends MoqClientError {
-  availableDevices;
-  constructor(defaultLabel, availableDevices) {
-    super(
-      `Default microphone is Bluetooth (${defaultLabel}). Please select a non-Bluetooth microphone to preserve stereo audio.`,
-      "BLUETOOTH_MIC_DEFAULT",
-      { defaultLabel, availableDevices }
-    );
-    this.name = "BluetoothMicDefaultError";
-    this.availableDevices = availableDevices;
-  }
-}
-function isOpusSupported() {
-  if (typeof MediaRecorder === "undefined") {
-    return false;
-  }
-  const mimeTypes = ["audio/webm;codecs=opus", "audio/ogg;codecs=opus", "audio/webm"];
-  for (const mimeType of mimeTypes) {
-    if (MediaRecorder.isTypeSupported(mimeType)) {
-      return true;
-    }
-  }
-  return false;
-}
-function getBestOpusMimeType() {
-  if (typeof MediaRecorder === "undefined") {
-    return null;
-  }
-  const mimeTypes = ["audio/webm;codecs=opus", "audio/ogg;codecs=opus", "audio/webm"];
-  for (const mimeType of mimeTypes) {
-    if (MediaRecorder.isTypeSupported(mimeType)) {
-      return mimeType;
-    }
-  }
-  return null;
-}
-class AudioPublisher {
-  config;
-  state = "idle";
-  mediaStream = null;
-  // Capture half of the Web Audio graph (main thread).
-  audioContext = null;
-  sourceNode = null;
-  workletNode = null;
-  // SAB ring shared with the worklet (producer) and the worker (consumer).
-  sharedStorage = null;
-  sharedWritePos = null;
-  sharedReadPos = null;
-  sharedSignal = null;
-  numChannels;
-  capacityFrames;
-  // eslint-disable-next-line @typescript-eslint/no-explicit-any
-  log(...args) {
-    if (this.config.debug) {
-      console.log("[AudioPublisher]", ...args);
-    }
-  }
-  constructor(config = {}) {
-    this.config = {
-      sampleRate: config.sampleRate ?? 48e3,
-      channelCount: config.channelCount ?? 1,
-      bitrate: config.bitrate ?? 64e3,
-      frameDurationMs: config.frameDurationMs ?? 5,
-      echoCancellation: config.echoCancellation ?? false,
-      noiseSuppression: config.noiseSuppression ?? false,
-      autoGainControl: config.autoGainControl ?? false,
-      deviceId: config.deviceId,
-      debug: config.debug ?? false
-    };
-    this.numChannels = this.config.channelCount;
-    this.capacityFrames = captureCapacityFrames();
-  }
-  /**
-   * Get current state
-   */
-  getState() {
-    return this.state;
-  }
-  /**
-   * The Opus encoder config the worker should use (worker constructs WebCodecs
-   * AudioEncoder from this). Matches the capture sample rate / channel count.
-   */
-  getEncoderConfig() {
-    return {
-      codec: "opus",
-      sampleRate: this.config.sampleRate,
-      numberOfChannels: this.config.channelCount,
-      bitrate: this.config.bitrate,
-      frameDurationUs: Math.round(this.config.frameDurationMs * 1e3)
-    };
-  }
-  /**
-   * The shared capture ring + geometry to hand to the worker, or null if capture is
-   * not running / the SAB could not be allocated (not cross-origin isolated).
-   */
-  getCaptureHandoff() {
-    if (!this.sharedStorage || !this.sharedWritePos || !this.sharedReadPos || !this.sharedSignal) {
-      return null;
-    }
-    return {
-      numChannels: this.numChannels,
-      capacityFrames: this.capacityFrames,
-      sharedStorage: this.sharedStorage,
-      sharedWritePos: this.sharedWritePos,
-      sharedReadPos: this.sharedReadPos,
-      sharedSignal: this.sharedSignal
-    };
-  }
-  /**
-   * Request microphone access and prepare for capture.
-   */
-  async initialize() {
-    if (this.state !== "idle") {
-      throw new MoqClientError(`Cannot initialize: already in state ${this.state}`, "INVALID_STATE");
-    }
-    if (!navigator.mediaDevices || !navigator.mediaDevices.getUserMedia) {
-      throw new AudioNotSupportedError("getUserMedia is not supported in this browser");
-    }
-    if (!isWebCodecsOpusSupported()) {
-      throw new AudioNotSupportedError(
-        "WebCodecs Opus encoding is not supported in this browser. Try Chrome, Edge, Firefox, or Safari 26.4+."
-      );
-    }
-    this.setState(
-      "requesting_permission"
-      /* REQUESTING_PERMISSION */
-    );
-    try {
-      const deviceId = this.config.deviceId;
-      this.mediaStream = await navigator.mediaDevices.getUserMedia({
-        audio: {
-          channelCount: this.config.channelCount,
-          sampleRate: this.config.sampleRate,
-          echoCancellation: this.config.echoCancellation,
-          noiseSuppression: this.config.noiseSuppression,
-          autoGainControl: this.config.autoGainControl,
-          latency: { ideal: 5e-3 },
-          ...deviceId ? { deviceId: { exact: deviceId } } : {}
-        },
-        video: false
-      });
-      this.setState(
-        "ready"
-        /* READY */
-      );
-      this.log("Microphone access granted");
-    } catch (error) {
-      this.setState(
-        "error"
-        /* ERROR */
-      );
-      if (error instanceof DOMException) {
-        if (error.name === "NotAllowedError" || error.name === "PermissionDeniedError") {
-          throw new AudioPermissionError(
-            "Microphone access denied. Please allow microphone access in your browser settings.",
-            error
-          );
-        } else if (error.name === "NotFoundError") {
-          throw new AudioPermissionError("No microphone found. Please connect a microphone and try again.", error);
-        } else if (error.name === "NotReadableError") {
-          throw new AudioPermissionError("Microphone is in use by another application.", error);
-        }
-      }
-      throw new AudioPermissionError(`Failed to access microphone: ${error}`, error);
-    }
-  }
-  /**
-   * Start capturing: build the AudioContext + capture worklet and allocate the SAB
-   * ring the worklet fills. Requires cross-origin isolation (the SAB is mandatory —
-   * there is no main-thread-encode fallback).
-   */
-  async start() {
-    if (this.state !== "ready" && this.state !== "paused") {
-      throw new MoqClientError(
-        `Cannot start: must be in READY or PAUSED state, currently ${this.state}`,
-        "INVALID_STATE"
-      );
-    }
-    if (!this.mediaStream) {
-      throw new MoqClientError("No media stream available", "INVALID_STATE");
-    }
-    if (typeof SharedArrayBuffer === "undefined" || globalThis.crossOriginIsolated !== true) {
-      throw new AudioNotSupportedError(
-        "Microphone capture requires cross-origin isolation (COOP/COEP) for the SharedArrayBuffer ring"
-      );
-    }
-    if (typeof AudioWorkletNode === "undefined") {
-      throw new AudioNotSupportedError("AudioWorklet is not supported in this browser");
-    }
-    if (this.state === "paused" && this.audioContext && this.sourceNode && this.workletNode) {
-      this.sourceNode.connect(this.workletNode);
-      this.setState(
-        "recording"
-        /* RECORDING */
-      );
-      this.log("Microphone resumed");
-      return;
-    }
-    this.audioContext = new AudioContext({ sampleRate: this.config.sampleRate });
-    const url = createCaptureWorkletUrl();
-    try {
-      await this.audioContext.audioWorklet.addModule(url);
-    } finally {
-      URL.revokeObjectURL(url);
-    }
-    const nc = this.numChannels;
-    const cap = this.capacityFrames;
-    this.sharedStorage = new Float32Array(new SharedArrayBuffer(cap * nc * 4));
-    this.sharedWritePos = new BigInt64Array(new SharedArrayBuffer(8));
-    this.sharedReadPos = new BigInt64Array(new SharedArrayBuffer(8));
-    this.sharedSignal = new Int32Array(new SharedArrayBuffer(4));
-    this.sourceNode = this.audioContext.createMediaStreamSource(this.mediaStream);
-    this.workletNode = new AudioWorkletNode(this.audioContext, CAPTURE_PROCESSOR_NAME, {
-      numberOfInputs: 1,
-      numberOfOutputs: 0,
-      processorOptions: {
-        numChannels: nc,
-        capacityFrames: cap,
-        sharedStorage: this.sharedStorage,
-        sharedWritePos: this.sharedWritePos,
-        sharedReadPos: this.sharedReadPos,
-        signal: this.sharedSignal
-      }
-    });
-    this.sourceNode.connect(this.workletNode);
-    this.setState(
-      "recording"
-      /* RECORDING */
-    );
-    this.log(`Capture started (SAB ring, ${nc}ch, capacity=${cap} frames)`);
-  }
-  /**
-   * Pause capture: disconnect the mic from the worklet so the ring stops filling (the
-   * worker then has nothing to encode). The graph + SAB are kept for resume.
-   */
-  pause() {
-    if (this.state !== "recording") {
-      return;
-    }
-    if (this.sourceNode && this.workletNode) {
-      try {
-        this.sourceNode.disconnect(this.workletNode);
-      } catch {
-      }
-    }
-    this.setState(
-      "paused"
-      /* PAUSED */
-    );
-    this.log("Microphone paused");
-  }
-  /**
-   * Resume capture (reconnect the mic to the worklet).
-   */
-  resume() {
-    if (this.state !== "paused") {
-      return;
-    }
-    if (this.sourceNode && this.workletNode) {
-      this.sourceNode.connect(this.workletNode);
-      this.setState(
-        "recording"
-        /* RECORDING */
-      );
-      this.log("Microphone resumed");
-    }
-  }
-  /**
-   * Enable or disable the mic tracks. Disabling makes the source emit silent samples —
-   * the capture graph + worker encoder stay alive, so MOQ frames keep flowing as Opus
-   * DTX comfort-noise.
-   */
-  setMicEnabled(enabled) {
-    if (!this.mediaStream) return;
-    for (const track of this.mediaStream.getAudioTracks()) {
-      track.enabled = enabled;
-    }
-  }
-  /**
-   * Stop capturing: tear down the capture graph (keeps the media stream so it can be
-   * restarted). The SAB views are released; the worker should be told to `stopCapture`.
-   */
-  stop() {
-    if (this.workletNode) {
-      this.workletNode.disconnect();
-      this.workletNode = null;
-    }
-    if (this.sourceNode) {
-      this.sourceNode.disconnect();
-      this.sourceNode = null;
-    }
-    if (this.audioContext) {
-      void this.audioContext.close();
-      this.audioContext = null;
-    }
-    this.sharedStorage = null;
-    this.sharedWritePos = null;
-    this.sharedReadPos = null;
-    this.sharedSignal = null;
-    if (this.state !== "idle" && this.state !== "error") {
-      this.setState(
-        "ready"
-        /* READY */
-      );
-    }
-  }
-  /**
-   * Release all resources (tears down the graph and stops the mic tracks).
-   */
-  dispose() {
-    this.stop();
-    if (this.mediaStream) {
-      for (const track of this.mediaStream.getTracks()) {
-        track.stop();
-      }
-      this.mediaStream = null;
-    }
-    this.setState(
-      "idle"
-      /* IDLE */
-    );
-  }
-  setState(state) {
-    this.state = state;
-  }
-}
-function getAudioCapabilities() {
-  const webCodecs = isWebCodecsOpusSupported();
-  const mediaRecorder = isOpusSupported();
-  let preferredEncoder = "none";
-  if (webCodecs) {
-    preferredEncoder = "webcodecs";
-  } else if (mediaRecorder) {
-    preferredEncoder = "mediarecorder";
-  }
-  return {
-    getUserMedia: !!(navigator.mediaDevices && navigator.mediaDevices.getUserMedia),
-    mediaRecorder: typeof MediaRecorder !== "undefined",
-    opusSupport: mediaRecorder,
-    bestMimeType: getBestOpusMimeType(),
-    webCodecs,
-    preferredEncoder
-  };
-}
 var MoqMessageType = /* @__PURE__ */ ((MoqMessageType2) => {
   MoqMessageType2[MoqMessageType2["CLIENT_SETUP"] = 32] = "CLIENT_SETUP";
   MoqMessageType2[MoqMessageType2["SERVER_SETUP"] = 33] = "SERVER_SETUP";
@@ -1963,6 +1301,130 @@ function getWebTransportSupport() {
     datagrams: supported,
     serverCertificateHashes: supported
   };
+}
+class MoqClientError extends Error {
+  constructor(message, code, details) {
+    super(message);
+    this.code = code;
+    this.details = details;
+    this.name = "MoqClientError";
+  }
+}
+class WebTransportNotSupportedError extends MoqClientError {
+  constructor() {
+    super(
+      "WebTransport is not supported in this browser. Try Chrome 97+, Edge 97+, or Safari 16.4+.",
+      "WEBTRANSPORT_NOT_SUPPORTED"
+    );
+    this.name = "WebTransportNotSupportedError";
+  }
+}
+class ConnectionError extends MoqClientError {
+  constructor(message, details) {
+    super(message, "CONNECTION_FAILED", details);
+    this.name = "ConnectionError";
+  }
+}
+class AuthenticationError extends MoqClientError {
+  constructor(message, moqErrorCode, details) {
+    super(message, "AUTHENTICATION_FAILED", details);
+    this.moqErrorCode = moqErrorCode;
+    this.name = "AuthenticationError";
+  }
+  /**
+   * Check if this is an invalid token error
+   */
+  isInvalidToken() {
+    return this.moqErrorCode === 2 || this.moqErrorCode === 1027;
+  }
+  /**
+   * Check if this is an expired token error
+   */
+  isExpiredToken() {
+    return this.message.toLowerCase().includes("expired");
+  }
+}
+class JwtParseError extends MoqClientError {
+  constructor(message, details) {
+    super(message, "JWT_PARSE_FAILED", details);
+    this.name = "JwtParseError";
+  }
+}
+class ProtocolError extends MoqClientError {
+  constructor(message, moqErrorCode, details) {
+    super(message, "PROTOCOL_ERROR", details);
+    this.moqErrorCode = moqErrorCode;
+    this.name = "ProtocolError";
+  }
+}
+class SubscriptionError extends MoqClientError {
+  constructor(message, moqErrorCode, trackNamespace, details) {
+    super(message, "SUBSCRIPTION_FAILED", details);
+    this.moqErrorCode = moqErrorCode;
+    this.trackNamespace = trackNamespace;
+    this.name = "SubscriptionError";
+  }
+}
+class AnnouncementError extends MoqClientError {
+  constructor(message, moqErrorCode, namespace, details) {
+    super(message, "ANNOUNCEMENT_FAILED", details);
+    this.moqErrorCode = moqErrorCode;
+    this.namespace = namespace;
+    this.name = "AnnouncementError";
+  }
+}
+class InvalidStateError extends MoqClientError {
+  constructor(expectedState, actualState) {
+    super(
+      `Invalid state: expected ${expectedState}, but was ${actualState}`,
+      "INVALID_STATE",
+      { expectedState, actualState }
+    );
+    this.name = "InvalidStateError";
+  }
+}
+class TimeoutError extends MoqClientError {
+  constructor(operation, timeoutMs) {
+    super(
+      `Operation '${operation}' timed out after ${timeoutMs}ms`,
+      "TIMEOUT",
+      { operation, timeoutMs }
+    );
+    this.name = "TimeoutError";
+  }
+}
+function getMoqErrorMessage(code) {
+  switch (code) {
+    case 0:
+      return "No error";
+    case 1:
+      return "Internal error";
+    case 2:
+      return "Unauthorized";
+    case 3:
+      return "Protocol violation";
+    case 4:
+      return "Duplicate track alias";
+    case 5:
+      return "Parameter length mismatch";
+    case 6:
+      return "Too many subscribes";
+    case 16:
+      return "GOAWAY timeout";
+    case 1027:
+      return "Invalid token (custom)";
+    default:
+      return `Unknown error (0x${code.toString(16)})`;
+  }
+}
+function wrapError(error, defaultCode = "UNKNOWN") {
+  if (error instanceof MoqClientError) {
+    return error;
+  }
+  if (error instanceof Error) {
+    return new MoqClientError(error.message, defaultCode, error);
+  }
+  return new MoqClientError(String(error), defaultCode);
 }
 const PLAYOUT_TUNING = {
   safetyMs: 1,
@@ -3056,6 +2518,532 @@ function WorkerWrapper(options) {
 }
 function createMoqWorker() {
   return new WorkerWrapper();
+}
+function isWebCodecsOpusSupported() {
+  return typeof AudioEncoder !== "undefined";
+}
+function captureCapacityFrames() {
+  return 2048;
+}
+class CaptureRing {
+  nc;
+  capacity;
+  data;
+  wpCell;
+  rpCell;
+  /** Count of quanta dropped because the consumer stalled past capacity (§5.1). */
+  overflows;
+  constructor(cfg) {
+    const nc = cfg.numChannels ?? 1;
+    const capacity = cfg.capacityFrames ?? 2048;
+    if (nc < 1) {
+      throw new Error("CaptureRing: numChannels must be >= 1");
+    }
+    if (capacity < 1) {
+      throw new Error("CaptureRing: capacityFrames must be >= 1");
+    }
+    if (cfg.sharedStorage.length !== capacity * nc) {
+      throw new Error(
+        `CaptureRing: sharedStorage length ${cfg.sharedStorage.length} != capacity*nc ${capacity * nc} (allocate capacityFrames * numChannels floats)`
+      );
+    }
+    if (cfg.sharedWritePos.length < 1 || cfg.sharedReadPos.length < 1) {
+      throw new Error("CaptureRing: sharedWritePos/sharedReadPos must be length-1 BigInt64Arrays");
+    }
+    this.nc = nc;
+    this.capacity = capacity;
+    this.data = cfg.sharedStorage;
+    this.wpCell = cfg.sharedWritePos;
+    this.rpCell = cfg.sharedReadPos;
+    this.overflows = 0;
+  }
+  /** Cumulative producer position (frames), acquire-loaded. */
+  get writePos() {
+    return Number(Atomics.load(this.wpCell, 0));
+  }
+  /** Cumulative consumer position (frames), acquire-loaded. */
+  get readPos() {
+    return Number(Atomics.load(this.rpCell, 0));
+  }
+  /** Current fill in frames (unambiguous: positions are cumulative). */
+  fillFrames() {
+    return this.writePos - this.readPos;
+  }
+  /**
+   * PRODUCER (capture worklet). Interleave one render quantum of planar channels into
+   * the ring. `planar[ch]` is a Float32Array of `nFrames` samples (Web Audio is
+   * planar; all channels equal length). Channels beyond `planar.length` reuse the last
+   * (mono→stereo dup); channels beyond `nc` are ignored. If the consumer has stalled
+   * and the quantum would not fit, the WHOLE quantum is dropped and `overflows` is
+   * bumped — never blocks, never overwrites unread data (§5.1). Returns true if written.
+   */
+  write(planar) {
+    if (!planar || planar.length === 0 || !planar[0]) {
+      return false;
+    }
+    const nc = this.nc;
+    const cap = this.capacity;
+    const nFrames = planar[0].length;
+    if (nFrames === 0) {
+      return false;
+    }
+    const wp = this.writePos;
+    const rp = this.readPos;
+    if (wp - rp + nFrames > cap) {
+      this.overflows++;
+      return false;
+    }
+    const data = this.data;
+    const startFrame = wp % cap;
+    for (let i = 0; i < nFrames; i++) {
+      const ringBase = (startFrame + i) % cap * nc;
+      for (let ch = 0; ch < nc; ch++) {
+        const src = planar[ch < planar.length ? ch : planar.length - 1];
+        data[ringBase + ch] = src[i];
+      }
+    }
+    Atomics.store(this.wpCell, 0, BigInt(wp + nFrames));
+    return true;
+  }
+  /**
+   * CONSUMER (MOQ worker). Copy all whole frames currently available into `dst`
+   * (interleaved), up to `dst`'s capacity, then free that space. Returns the number of
+   * interleaved SAMPLES written (`frames * nc`), or 0 if nothing was ready. Drain to
+   * empty: leaves only what the producer hasn't yet published.
+   */
+  drain(dst) {
+    const nc = this.nc;
+    const cap = this.capacity;
+    const wp = this.writePos;
+    const rp = this.readPos;
+    const avail = wp - rp;
+    const room = Math.floor(dst.length / nc);
+    const nFrames = avail < room ? avail : room;
+    if (nFrames <= 0) {
+      return 0;
+    }
+    const data = this.data;
+    const startFrame = rp % cap;
+    if (startFrame + nFrames <= cap) {
+      dst.set(data.subarray(startFrame * nc, (startFrame + nFrames) * nc));
+    } else {
+      const first = cap - startFrame;
+      dst.set(data.subarray(startFrame * nc, cap * nc), 0);
+      dst.set(data.subarray(0, (nFrames - first) * nc), first * nc);
+    }
+    Atomics.store(this.rpCell, 0, BigInt(rp + nFrames));
+    return nFrames * nc;
+  }
+}
+const CAPTURE_PROCESSOR_NAME = "capture-processor";
+const CAPTURE_PROCESSOR_SOURCE = `
+class CaptureRingProcessor extends AudioWorkletProcessor {
+  constructor(options) {
+    super();
+    const opts = (options && options.processorOptions) || {};
+    this.signal = opts.signal;
+    this.ring = new CaptureRing({
+      numChannels: opts.numChannels,
+      capacityFrames: opts.capacityFrames,
+      sharedStorage: opts.sharedStorage,
+      sharedWritePos: opts.sharedWritePos,
+      sharedReadPos: opts.sharedReadPos,
+    });
+  }
+
+  // PRODUCER: interleave the input quantum into the ring; wake the worker if we wrote.
+  // inputs[0] is the planar input (array of per-channel Float32Arrays); empty when no
+  // source is connected. CaptureRing.write guards the empty/overflow cases.
+  process(inputs) {
+    const input = inputs[0];
+    if (input && this.ring.write(input)) {
+      // Clock-free wake (design §6.1): bump + notify the signal cell. One bounded
+      // futex wake, one waiter (the MOQ worker's Atomics.waitAsync). Real-time-safe:
+      // no allocation, no lock, the caller never blocks.
+      Atomics.add(this.signal, 0, 1);
+      Atomics.notify(this.signal, 0, 1);
+    }
+    return true; // keep the processor alive
+  }
+}
+registerProcessor(${JSON.stringify(CAPTURE_PROCESSOR_NAME)}, CaptureRingProcessor);
+`;
+function buildCaptureWorkletCode() {
+  const coreSource = CaptureRing.toString();
+  if (!coreSource.startsWith("class")) {
+    throw new Error("capture-worklet: CaptureRing.toString() is not a class declaration");
+  }
+  const helper = /\b__(publicField|privateField|decorateClass|decorateParam|name|esDecorate)\b/.exec(coreSource);
+  if (helper) {
+    throw new Error(
+      `capture-worklet: serialized CaptureRing references the bundler helper "${helper[0]}" — it would be undefined in the worklet. Ensure the build keeps native class output.`
+    );
+  }
+  return `const CaptureRing = ${coreSource};
+${CAPTURE_PROCESSOR_SOURCE}`;
+}
+function createCaptureWorkletUrl() {
+  const blob2 = new Blob([buildCaptureWorkletCode()], { type: "application/javascript" });
+  return URL.createObjectURL(blob2);
+}
+var AudioPublisherState = /* @__PURE__ */ ((AudioPublisherState2) => {
+  AudioPublisherState2["IDLE"] = "idle";
+  AudioPublisherState2["REQUESTING_PERMISSION"] = "requesting_permission";
+  AudioPublisherState2["READY"] = "ready";
+  AudioPublisherState2["RECORDING"] = "recording";
+  AudioPublisherState2["PAUSED"] = "paused";
+  AudioPublisherState2["ERROR"] = "error";
+  return AudioPublisherState2;
+})(AudioPublisherState || {});
+class AudioPermissionError extends MoqClientError {
+  constructor(message, details) {
+    super(message, "AUDIO_PERMISSION_DENIED", details);
+    this.name = "AudioPermissionError";
+  }
+}
+class AudioEncodingError extends MoqClientError {
+  constructor(message, details) {
+    super(message, "AUDIO_ENCODING_FAILED", details);
+    this.name = "AudioEncodingError";
+  }
+}
+class AudioNotSupportedError extends MoqClientError {
+  constructor(message) {
+    super(message, "AUDIO_NOT_SUPPORTED");
+    this.name = "AudioNotSupportedError";
+  }
+}
+function isOpusSupported() {
+  if (typeof MediaRecorder === "undefined") {
+    return false;
+  }
+  const mimeTypes = ["audio/webm;codecs=opus", "audio/ogg;codecs=opus", "audio/webm"];
+  for (const mimeType of mimeTypes) {
+    if (MediaRecorder.isTypeSupported(mimeType)) {
+      return true;
+    }
+  }
+  return false;
+}
+function getBestOpusMimeType() {
+  if (typeof MediaRecorder === "undefined") {
+    return null;
+  }
+  const mimeTypes = ["audio/webm;codecs=opus", "audio/ogg;codecs=opus", "audio/webm"];
+  for (const mimeType of mimeTypes) {
+    if (MediaRecorder.isTypeSupported(mimeType)) {
+      return mimeType;
+    }
+  }
+  return null;
+}
+class AudioPublisher {
+  config;
+  state = "idle";
+  mediaStream = null;
+  // Capture half of the Web Audio graph (main thread).
+  audioContext = null;
+  sourceNode = null;
+  workletNode = null;
+  // SAB ring shared with the worklet (producer) and the worker (consumer).
+  sharedStorage = null;
+  sharedWritePos = null;
+  sharedReadPos = null;
+  sharedSignal = null;
+  numChannels;
+  capacityFrames;
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  log(...args) {
+    if (this.config.debug) {
+      console.log("[AudioPublisher]", ...args);
+    }
+  }
+  constructor(config = {}) {
+    this.config = {
+      sampleRate: config.sampleRate ?? 48e3,
+      channelCount: config.channelCount ?? 1,
+      bitrate: config.bitrate ?? 64e3,
+      frameDurationMs: config.frameDurationMs ?? 5,
+      echoCancellation: config.echoCancellation ?? false,
+      noiseSuppression: config.noiseSuppression ?? false,
+      autoGainControl: config.autoGainControl ?? false,
+      deviceId: config.deviceId,
+      debug: config.debug ?? false
+    };
+    this.numChannels = this.config.channelCount;
+    this.capacityFrames = captureCapacityFrames();
+  }
+  /**
+   * Get current state
+   */
+  getState() {
+    return this.state;
+  }
+  /**
+   * The Opus encoder config the worker should use (worker constructs WebCodecs
+   * AudioEncoder from this). Matches the capture sample rate / channel count.
+   */
+  getEncoderConfig() {
+    return {
+      codec: "opus",
+      sampleRate: this.config.sampleRate,
+      numberOfChannels: this.config.channelCount,
+      bitrate: this.config.bitrate,
+      frameDurationUs: Math.round(this.config.frameDurationMs * 1e3)
+    };
+  }
+  /**
+   * The shared capture ring + geometry to hand to the worker, or null if capture is
+   * not running / the SAB could not be allocated (not cross-origin isolated).
+   */
+  getCaptureHandoff() {
+    if (!this.sharedStorage || !this.sharedWritePos || !this.sharedReadPos || !this.sharedSignal) {
+      return null;
+    }
+    return {
+      numChannels: this.numChannels,
+      capacityFrames: this.capacityFrames,
+      sharedStorage: this.sharedStorage,
+      sharedWritePos: this.sharedWritePos,
+      sharedReadPos: this.sharedReadPos,
+      sharedSignal: this.sharedSignal
+    };
+  }
+  /**
+   * Request microphone access and prepare for capture.
+   */
+  async initialize() {
+    if (this.state !== "idle") {
+      throw new MoqClientError(`Cannot initialize: already in state ${this.state}`, "INVALID_STATE");
+    }
+    if (!navigator.mediaDevices || !navigator.mediaDevices.getUserMedia) {
+      throw new AudioNotSupportedError("getUserMedia is not supported in this browser");
+    }
+    if (!isWebCodecsOpusSupported()) {
+      throw new AudioNotSupportedError(
+        "WebCodecs Opus encoding is not supported in this browser. Try Chrome, Edge, Firefox, or Safari 26.4+."
+      );
+    }
+    this.setState(
+      "requesting_permission"
+      /* REQUESTING_PERMISSION */
+    );
+    try {
+      const deviceId = this.config.deviceId;
+      this.mediaStream = await navigator.mediaDevices.getUserMedia({
+        audio: {
+          channelCount: this.config.channelCount,
+          sampleRate: this.config.sampleRate,
+          echoCancellation: this.config.echoCancellation,
+          noiseSuppression: this.config.noiseSuppression,
+          autoGainControl: this.config.autoGainControl,
+          latency: { ideal: 5e-3 },
+          ...deviceId ? { deviceId: { exact: deviceId } } : {}
+        },
+        video: false
+      });
+      this.setState(
+        "ready"
+        /* READY */
+      );
+      this.log("Microphone access granted");
+    } catch (error) {
+      this.setState(
+        "error"
+        /* ERROR */
+      );
+      if (error instanceof DOMException) {
+        if (error.name === "NotAllowedError" || error.name === "PermissionDeniedError") {
+          throw new AudioPermissionError(
+            "Microphone access denied. Please allow microphone access in your browser settings.",
+            error
+          );
+        } else if (error.name === "NotFoundError") {
+          throw new AudioPermissionError("No microphone found. Please connect a microphone and try again.", error);
+        } else if (error.name === "NotReadableError") {
+          throw new AudioPermissionError("Microphone is in use by another application.", error);
+        }
+      }
+      throw new AudioPermissionError(`Failed to access microphone: ${error}`, error);
+    }
+  }
+  /**
+   * Start capturing: build the AudioContext + capture worklet and allocate the SAB
+   * ring the worklet fills. Requires cross-origin isolation (the SAB is mandatory —
+   * there is no main-thread-encode fallback).
+   */
+  async start() {
+    if (this.state !== "ready" && this.state !== "paused") {
+      throw new MoqClientError(
+        `Cannot start: must be in READY or PAUSED state, currently ${this.state}`,
+        "INVALID_STATE"
+      );
+    }
+    if (!this.mediaStream) {
+      throw new MoqClientError("No media stream available", "INVALID_STATE");
+    }
+    if (typeof SharedArrayBuffer === "undefined" || globalThis.crossOriginIsolated !== true) {
+      throw new AudioNotSupportedError(
+        "Microphone capture requires cross-origin isolation (COOP/COEP) for the SharedArrayBuffer ring"
+      );
+    }
+    if (typeof AudioWorkletNode === "undefined") {
+      throw new AudioNotSupportedError("AudioWorklet is not supported in this browser");
+    }
+    if (this.state === "paused" && this.audioContext && this.sourceNode && this.workletNode) {
+      this.sourceNode.connect(this.workletNode);
+      this.setState(
+        "recording"
+        /* RECORDING */
+      );
+      this.log("Microphone resumed");
+      return;
+    }
+    this.audioContext = new AudioContext({ sampleRate: this.config.sampleRate });
+    const url = createCaptureWorkletUrl();
+    try {
+      await this.audioContext.audioWorklet.addModule(url);
+    } finally {
+      URL.revokeObjectURL(url);
+    }
+    const nc = this.numChannels;
+    const cap = this.capacityFrames;
+    this.sharedStorage = new Float32Array(new SharedArrayBuffer(cap * nc * 4));
+    this.sharedWritePos = new BigInt64Array(new SharedArrayBuffer(8));
+    this.sharedReadPos = new BigInt64Array(new SharedArrayBuffer(8));
+    this.sharedSignal = new Int32Array(new SharedArrayBuffer(4));
+    this.sourceNode = this.audioContext.createMediaStreamSource(this.mediaStream);
+    this.workletNode = new AudioWorkletNode(this.audioContext, CAPTURE_PROCESSOR_NAME, {
+      numberOfInputs: 1,
+      numberOfOutputs: 0,
+      processorOptions: {
+        numChannels: nc,
+        capacityFrames: cap,
+        sharedStorage: this.sharedStorage,
+        sharedWritePos: this.sharedWritePos,
+        sharedReadPos: this.sharedReadPos,
+        signal: this.sharedSignal
+      }
+    });
+    this.sourceNode.connect(this.workletNode);
+    this.setState(
+      "recording"
+      /* RECORDING */
+    );
+    this.log(`Capture started (SAB ring, ${nc}ch, capacity=${cap} frames)`);
+  }
+  /**
+   * Pause capture: disconnect the mic from the worklet so the ring stops filling (the
+   * worker then has nothing to encode). The graph + SAB are kept for resume.
+   */
+  pause() {
+    if (this.state !== "recording") {
+      return;
+    }
+    if (this.sourceNode && this.workletNode) {
+      try {
+        this.sourceNode.disconnect(this.workletNode);
+      } catch {
+      }
+    }
+    this.setState(
+      "paused"
+      /* PAUSED */
+    );
+    this.log("Microphone paused");
+  }
+  /**
+   * Resume capture (reconnect the mic to the worklet).
+   */
+  resume() {
+    if (this.state !== "paused") {
+      return;
+    }
+    if (this.sourceNode && this.workletNode) {
+      this.sourceNode.connect(this.workletNode);
+      this.setState(
+        "recording"
+        /* RECORDING */
+      );
+      this.log("Microphone resumed");
+    }
+  }
+  /**
+   * Enable or disable the mic tracks. Disabling makes the source emit silent samples —
+   * the capture graph + worker encoder stay alive, so MOQ frames keep flowing as Opus
+   * DTX comfort-noise.
+   */
+  setMicEnabled(enabled) {
+    if (!this.mediaStream) return;
+    for (const track of this.mediaStream.getAudioTracks()) {
+      track.enabled = enabled;
+    }
+  }
+  /**
+   * Stop capturing: tear down the capture graph (keeps the media stream so it can be
+   * restarted). The SAB views are released; the worker should be told to `stopCapture`.
+   */
+  stop() {
+    if (this.workletNode) {
+      this.workletNode.disconnect();
+      this.workletNode = null;
+    }
+    if (this.sourceNode) {
+      this.sourceNode.disconnect();
+      this.sourceNode = null;
+    }
+    if (this.audioContext) {
+      void this.audioContext.close();
+      this.audioContext = null;
+    }
+    this.sharedStorage = null;
+    this.sharedWritePos = null;
+    this.sharedReadPos = null;
+    this.sharedSignal = null;
+    if (this.state !== "idle" && this.state !== "error") {
+      this.setState(
+        "ready"
+        /* READY */
+      );
+    }
+  }
+  /**
+   * Release all resources (tears down the graph and stops the mic tracks).
+   */
+  dispose() {
+    this.stop();
+    if (this.mediaStream) {
+      for (const track of this.mediaStream.getTracks()) {
+        track.stop();
+      }
+      this.mediaStream = null;
+    }
+    this.setState(
+      "idle"
+      /* IDLE */
+    );
+  }
+  setState(state) {
+    this.state = state;
+  }
+}
+function getAudioCapabilities() {
+  const webCodecs = isWebCodecsOpusSupported();
+  const mediaRecorder = isOpusSupported();
+  let preferredEncoder = "none";
+  if (webCodecs) {
+    preferredEncoder = "webcodecs";
+  } else if (mediaRecorder) {
+    preferredEncoder = "mediarecorder";
+  }
+  return {
+    getUserMedia: !!(navigator.mediaDevices && navigator.mediaDevices.getUserMedia),
+    mediaRecorder: typeof MediaRecorder !== "undefined",
+    opusSupport: mediaRecorder,
+    bestMimeType: getBestOpusMimeType(),
+    webCodecs,
+    preferredEncoder
+  };
 }
 class TrackPublisher {
   trackAlias;
@@ -4499,81 +4487,80 @@ class MoqTransportAdapter {
   }
 }
 export {
-  buildCaptureWorkletCode as $,
+  buildClientSetup as $,
   AnnouncementError as A,
-  BluetoothMicDefaultError as B,
+  MoqMessageType as B,
   CAPTURE_PROCESSOR_NAME as C,
-  MoqMessageType as D,
+  MoqRole as D,
   EntitySubscriber as E,
-  MoqRole as F,
-  MoqTransportAdapter as G,
-  PLAYOUT_TUNING as H,
+  MoqTransportAdapter as F,
+  PLAYOUT_TUNING as G,
+  PanaudiaMoqClient as H,
   InvalidStateError as I,
   JitterBufferCore as J,
-  PanaudiaMoqClient as K,
-  PanaudiaTrackType as L,
+  PanaudiaTrackType as K,
+  ProtocolError as L,
   MoqClientError as M,
-  ProtocolError as N,
-  StateTrackPublisher as O,
+  StateTrackPublisher as N,
+  StereoMeterCore as O,
   PLAYOUT_PROCESSOR_NAME as P,
-  StereoMeterCore as Q,
-  SubscriptionError as R,
+  SubscriptionError as Q,
+  TrackPublisher as R,
   StateSubscriber as S,
   TimeoutError as T,
-  TrackPublisher as U,
-  aframeToPanaudia as V,
+  aframeToPanaudia as U,
+  ambisonicToWebglPosition as V,
   WebTransportNotSupportedError as W,
-  ambisonicToWebglPosition as X,
-  ambisonicToWebglRotation as Y,
-  babylonToPanaudia as Z,
-  buildAnnounce as _,
+  ambisonicToWebglRotation as X,
+  babylonToPanaudia as Y,
+  buildAnnounce as Z,
+  buildCaptureWorkletCode as _,
   AttributesSubscriber as a,
-  buildClientSetup as a0,
-  buildObjectDatagram as a1,
-  buildPlayoutWorkletCode as a2,
-  buildSubscribe as a3,
-  buildUnannounce as a4,
-  buildUnsubscribe as a5,
-  captureCapacityFrames as a6,
-  computeJitterCapacity as a7,
-  createCaptureWorkletUrl as a8,
-  createPlayoutWorkletUrl as a9,
-  parseSubscribeOk as aA,
-  pixiToPanaudia as aB,
-  playcanvasToPanaudia as aC,
-  probeOutputDeviceSampleRate as aD,
-  threejsToPanaudia as aE,
-  unityToPanaudia as aF,
-  unrealToPanaudia as aG,
-  webglToAmbisonicPosition as aH,
-  webglToAmbisonicRotation as aI,
-  wrapError as aJ,
-  decodeBytes as aa,
-  decodeString as ab,
-  encodeBytes as ac,
-  encodeString as ad,
-  encodeVarint as ae,
-  generateTrackNamespace as af,
-  getAudioCapabilities as ag,
-  getAudioPlaybackCapabilities as ah,
-  getBestOpusMimeType as ai,
-  getMoqErrorMessage as aj,
-  getWebTransportSupport as ak,
-  isAudioPlaybackSupported as al,
-  isOpusSupported as am,
-  isWebTransportSupported as an,
-  panaudiaToAframe as ao,
-  panaudiaToBabylon as ap,
-  panaudiaToPixi as aq,
-  panaudiaToPlaycanvas as ar,
-  panaudiaToThreejs as as,
-  panaudiaToUnity as at,
-  panaudiaToUnreal as au,
-  parseAnnounceError as av,
-  parseAnnounceOk as aw,
-  parseMessageType as ax,
-  parseServerSetup as ay,
-  parseSubscribeError as az,
+  buildObjectDatagram as a0,
+  buildPlayoutWorkletCode as a1,
+  buildSubscribe as a2,
+  buildUnannounce as a3,
+  buildUnsubscribe as a4,
+  captureCapacityFrames as a5,
+  computeJitterCapacity as a6,
+  createCaptureWorkletUrl as a7,
+  createPlayoutWorkletUrl as a8,
+  decodeBytes as a9,
+  pixiToPanaudia as aA,
+  playcanvasToPanaudia as aB,
+  probeOutputDeviceSampleRate as aC,
+  threejsToPanaudia as aD,
+  unityToPanaudia as aE,
+  unrealToPanaudia as aF,
+  webglToAmbisonicPosition as aG,
+  webglToAmbisonicRotation as aH,
+  wrapError as aI,
+  decodeString as aa,
+  encodeBytes as ab,
+  encodeString as ac,
+  encodeVarint as ad,
+  generateTrackNamespace as ae,
+  getAudioCapabilities as af,
+  getAudioPlaybackCapabilities as ag,
+  getBestOpusMimeType as ah,
+  getMoqErrorMessage as ai,
+  getWebTransportSupport as aj,
+  isAudioPlaybackSupported as ak,
+  isOpusSupported as al,
+  isWebTransportSupported as am,
+  panaudiaToAframe as an,
+  panaudiaToBabylon as ao,
+  panaudiaToPixi as ap,
+  panaudiaToPlaycanvas as aq,
+  panaudiaToThreejs as ar,
+  panaudiaToUnity as as,
+  panaudiaToUnreal as at,
+  parseAnnounceError as au,
+  parseAnnounceOk as av,
+  parseMessageType as aw,
+  parseServerSetup as ax,
+  parseSubscribeError as ay,
+  parseSubscribeOk as az,
   AudioDecoderNotSupportedError as b,
   AudioEncodingError as c,
   decodeVarint as d,

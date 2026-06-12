@@ -2,17 +2,30 @@
 
 ## `resolveServer(ticket, options?)`
 
-Resolves a server URL from the Panaudia gateway.
+Resolves the server URL and transport from the Panaudia gateway. This is
+the single point of transport selection — pass the result to the
+`PanaudiaClient` constructor so the client uses the transport the URL was
+resolved for.
 
 ```typescript
-const url = await resolveServer(ticket);
-const url = await resolveServer(ticket, { protocol: 'webrtc' });
-const url = await resolveServer(ticket, { gatewayUrl: 'https://dev.panaudia.com/gateway' });
+// Auto-detect (default): MOQ if WebTransport is supported, else WebRTC
+const server = await resolveServer(ticket);
+// → { serverUrl: 'quic://...', transport: 'moq' | 'webrtc' }
+const client = new PanaudiaClient({ ...server, ticket });
+
+// Force a transport — the gateway returns the matching server URL
+const webrtcServer = await resolveServer(ticket, { transport: 'webrtc' });
+
+// Custom gateway (dev)
+const devServer = await resolveServer(ticket, { gatewayUrl: 'https://dev.panaudia.com/gateway' });
 ```
 
 **Options:**
-- `protocol` — `'auto'` | `'moq'` | `'webrtc'` (default: `'auto'`)
+- `transport` — `'auto'` | `'moq'` | `'webrtc'` (default: `'auto'`: MOQ if WebTransport is supported, else WebRTC)
 - `gatewayUrl` — Gateway URL (default: `'https://panaudia.com/gateway'`)
+
+**Returns:** `ResolvedServer` — `{ serverUrl, transport }`, where `transport`
+is the concrete transport (`'auto'` is resolved before the gateway call).
 
 ## `PanaudiaClient`
 
@@ -20,9 +33,9 @@ const url = await resolveServer(ticket, { gatewayUrl: 'https://dev.panaudia.com/
 
 ```typescript
 new PanaudiaClient({
-  serverUrl: string,           // From resolveServer() or hardcoded
+  serverUrl: string,           // From resolveServer()'s serverUrl, or hardcoded for dev
   ticket: string,              // JWT authentication token
-  transport?: 'auto' | 'moq' | 'webrtc',  // Default: 'auto'
+  transport?: 'auto' | 'moq' | 'webrtc',  // Pass resolveServer()'s transport; default 'auto' for hardcoded URLs
   initialPosition?: Position,  // Default: { x: 0.5, y: 0.5, z: 0.5 }
   initialRotation?: Rotation,  // Default: { yaw: 0, pitch: 0, roll: 0 }
   presence?: boolean,          // Enable entity state/attribute events. Default: true
@@ -77,7 +90,7 @@ Sample rate is fixed at 48 kHz and channel count is left to the browser.
 
 Audio capture and playback start automatically on `connect()`.
 
-**Bluetooth mic handling:** If no `microphoneId` is set and the system default mic is Bluetooth, `connect()` throws a `BluetoothMicDefaultError` (code `BLUETOOTH_MIC_DEFAULT`) instead of connecting with degraded audio. The error includes `availableDevices` — an array of all mics with their `type` classification — so the app can immediately show a mic picker. If a Bluetooth mic is explicitly chosen via `microphoneId`, the client connects normally but emits a `BLUETOOTH_MIC` warning event.
+**Bluetooth mic handling:** Advisory only — `connect()` never blocks on it and never opens a device to check (opening one is itself what flips a Bluetooth headset into mono HFP). If the explicitly chosen `microphoneId` is Bluetooth, the client emits a `BLUETOOTH_MIC` warning; if no `microphoneId` is set and the system default mic looks Bluetooth (Chrome exposes this; Firefox/Safari don't), it emits `BLUETOOTH_MIC_DEFAULT`. An actual stereo→mono collapse is detected post-connect via `probeOutputDeviceSampleRate()` / `getStereoDiagnostics()`.
 
 | Method | Description |
 |--------|-------------|
@@ -181,7 +194,8 @@ client.on('attributeTreeRemove', (uuid: string) => { ... });
 
 | Code | Meaning |
 |------|---------|
-| `BLUETOOTH_MIC` | A Bluetooth microphone is in use. Stereo audio may be reduced to mono. The `details` field contains `{ deviceId, label }`. |
+| `BLUETOOTH_MIC` | The explicitly chosen microphone (`microphoneId`) is Bluetooth. Stereo audio may be reduced to mono. The `details` field contains `{ deviceId, label }`. |
+| `BLUETOOTH_MIC_DEFAULT` | No `microphoneId` was set and the system default microphone looks Bluetooth — the headset may switch to mono (HFP) when the mic starts. The `details` field contains `{ label }`. |
 
 #### Raw value events
 
@@ -347,13 +361,6 @@ enum ConnectionState {
 
 interface ErrorEvent { code: string | number; message: string; details?: unknown; }
 interface WarningEvent { code: string; message: string; details?: unknown; }
-
-// Thrown when default mic is Bluetooth and no explicit microphoneId was set.
-// Includes the full device list so the app can show a mic picker.
-class BluetoothMicDefaultError extends MoqClientError {
-  availableDevices: Array<{ deviceId: string; label: string; type: MicrophoneType }>;
-  // code: 'BLUETOOTH_MIC_DEFAULT'
-}
 ```
 
 ## Direct MOQ Access
@@ -384,8 +391,8 @@ This provides access to MOQ protocol utilities, wire format encoders/decoders, a
 
 | Old (`panaudia-sdk`) | New (`@panaudia/client`) |
 |------|------|
-| `connect(ticket, ...)` | `resolveServer(ticket)` + `new PanaudiaClient({...}).connect()` |
-| `connectDirect(...)` | `new PanaudiaClient({ serverUrl: '...' }).connect()` |
+| `connect(ticket, ...)` | `const server = await resolveServer(ticket)` + `new PanaudiaClient({ ...server, ticket }).connect()` |
+| `connectDirect(...)` | `new PanaudiaClient({ serverUrl: '...', transport: 'moq' }).connect()` |
 | `startMicrophone()` / `startPlayback()` | Automatic on `connect()` |
 | `move(pos, rot)` | Convert with framework function + `client.setPose(...)` |
 | `moveAmbisonic(coords)` | `client.setPose({ position, rotation })` |

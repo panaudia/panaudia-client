@@ -72,8 +72,8 @@ Save as `index.html`:
       throw new Error('No ticket');
     }
 
-    const serverUrl = await resolveServer(ticket);
-    const client = new PanaudiaClient({ serverUrl, ticket });
+    const server = await resolveServer(ticket); // { serverUrl, transport }
+    const client = new PanaudiaClient({ ...server, ticket });
 
     document.getElementById('status').textContent = 'Connecting...';
     await client.connect();
@@ -134,7 +134,7 @@ client.setPose({ position: { x: 0.6, y: 0.5, z: 0.5 }, rotation: { yaw: 0, pitch
 ## What's happening
 
 1. **Tickets** authenticate each user with the Space using signed JWTs
-2. **`resolveServer()`** looks up the correct server URL from the Panaudia gateway
+2. **`resolveServer()`** picks the transport (MOQ if the browser supports WebTransport, else WebRTC) and looks up the matching server URL from the Panaudia gateway
 3. **`PanaudiaClient`** connects via MOQ (WebTransport), captures your microphone, and plays back spatialized audio from other participants
 4. **`setPose()`** tells the server where you are — it uses this to compute binaural spatialization
 

@@ -34,14 +34,17 @@ import { createCommandsAPI, type CommandsAPI } from './commands.js';
 export type TransportType = 'moq' | 'webrtc';
 
 export interface PanaudiaClientConfig {
-  /** Server URL (from resolveServer() or hardcoded for dev). */
+  /** Server URL (from resolveServer()'s `serverUrl` or hardcoded for dev). */
   serverUrl: string;
   /** JWT authentication token. Omit for tokenless (dev/sandbox) connections —
    *  the client will generate a UUID and pass it in the connection URL. The
    *  server must be running with PANAUDIA_UNTICKETED=1 for this to succeed. */
   ticket?: string;
-  /** Transport to use. Default: 'auto' (MOQ if supported, else WebRTC). */
-  transport?: 'auto' | 'moq' | 'webrtc';
+  /** Transport to use. When the URL came from resolveServer(), pass the
+   *  `transport` it returned so the client matches what the URL was
+   *  resolved for (`new PanaudiaClient({ ...server, ticket })`). Default:
+   *  'auto' (MOQ if supported, else WebRTC) — for hardcoded dev URLs. */
+  transport?: 'auto' | TransportType;
   /** Initial position in Panaudia coordinates (0-1 range). */
   initialPosition?: Position;
   /** Initial rotation in degrees. */

@@ -8,8 +8,8 @@
  * ```typescript
  * import { PanaudiaClient, resolveServer } from '@panaudia/client';
  *
- * const serverUrl = await resolveServer(ticket);
- * const client = new PanaudiaClient({ serverUrl, ticket });
+ * const server = await resolveServer(ticket); // { serverUrl, transport }
+ * const client = new PanaudiaClient({ ...server, ticket });
  * await client.connect();
  * ```
  *
@@ -27,10 +27,9 @@ export type { PanaudiaPose, Vec3Pose, FRotator, UnrealPose, Vec2, PixiPose, } fr
 export { ENTITY_INFO3_SIZE, uuidToBytes, bytesToUuid, entityInfo3ToBytes, entityInfo3FromBytes, createEntityInfo3, isValidUuid, } from './shared/encoding.js';
 export { selectBestMicrophone, classifyByLabel, micPermissionGranted } from './shared/microphone-selection.js';
 export type { MicrophoneType, ClassifiedMicrophone, MicrophoneSelectionResult, } from './shared/microphone-selection.js';
-export { BluetoothMicDefaultError } from './moq/audio-publisher.js';
 export { isWebTransportSupported, getWebTransportSupport } from './moq/connection.js';
 export { resolveServer } from './gateway.js';
-export type { ResolveServerOptions } from './gateway.js';
+export type { ResolveServerOptions, ResolvedServer } from './gateway.js';
 export type { Transport, TransportConfig, AudioCaptureConfig, AudioPlaybackConfig, StereoDiagnostics } from './transport.js';
 export { probeOutputDeviceSampleRate } from './moq/audio-player.js';
 export type { StereoMeterReport } from './moq/stereo-meter-core.js';

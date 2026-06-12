@@ -32,7 +32,7 @@ export { MoqMessageType, MoqRole, MoqFilterType, MoqForwardingPreference, MoqErr
 export { encodeVarint, decodeVarint, encodeString, decodeString, encodeBytes, decodeBytes, MessageBuilder, buildClientSetup, buildSubscribe, buildAnnounce, buildUnsubscribe, buildUnannounce, buildObjectDatagram, parseMessageType, parseServerSetup, parseSubscribeOk, parseSubscribeError, parseAnnounceOk, parseAnnounceError, parseObjectDatagram, MOQ_TRANSPORT_VERSION, } from './moq-transport.js';
 export type { ParsedServerSetup, ParsedSubscribeOk, ParsedSubscribeError, ParsedAnnounceOk, ParsedAnnounceError, ParsedObjectDatagram, } from './moq-transport.js';
 export { MoqClientError, WebTransportNotSupportedError, ConnectionError, AuthenticationError, JwtParseError, ProtocolError, SubscriptionError, AnnouncementError, InvalidStateError, TimeoutError, getMoqErrorMessage, wrapError, } from './errors.js';
-export { AudioPublisher, AudioPublisherState, isOpusSupported, getBestOpusMimeType, getAudioCapabilities, AudioPermissionError, AudioEncodingError, AudioNotSupportedError, BluetoothMicDefaultError, } from './audio-publisher.js';
+export { AudioPublisher, AudioPublisherState, isOpusSupported, getBestOpusMimeType, getAudioCapabilities, AudioPermissionError, AudioEncodingError, AudioNotSupportedError, } from './audio-publisher.js';
 export type { AudioPublisherConfig, AudioFrame, AudioFrameHandler, } from './audio-publisher.js';
 export { TrackPublisher, AudioTrackPublisher, StateTrackPublisher, } from './track-publisher.js';
 export type { TrackPublisherConfig, TrackPublisherStats, } from './track-publisher.js';

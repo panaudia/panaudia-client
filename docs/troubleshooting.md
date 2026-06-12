@@ -72,17 +72,13 @@ The TypeScript SDK uses MOQ (WebTransport) by default and falls back to WebRTC a
 | Firefox 114+ | Yes | — |
 | Safari 18+ | No | WebRTC (automatic) |
 
-If you need to force a specific transport:
+If you need to force a specific transport, tell `resolveServer` — it
+returns the matching server URL and transport for the constructor:
 
 ```typescript
 // Force WebRTC (e.g. for Safari testing in Chrome)
-const client = new PanaudiaClient({ serverUrl, ticket, transport: 'webrtc' });
-```
-
-For the WebRTC fallback, `resolveServer` needs the protocol hint:
-
-```typescript
-const serverUrl = await resolveServer(ticket, { protocol: 'webrtc' });
+const server = await resolveServer(ticket, { transport: 'webrtc' });
+const client = new PanaudiaClient({ ...server, ticket });
 ```
 
 ## Self-Hosted Server Issues

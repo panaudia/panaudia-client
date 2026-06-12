@@ -166,7 +166,6 @@ export {
   AudioPermissionError,
   AudioEncodingError,
   AudioNotSupportedError,
-  BluetoothMicDefaultError,
 } from './audio-publisher.js';
 
 export type {

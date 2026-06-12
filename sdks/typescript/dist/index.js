@@ -1,7 +1,7 @@
 import { a as ConnectionState, c as createEntityInfo3 } from "./topic-merger.js";
 import { E, T, b, f, g, h, u } from "./topic-merger.js";
-import { an as isWebTransportSupported, G as MoqTransportAdapter } from "./moq-transport-adapter.js";
-import { B, V, X, Y, Z, ak, ao, ap, aq, ar, as, at, au, aB, aC, aD, aE, aF, aG, aH, aI } from "./moq-transport-adapter.js";
+import { am as isWebTransportSupported, F as MoqTransportAdapter } from "./moq-transport-adapter.js";
+import { U, V, X, Y, aj, an, ao, ap, aq, ar, as, at, aA, aB, aC, aD, aE, aF, aG, aH } from "./moq-transport-adapter.js";
 import { WebRtcTransport } from "./webrtc/index.js";
 const BLUETOOTH_KEYWORDS = [
   "bluetooth",
@@ -212,11 +212,11 @@ async function selectBestMicrophone(debug = false) {
 const DEFAULT_GATEWAY_URL = "https://panaudia.com/gateway";
 async function resolveServer(ticket, options) {
   const gatewayUrl = options?.gatewayUrl ?? DEFAULT_GATEWAY_URL;
-  let protocol = options?.protocol ?? "auto";
-  if (protocol === "auto") {
-    protocol = isWebTransportSupported() ? "moq" : "webrtc";
+  let transport = options?.transport ?? "auto";
+  if (transport === "auto") {
+    transport = isWebTransportSupported() ? "moq" : "webrtc";
   }
-  const url = `${gatewayUrl}?ticket=${encodeURIComponent(ticket)}&protocol=${encodeURIComponent(protocol)}`;
+  const url = `${gatewayUrl}?ticket=${encodeURIComponent(ticket)}&protocol=${encodeURIComponent(transport)}`;
   let response;
   try {
     response = await fetch(url);
@@ -242,7 +242,7 @@ async function resolveServer(ticket, options) {
       `Gateway resolution failed: ${body.message ?? "unknown error"}`
     );
   }
-  return body.url;
+  return { serverUrl: body.url, transport };
 }
 const byteToHex = [];
 for (let i = 0; i < 256; ++i) {
@@ -927,42 +927,41 @@ class PanaudiaClient {
   }
 }
 export {
-  B as BluetoothMicDefaultError,
   ConnectionState,
   E as ENTITY_INFO3_SIZE,
   PanaudiaClient,
   SingleRecordTree,
   T as TopicMerger,
   TopicTree,
-  V as aframeToPanaudia,
-  X as ambisonicToWebglPosition,
-  Y as ambisonicToWebglRotation,
-  Z as babylonToPanaudia,
+  U as aframeToPanaudia,
+  V as ambisonicToWebglPosition,
+  X as ambisonicToWebglRotation,
+  Y as babylonToPanaudia,
   b as bytesToUuid,
   classifyByLabel,
   createEntityInfo3,
   f as entityInfo3FromBytes,
   g as entityInfo3ToBytes,
-  ak as getWebTransportSupport,
+  aj as getWebTransportSupport,
   h as isValidUuid,
   isWebTransportSupported,
   micPermissionGranted,
-  ao as panaudiaToAframe,
-  ap as panaudiaToBabylon,
-  aq as panaudiaToPixi,
-  ar as panaudiaToPlaycanvas,
-  as as panaudiaToThreejs,
-  at as panaudiaToUnity,
-  au as panaudiaToUnreal,
-  aB as pixiToPanaudia,
-  aC as playcanvasToPanaudia,
-  aD as probeOutputDeviceSampleRate,
+  an as panaudiaToAframe,
+  ao as panaudiaToBabylon,
+  ap as panaudiaToPixi,
+  aq as panaudiaToPlaycanvas,
+  ar as panaudiaToThreejs,
+  as as panaudiaToUnity,
+  at as panaudiaToUnreal,
+  aA as pixiToPanaudia,
+  aB as playcanvasToPanaudia,
+  aC as probeOutputDeviceSampleRate,
   resolveServer,
   selectBestMicrophone,
-  aE as threejsToPanaudia,
-  aF as unityToPanaudia,
-  aG as unrealToPanaudia,
+  aD as threejsToPanaudia,
+  aE as unityToPanaudia,
+  aF as unrealToPanaudia,
   u as uuidToBytes,
-  aH as webglToAmbisonicPosition,
-  aI as webglToAmbisonicRotation
+  aG as webglToAmbisonicPosition,
+  aH as webglToAmbisonicRotation
 };
