@@ -32,12 +32,7 @@ In your application server:
 
 ## Self Hosted Panaudia Space
 
-You can self-host a Panaudia Space server, you will need a licence key from Panaudia Cloud. 
-Panaudia Space is free for many non-commercial uses.
-
-1. **Sign up** at [panaudia.com](https://panaudia.com/register)
-2. **Download the latest release** of the Panaudia Space server from your Organisation's web page.
-3. **Install and run the server** see [Panaudia Space](panaudia-space.md)
+You can build and host Panaudia yourself. The code is available from [github.com/panaudia/panaudia](https://github.com/panaudia/panaudia)
 
 
 In your application server:
@@ -46,4 +41,4 @@ Tickets are optional for self-hosted Spaces. If you don't need to authenticate u
 you can skip ticket creation steps 4 - 5 and connect directly to the Space without them.
 
 4. **Create a public/private key pair** for signing tickets (see [Tickets](tickets.md))
-5. **Add the public key to the Panaudia Space**  see [Panaudia Space](panaudia-space.md)
+5. **Add the public key to the Panaudia Space**  
