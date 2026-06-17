@@ -1,14 +1,14 @@
 
 # PanaudiaPresence Plugin
 
-Companion plugin for **Panaudia** that visualises remote participants in the Unreal Engine world. It receives raw data track messages from the Panaudia audio component and handles all participant lifecycle: spawning, positioning, and cleanup.
+Companion plugin for **Panaudia** that visualises remote participants in the Unreal Engine world. It consumes node state and merged attributes from the Panaudia audio component and handles all participant lifecycle: spawning, positioning, and cleanup.
 
 ## Overview
 
 The Panaudia audio plugin handles transport and audio. It deliberately knows nothing about participant semantics — that's game logic. PanaudiaPresence bridges the gap:
 
 - Parses **NodeInfo3** binary state messages (UUID, position, rotation, volume, gone flag)
-- Passes **attributes** JSON through as an opaque string — game code parses application-specific fields
+- Consumes **attributes** as merged per-key cache operations and reconstructs a per-participant JSON object, passed to game code as an opaque string — game code parses application-specific fields
 - Waits for both state and attributes before spawning (no half-initialised actors)
 - Smooth interpolation of participant movement
 - Destroys actors when participants leave (gone flag)
@@ -48,7 +48,7 @@ PanaudiaPresence = CreateDefaultSubobject<UPanaudiaPresenceComponent>(TEXT("Pana
 That's it. In BeginPlay the presence component automatically:
 1. Finds the `UPanaudiaAudioComponent` on the same actor
 2. Sets `bEnablePresenceTracks = true` so the audio component subscribes to state/attributes tracks
-3. Binds to `OnDataTrackReceived` for incoming data
+3. Binds to `OnDataTrackReceived` for binary node state, and to `OnAttributeValuesChanged` / `OnAttributesRemoved` for merged attribute updates
 
 ## Configuration
 
@@ -130,11 +130,13 @@ All delegates fire on the game thread.
 | 40-43 | float32 LE | Volume |
 | 44-47 | int32 LE | Gone flag (non-zero = participant left) |
 
-### Attributes JSON
+### Attributes
 
-The plugin extracts only the `uuid` field from the attributes JSON (for participant identification and the two-stage spawn logic). The full JSON string is passed through to game code via `FParticipantSpawnInfo::AttributesJson`. Application-specific fields (name, colours, masks, etc.) are the game's responsibility to parse.
+Attributes arrive from the audio component as merged per-key cache operations on `OnAttributeValuesChanged` / `OnAttributesRemoved` — each key is of the form `"{uuid}.{field}"` with a JSON-serialised value (see the [Panaudia plugin docs](../panaudia/docs.md)). The presence component groups these by `uuid`, reconstructs a per-participant JSON object, and feeds it through the two-stage spawn logic.
 
-Example attributes JSON:
+The reconstructed JSON string is passed to game code via `FParticipantSpawnInfo::AttributesJson` (and kept current on the participant thereafter). A `"uuid"` field is injected so the object matches the shape game code saw previously. Application-specific fields (name, colours, masks, etc.) are the game's responsibility to parse.
+
+Example reconstructed attributes JSON:
 ```json
 {
   "uuid": "550e8400-e29b-41d4-...",

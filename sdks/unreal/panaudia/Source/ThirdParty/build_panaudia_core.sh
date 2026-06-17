@@ -51,6 +51,9 @@ echo "Destination: $DEST"
 
 # Build in the source directory — static build (for editor / dylib consumers)
 cd "$CORE_SRC"
+# Wipe any stale CMake cache: a build/ generated under a different source path
+# (e.g. after a repo rename) makes cmake abort with a cache/source mismatch.
+rm -rf build
 cmake -B build -DCMAKE_BUILD_TYPE=Release -DCMAKE_OSX_ARCHITECTURES=arm64
 cmake --build build -j$(sysctl -n hw.ncpu)
 

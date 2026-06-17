@@ -129,7 +129,40 @@ DECLARE_DYNAMIC_MULTICAST_DELEGATE_TwoParams(
     const FString&, TrackName,
     const TArray<uint8>&, Data);
 ```
-Fired on the game thread when data arrives on `state_output` or `attributes_output` tracks. `TrackName` is either `"state_output"` or `"attributes_output"`. `Data` contains the raw bytes.
+Fired on the game thread when raw data arrives on an inbound data track. `Data` contains the raw bytes. This fires for:
+
+- `"state_output"` — binary node-state (position/rotation/volume).
+- `"attributes_output"` — **only** as a fall-through for payloads that are not cache envelopes. Attribute cache envelopes are decoded and merged internally and surfaced via `OnAttributeValuesChanged` / `OnAttributesRemoved` below — they do **not** fire this delegate.
+
+#### OnAttributeValuesChanged
+```cpp
+DECLARE_DYNAMIC_MULTICAST_DELEGATE_OneParam(
+    FOnAttributeValuesChanged,
+    const TArray<FPanaudiaAttributeValue>&, Values);
+```
+Fired on the game thread once per attribute cache envelope, after the component decodes it and merges each per-key op into its cache (highest op id per key wins). `Values` holds the keys whose value was newer than what was cached — added or updated. A single op arrives as a one-element array; a batch (e.g. a node-join) arrives as one broadcast so it can be handled atomically. Each `FPanaudiaAttributeValue` has a `Key` of the form `"{uuid}.{field}"` and a JSON-serialised `Value`.
+
+#### OnAttributesRemoved
+```cpp
+DECLARE_DYNAMIC_MULTICAST_DELEGATE_OneParam(
+    FOnAttributesRemoved,
+    const TArray<FString>&, Keys);
+```
+Fired on the game thread once per envelope with the keys whose tombstone beat the cached entry (e.g. a node leaving the Space). `Keys` are of the form `"{uuid}.{field}"`, or a bare `"{uuid}"` when the whole node is removed.
+
+### Attribute pull API
+
+One-shot queries against the merged attribute cache, for code that prefers polling over the delegates above.
+
+```cpp
+bool GetAttribute(const FString& Key, FString& OutValue) const;
+TArray<FPanaudiaAttributeValue> GetAttributesForNode(const FString& InNodeId) const;
+TArray<FPanaudiaAttributeValue> GetAllAttributes() const;
+```
+
+- `GetAttribute` — look up a single `"{uuid}.{field}"` key; returns false if absent.
+- `GetAttributesForNode` — every cached key/value for one node (prefix match on `"{uuid}."`).
+- `GetAllAttributes` — every cached key/value across all nodes.
 
 ---
 
@@ -146,6 +179,17 @@ enum class EPanaudiaConnectionStatus : uint8
     Error
 };
 ```
+
+### FPanaudiaAttributeValue
+```cpp
+struct FPanaudiaAttributeValue
+{
+    FString Key;     // "{uuid}.{field}"
+    FString Value;   // JSON-serialised: "\"alice\"" / "42" / "true" / "null"
+    int64   OpId;    // monotonic op id assigned by the server bouncer
+};
+```
+A single per-key attribute, surfaced by `OnAttributeValuesChanged` and the pull API. `Value` is the JSON-serialised form of the field value — parse it with a JSON reader (or read it directly for primitives).
 
 ### FPanaudiaConnectionConfig
 ```cpp

@@ -10,12 +10,15 @@ public class PanaudiaPresence : ModuleRules
         {
             "Core",
             "CoreUObject",
-            "Engine"
+            "Engine",
+            // Public: the presence component's attribute delegate handlers
+            // reference FPanaudiaAttributeValue (USTRUCT from the Panaudia
+            // module) in its public header.
+            "Panaudia"
         });
 
         PrivateDependencyModuleNames.AddRange(new string[]
         {
-            "Panaudia",
             "Json",
             "JsonUtilities"
         });

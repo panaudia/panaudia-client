@@ -1,9 +1,11 @@
 #pragma once
 
 #include "Components/ActorComponent.h"
+#include "PanaudiaTypes.h"  // FPanaudiaAttributeValue + attribute delegate signatures
 #include "PanaudiaPresenceComponent.generated.h"
 
 class UPanaudiaAudioComponent;
+class FJsonObject;
 
 // Spawn info passed to the spawn delegate
 struct FParticipantSpawnInfo
@@ -126,8 +128,31 @@ private:
     UFUNCTION()
     void OnDataTrackReceived(const FString& TrackName, const TArray<uint8>& Data);
 
+    // Cache-aware attribute path (panaudia-statecache). The audio component
+    // decodes + merges attribute cache envelopes and surfaces them as per-key
+    // ops ("{uuid}.field" -> JSON value) on these delegates. We fold the ops
+    // back into a per-uuid object and feed the existing spawn/pending logic.
+    UFUNCTION()
+    void HandleAttributeValues(const TArray<FPanaudiaAttributeValue>& Values);
+
+    UFUNCTION()
+    void HandleAttributesRemoved(const TArray<FString>& Keys);
+
     void HandleStateData(const TArray<uint8>& Data);
     void HandleAttributesData(const TArray<uint8>& Data);
+
+    // Reconstructed per-uuid attribute objects, accumulated from per-key ops.
+    TMap<FString, TSharedPtr<FJsonObject>> NodeAttributes;
+
+    // Serialise a node's accumulated attributes to a JSON string (with a
+    // "uuid" field injected for backward-compat with AttributesJson consumers).
+    FString SerializeNodeAttributes(const FString& Uuid) const;
+
+    // Route a node's merged attributes JSON through the spawn/pending machinery.
+    void ApplyAttributesForNode(const FString& Uuid, const FString& AttributesJson);
+
+    // Destroy a participant (if spawned) and drop its cached/pending data.
+    void RemoveParticipant(const FString& Uuid);
 
     // Spawn a participant once we have both state and attributes
     void SpawnParticipant(const FString& Uuid, const FVector& Location, const FRotator& Rotation, float Volume, const FString& AttributesJson);

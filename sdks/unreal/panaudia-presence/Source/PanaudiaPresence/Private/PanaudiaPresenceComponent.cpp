@@ -32,7 +32,11 @@ void UPanaudiaPresenceComponent::BeginPlay()
             {
                 AudioComp->bEnablePresenceTracks = true;
                 AudioComp->OnDataTrackReceived.AddDynamic(this, &UPanaudiaPresenceComponent::OnDataTrackReceived);
-                UE_LOG(LogPanaudiaPresence, Log, TEXT("PanaudiaPresence: Bound to OnDataTrackReceived on %s (presence tracks enabled)"), *Owner->GetName());
+                // Attributes now arrive merged on the cache-aware delegates, not
+                // as raw payloads on OnDataTrackReceived. Bind both.
+                AudioComp->OnAttributeValuesChanged.AddDynamic(this, &UPanaudiaPresenceComponent::HandleAttributeValues);
+                AudioComp->OnAttributesRemoved.AddDynamic(this, &UPanaudiaPresenceComponent::HandleAttributesRemoved);
+                UE_LOG(LogPanaudiaPresence, Log, TEXT("PanaudiaPresence: Bound to OnDataTrackReceived + attribute delegates on %s (presence tracks enabled)"), *Owner->GetName());
             }
             else
             {
@@ -53,6 +57,8 @@ void UPanaudiaPresenceComponent::EndPlay(const EEndPlayReason::Type EndPlayReaso
             if (AudioComp)
             {
                 AudioComp->OnDataTrackReceived.RemoveDynamic(this, &UPanaudiaPresenceComponent::OnDataTrackReceived);
+                AudioComp->OnAttributeValuesChanged.RemoveDynamic(this, &UPanaudiaPresenceComponent::HandleAttributeValues);
+                AudioComp->OnAttributesRemoved.RemoveDynamic(this, &UPanaudiaPresenceComponent::HandleAttributesRemoved);
             }
         }
     }
@@ -68,6 +74,7 @@ void UPanaudiaPresenceComponent::EndPlay(const EEndPlayReason::Type EndPlayReaso
     Participants.Empty();
     PendingAttributes.Empty();
     PendingState.Empty();
+    NodeAttributes.Empty();
 
     Super::EndPlay(EndPlayReason);
 }
@@ -366,11 +373,186 @@ void UPanaudiaPresenceComponent::HandleAttributesData(const TArray<uint8>& Data)
 
     UE_LOG(LogPanaudiaPresence, Log, TEXT("PanaudiaPresence: Attributes received for %s"), *Uuid);
 
+    ApplyAttributesForNode(Uuid, JsonString);
+}
+
+// ============================================================================
+// Cache-aware attribute path (panaudia-statecache per-key ops)
+// ============================================================================
+//
+// The audio component decodes + opID-merges the attribute cache envelope and
+// broadcasts per-key ops on the game thread. Keys are "{uuid}.<dotted.field>";
+// values are JSON-serialised ("\"alice\"", "42", "true"). We fold the leaves
+// back into a per-uuid object and reuse the spawn/pending machinery the old
+// raw-JSON path used. Runs on the game thread (the audio component marshals
+// the broadcast via AsyncTask), so touching Participants/spawning is safe.
+
+void UPanaudiaPresenceComponent::HandleAttributeValues(const TArray<FPanaudiaAttributeValue>& Values)
+{
+    TSet<FString> Affected;
+
+    for (const FPanaudiaAttributeValue& V : Values)
+    {
+        FString Uuid, FieldPath;
+        if (!V.Key.Split(TEXT("."), &Uuid, &FieldPath))
+        {
+            // Bare uuid — node is known but carries no field to set.
+            Uuid = V.Key;
+            FieldPath.Empty();
+        }
+        if (Uuid.IsEmpty()) continue;
+        if (!LocalNodeUuid.IsEmpty() && Uuid == LocalNodeUuid) continue;
+
+        TSharedPtr<FJsonObject>& Node = NodeAttributes.FindOrAdd(Uuid);
+        if (!Node.IsValid())
+        {
+            Node = MakeShared<FJsonObject>();
+        }
+
+        if (!FieldPath.IsEmpty())
+        {
+            // Parse the JSON-serialised value. UE's reader wants an object at
+            // the root, so wrap the (possibly scalar) value and unwrap it.
+            const FString Wrapped = FString::Printf(TEXT("{\"v\":%s}"), *V.Value);
+            TSharedPtr<FJsonObject> Holder;
+            TSharedRef<TJsonReader<>> Reader = TJsonReaderFactory<>::Create(Wrapped);
+            if (FJsonSerializer::Deserialize(Reader, Holder) && Holder.IsValid())
+            {
+                TSharedPtr<FJsonValue> Parsed = Holder->TryGetField(TEXT("v"));
+                if (Parsed.IsValid())
+                {
+                    // Walk/create the dotted path under the node, set the leaf.
+                    TArray<FString> Parts;
+                    FieldPath.ParseIntoArray(Parts, TEXT("."));
+                    TSharedPtr<FJsonObject> Cursor = Node;
+                    for (int32 i = 0; i + 1 < Parts.Num(); ++i)
+                    {
+                        const TSharedPtr<FJsonObject>* Child = nullptr;
+                        if (Cursor->TryGetObjectField(Parts[i], Child) && Child && (*Child).IsValid())
+                        {
+                            Cursor = *Child;
+                        }
+                        else
+                        {
+                            TSharedPtr<FJsonObject> NewChild = MakeShared<FJsonObject>();
+                            Cursor->SetObjectField(Parts[i], NewChild);
+                            Cursor = NewChild;
+                        }
+                    }
+                    if (Parts.Num() > 0)
+                    {
+                        Cursor->SetField(Parts.Last(), Parsed);
+                    }
+                }
+            }
+        }
+
+        Affected.Add(Uuid);
+    }
+
+    for (const FString& Uuid : Affected)
+    {
+        ApplyAttributesForNode(Uuid, SerializeNodeAttributes(Uuid));
+    }
+}
+
+void UPanaudiaPresenceComponent::HandleAttributesRemoved(const TArray<FString>& Keys)
+{
+    TSet<FString> Affected;
+
+    for (const FString& Key : Keys)
+    {
+        FString Uuid, FieldPath;
+        if (!Key.Split(TEXT("."), &Uuid, &FieldPath))
+        {
+            Uuid = Key;
+            FieldPath.Empty();
+        }
+        if (Uuid.IsEmpty()) continue;
+        if (!LocalNodeUuid.IsEmpty() && Uuid == LocalNodeUuid) continue;
+
+        if (FieldPath.IsEmpty())
+        {
+            // Whole node removed (e.g. participant departed).
+            NodeAttributes.Remove(Uuid);
+            RemoveParticipant(Uuid);
+            continue;
+        }
+
+        TSharedPtr<FJsonObject>* NodePtr = NodeAttributes.Find(Uuid);
+        if (!NodePtr || !(*NodePtr).IsValid()) continue;
+
+        // Remove the leaf at the dotted path.
+        TArray<FString> Parts;
+        FieldPath.ParseIntoArray(Parts, TEXT("."));
+        TSharedPtr<FJsonObject> Cursor = *NodePtr;
+        bool bPathValid = true;
+        for (int32 i = 0; i + 1 < Parts.Num(); ++i)
+        {
+            const TSharedPtr<FJsonObject>* Child = nullptr;
+            if (Cursor->TryGetObjectField(Parts[i], Child) && Child && (*Child).IsValid())
+            {
+                Cursor = *Child;
+            }
+            else
+            {
+                bPathValid = false;
+                break;
+            }
+        }
+        if (bPathValid && Parts.Num() > 0)
+        {
+            Cursor->RemoveField(Parts.Last());
+        }
+
+        if ((*NodePtr)->Values.Num() == 0)
+        {
+            // Last attribute gone — treat as a departed node.
+            NodeAttributes.Remove(Uuid);
+            RemoveParticipant(Uuid);
+        }
+        else
+        {
+            Affected.Add(Uuid);
+        }
+    }
+
+    for (const FString& Uuid : Affected)
+    {
+        if (FRemoteParticipant* P = Participants.Find(Uuid))
+        {
+            P->AttributesJson = SerializeNodeAttributes(Uuid);
+        }
+    }
+}
+
+FString UPanaudiaPresenceComponent::SerializeNodeAttributes(const FString& Uuid) const
+{
+    // Build an output object: the node's accumulated fields plus a "uuid"
+    // field, preserving the shape AttributesJson consumers saw on the old path.
+    TSharedRef<FJsonObject> Out = MakeShared<FJsonObject>();
+    if (const TSharedPtr<FJsonObject>* NodePtr = NodeAttributes.Find(Uuid))
+    {
+        if ((*NodePtr).IsValid())
+        {
+            Out->Values = (*NodePtr)->Values;  // shallow copy of the field map
+        }
+    }
+    Out->SetStringField(TEXT("uuid"), Uuid);
+
+    FString JsonString;
+    TSharedRef<TJsonWriter<>> Writer = TJsonWriterFactory<>::Create(&JsonString);
+    FJsonSerializer::Serialize(Out, Writer);
+    return JsonString;
+}
+
+void UPanaudiaPresenceComponent::ApplyAttributesForNode(const FString& Uuid, const FString& AttributesJson)
+{
     FRemoteParticipant* P = Participants.Find(Uuid);
     if (P)
     {
         // Update existing participant's attributes
-        P->AttributesJson = JsonString;
+        P->AttributesJson = AttributesJson;
     }
     else
     {
@@ -379,16 +561,32 @@ void UPanaudiaPresenceComponent::HandleAttributesData(const TArray<uint8>& Data)
         if (CachedState)
         {
             // We have both state and attributes — spawn now
-            SpawnParticipant(Uuid, CachedState->Location, CachedState->Rotation, CachedState->Volume, JsonString);
+            SpawnParticipant(Uuid, CachedState->Location, CachedState->Rotation, CachedState->Volume, AttributesJson);
             PendingState.Remove(Uuid);
         }
         else
         {
             // No state yet — cache attributes and wait
-            PendingAttributes.Add(Uuid, JsonString);
+            PendingAttributes.Add(Uuid, AttributesJson);
             UE_LOG(LogPanaudiaPresence, Log, TEXT("PanaudiaPresence: Attributes cached for %s (waiting for state)"), *Uuid);
         }
     }
+}
+
+void UPanaudiaPresenceComponent::RemoveParticipant(const FString& Uuid)
+{
+    if (FRemoteParticipant* Existing = Participants.Find(Uuid))
+    {
+        if (Existing->Actor && IsValid(Existing->Actor))
+        {
+            Existing->Actor->Destroy();
+        }
+        Participants.Remove(Uuid);
+        OnParticipantLeft.Broadcast(Uuid);
+        UE_LOG(LogPanaudiaPresence, Log, TEXT("PanaudiaPresence: Participant removed (attribute tombstone): %s"), *Uuid);
+    }
+    PendingAttributes.Remove(Uuid);
+    PendingState.Remove(Uuid);
 }
 
 // ============================================================================
